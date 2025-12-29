@@ -8,8 +8,9 @@ authors = [
     { name = "Datus Team" }
 ]
 dependencies = [
-    "dbt-metricflow>=0.5.0",
-    "pydantic>=2.0.0",
+    # metricflow will be installed separately and provides all its own dependencies
+    "pydantic>=2.0.0",  # Also needed by this package
+    # "datus>=0.1.0",  # Uncomment if deploying as standalone package
 ]
 
 [project.optional-dependencies]
@@ -29,6 +30,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["datus_semantic_metricflow*"]
+# metricflow is installed separately as a dependency
 
 [tool.black]
 line-length = 100

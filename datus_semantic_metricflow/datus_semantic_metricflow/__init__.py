@@ -5,8 +5,6 @@ from datus_semantic_metricflow.models import (
     MetricDefinition,
     MetricType,
     QueryResult,
-    TimeGranularity,
-    TimeRange,
     ValidationIssue,
     ValidationResult,
 )
@@ -15,12 +13,12 @@ from datus_semantic_metricflow.models import (
 def register():
     """
     Register MetricFlow adapter with Datus semantic adapter registry.
-    
+
     This function is called via entry_point by Datus when discovering adapters.
     """
     # Import Datus registry at runtime to avoid circular dependencies
     from datus.tools.semantic_tools.registry import semantic_adapter_registry
-    
+
     semantic_adapter_registry.register(
         service_type="metricflow",
         adapter_class=MetricFlowAdapter,
@@ -37,8 +35,6 @@ __all__ = [
     "MetricDefinition",
     "MetricType",
     "QueryResult",
-    "TimeGranularity",
-    "TimeRange",
     "ValidationIssue",
     "ValidationResult",
     "register",

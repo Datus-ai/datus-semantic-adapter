@@ -1,18 +1,21 @@
-import asyncio
-import json
-import re
 from typing import Any, Dict, List, Optional
 
 from datus.tools.semantic_tools.base import BaseSemanticAdapter
+from datus.utils.loggings import get_logger
 from datus_semantic_metricflow.config import MetricFlowConfig
 from datus_semantic_metricflow.models import (
     MetricDefinition,
     MetricType,
     QueryResult,
-    TimeRange,
     ValidationIssue,
     ValidationResult,
 )
+
+# Import MetricFlow API
+from metricflow.api.metricflow_client import MetricFlowClient
+from metricflow.configuration.datus_config_handler import DatusConfigHandler
+
+logger = get_logger(__name__)
 
 
 class MetricFlowAdapter(BaseSemanticAdapter):
@@ -24,56 +27,37 @@ class MetricFlowAdapter(BaseSemanticAdapter):
 
     def __init__(self, config: MetricFlowConfig):
         super().__init__(config, service_type="metricflow")
-        self.cli_path = config.cli_path
         self.namespace = config.namespace
-        self.project_root = config.project_root
-        self.environment = config.environment
         self.timeout = config.timeout
 
-    async def _run_command(self, args: List[str]) -> tuple[str, str, int]:
-        """
-        Run MetricFlow CLI command asynchronously.
-
-        Args:
-            args: Command arguments (excluding cli_path)
-
-        Returns:
-            Tuple of (stdout, stderr, returncode)
-        """
-        cmd = [self.cli_path]
-
-        if self.namespace:
-            cmd.extend(["--namespace", self.namespace])
-
-        cmd.extend(args)
-
-        if self.project_root:
-            cmd.extend(["--project-root", self.project_root])
-
-        if self.environment:
-            cmd.extend(["--environment", self.environment])
+        logger.info(f"Initializing MetricFlowAdapter for namespace: {self.namespace}")
 
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
+            # Import MetricFlow utilities
+            from metricflow.configuration.constants import CONFIG_DWH_SCHEMA
+            from metricflow.engine.utils import build_user_configured_model_from_config
+            from metricflow.sql_clients.sql_utils import make_sql_client_from_config
 
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(),
-                timeout=self.timeout,
-            )
+            # Initialize MetricFlow client using DatusConfigHandler
+            config_path = getattr(config, 'config_path', None)
+            self._config_handler = DatusConfigHandler(namespace=self.namespace, config_path=config_path)
 
-            return (
-                stdout.decode("utf-8"),
-                stderr.decode("utf-8"),
-                proc.returncode or 0,
+            # Build client components using the config handler
+            sql_client = make_sql_client_from_config(self._config_handler)
+            user_configured_model = build_user_configured_model_from_config(self._config_handler)
+            schema = self._config_handler.get_value(CONFIG_DWH_SCHEMA)
+
+            # Construct MetricFlowClient directly
+            self.client = MetricFlowClient(
+                sql_client=sql_client,
+                user_configured_model=user_configured_model,
+                system_schema=schema,
             )
-        except asyncio.TimeoutError:
-            raise RuntimeError(f"MetricFlow command timed out after {self.timeout}s")
-        except FileNotFoundError:
-            raise RuntimeError(f"MetricFlow CLI not found at: {self.cli_path}")
+            logger.info("MetricFlowClient initialized successfully")
+
+        except Exception as e:
+            logger.error(f"Failed to initialize MetricFlowAdapter: {e}", exc_info=True)
+            raise
 
     # Semantic Model Interface
 
@@ -105,7 +89,7 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         offset: int = 0,
     ) -> List[MetricDefinition]:
         """
-        List available metrics using 'mf list-metrics'.
+        List available metrics using MetricFlow client.
 
         Args:
             path: Optional subject area filter
@@ -115,12 +99,20 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         Returns:
             List of metric definitions
         """
-        stdout, stderr, returncode = await self._run_command(["list-metrics"])
+        # Get metrics from client (returns Dict[str, Metric])
+        metrics_dict = self.client.list_metrics()
 
-        if returncode != 0:
-            raise RuntimeError(f"Failed to list metrics: {stderr}")
-
-        metrics = self._parse_metrics_output(stdout)
+        # Convert to MetricDefinition list
+        metrics = []
+        for metric in metrics_dict.values():
+            metrics.append(MetricDefinition(
+                name=metric.name,
+                description=metric.description,
+                type=self._map_metric_type(metric.type) if hasattr(metric, 'type') else None,
+                dimensions=[d.name for d in metric.dimensions] if hasattr(metric, 'dimensions') else [],
+                measures=getattr(metric, 'measures', []),
+                metadata={'metric': metric},
+            ))
 
         if path:
             metrics = [m for m in metrics if m.path and m.path[: len(path)] == path]
@@ -133,7 +125,7 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         path: Optional[List[str]] = None,
     ) -> List[str]:
         """
-        Get dimensions for a metric using 'mf list-dimensions'.
+        Get dimensions for a metric using MetricFlow client.
 
         Args:
             metric_name: Name of the metric
@@ -142,34 +134,35 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         Returns:
             List of dimension names
         """
-        stdout, stderr, returncode = await self._run_command(
-            ["list-dimensions", "--metrics", metric_name]
-        )
+        # Get dimensions from client (returns List[Dimension])
+        dimensions = self.client.list_dimensions(metric_names=[metric_name])
 
-        if returncode != 0:
-            raise RuntimeError(f"Failed to get dimensions for {metric_name}: {stderr}")
-
-        return self._parse_dimensions_output(stdout)
+        # Extract dimension names
+        return [d.name for d in dimensions]
 
     async def query_metrics(
         self,
         metrics: List[str],
         dimensions: List[str] = [],
         path: Optional[List[str]] = None,
-        time_range: Optional[TimeRange] = None,
+        time_start: Optional[str] = None,
+        time_end: Optional[str] = None,
+        time_granularity: Optional[str] = None,
         where: Optional[str] = None,
         limit: Optional[int] = None,
         order_by: Optional[List[str]] = None,
         dry_run: bool = False,
     ) -> QueryResult:
         """
-        Query metrics using 'mf query'.
+        Query metrics using MetricFlow client.
 
         Args:
             metrics: List of metric names
             dimensions: List of dimensions to group by
             path: Optional subject area filter
-            time_range: Optional time range
+            time_start: Start time (ISO format like '2024-01-01' or relative like '-7d')
+            time_end: End time (ISO format like '2024-01-31' or relative like 'now')
+            time_granularity: Time granularity for aggregation ('day', 'week', 'month', 'quarter', 'year')
             where: Optional WHERE clause
             limit: Result limit
             order_by: Columns to order by
@@ -178,88 +171,125 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         Returns:
             Query result
         """
-        args = ["query", "--metrics", ",".join(metrics)]
-
-        if dimensions:
-            args.extend(["--group-by", ",".join(dimensions)])
-
-        if time_range:
-            if time_range.start:
-                args.extend(["--start-time", time_range.start])
-            if time_range.end:
-                args.extend(["--end-time", time_range.end])
-            if time_range.granularity:
-                args.extend(["--time-granularity", time_range.granularity.value])
-
-        if where:
-            args.extend(["--where", where])
-
-        if limit:
-            args.extend(["--limit", str(limit)])
-
-        if order_by:
-            args.extend(["--order", ",".join(order_by)])
+        # Prepare query parameters
+        start_time = time_start
+        end_time = time_end
 
         if dry_run:
-            args.append("--explain")
+            # Use explain to get SQL without executing
+            result = self.client.explain(
+                metrics=metrics,
+                dimensions=dimensions,
+                start_time=start_time,
+                end_time=end_time,
+                where=where,
+                limit=limit,
+                order=order_by,
+            )
+            # Return SQL as result
+            sql = result.rendered_sql_without_descriptions.sql_query
+            return QueryResult(
+                columns=["sql"],
+                data=[{"sql": sql}],
+                metadata={"explain": True, "sql": sql},
+            )
+        else:
+            # Execute the query
+            result = self.client.query(
+                metrics=metrics,
+                dimensions=dimensions,
+                start_time=start_time,
+                end_time=end_time,
+                where=where,
+                limit=limit,
+                order=order_by,
+            )
 
-        stdout, stderr, returncode = await self._run_command(args)
-
-        if returncode != 0:
-            raise RuntimeError(f"Query failed: {stderr}")
-
-        return self._parse_query_result(stdout, dry_run)
+            # Convert DataFrame to QueryResult
+            if result.result_df is not None and not result.result_df.empty:
+                columns = result.result_df.columns.tolist()
+                # Convert to list of dicts (QueryResult.data expects List[Dict[str, Any]])
+                data = result.result_df.to_dict(orient="records")
+                return QueryResult(
+                    columns=columns,
+                    data=data,
+                    metadata={"dataflow_plan": result.dataflow_plan},
+                )
+            else:
+                return QueryResult(columns=[], data=[])
 
     async def validate_semantic(self) -> ValidationResult:
         """
-        Validate MetricFlow configuration using 'mf validate-configs'.
+        Validate MetricFlow configuration using full validation pipeline.
+
+        This performs the same validations as 'mf validate-configs':
+        1. Lint validation (YAML format)
+        2. Parsing validation (model building)
+        3. Semantic validation (model semantics)
 
         Returns:
             Validation result
         """
-        stdout, stderr, returncode = await self._run_command(["validate-configs"])
+        from metricflow.engine.utils import path_to_models, model_build_result_from_config
+        from metricflow.model.model_validator import ModelValidator
+        from metricflow.model.parsing.config_linter import ConfigLinter
 
-        valid = returncode == 0
-        issues = []
+        all_issues: List[ValidationIssue] = []
 
-        if not valid:
-            issues = self._parse_validation_errors(stderr)
-
-        return ValidationResult(valid=valid, issues=issues)
-
-    # Parsing helpers
-
-    def _parse_metrics_output(self, output: str) -> List[MetricDefinition]:
-        """
-        Parse 'mf list-metrics' output.
-
-        Expected format: JSON array or table format.
-        """
-        metrics = []
-
+        # Step 1: Lint Validation
         try:
-            data = json.loads(output)
-            if isinstance(data, list):
-                for item in data:
-                    metrics.append(self._metric_from_dict(item))
-            elif isinstance(data, dict) and "metrics" in data:
-                for item in data["metrics"]:
-                    metrics.append(self._metric_from_dict(item))
-        except json.JSONDecodeError:
-            metrics = self._parse_metrics_table(output)
+            model_path = path_to_models(handler=self._config_handler)
+            lint_results = ConfigLinter().lint_dir(model_path)
+            all_issues.extend(self._convert_validation_results(lint_results))
+            if lint_results.has_blocking_issues:
+                return ValidationResult(valid=False, issues=all_issues)
+        except Exception as e:
+            logger.error(f"Lint validation failed: {e}")
+            all_issues.append(ValidationIssue(severity="error", message=f"Lint validation failed: {e}"))
+            return ValidationResult(valid=False, issues=all_issues)
 
-        return metrics
+        # Step 2: Parsing Validation
+        try:
+            parsing_result = model_build_result_from_config(
+                handler=self._config_handler, raise_issues_as_exceptions=False
+            )
+            all_issues.extend(self._convert_validation_results(parsing_result.issues))
+            if parsing_result.issues.has_blocking_issues:
+                return ValidationResult(valid=False, issues=all_issues)
+            user_model = parsing_result.model
+        except Exception as e:
+            logger.error(f"Parsing validation failed: {e}")
+            all_issues.append(ValidationIssue(severity="error", message=f"Parsing validation failed: {e}"))
+            return ValidationResult(valid=False, issues=all_issues)
 
-    def _metric_from_dict(self, data: Dict[str, Any]) -> MetricDefinition:
-        """Convert metric dictionary to MetricDefinition."""
-        return MetricDefinition(
-            name=data.get("name", ""),
-            description=data.get("description"),
-            type=self._map_metric_type(data.get("type")),
-            dimensions=data.get("dimensions", []),
-            measures=data.get("measures", []),
-            metadata=data,
-        )
+        # Step 3: Semantic Validation
+        try:
+            semantic_result = ModelValidator().validate_model(user_model)
+            all_issues.extend(self._convert_validation_results(semantic_result.issues))
+        except Exception as e:
+            logger.error(f"Semantic validation failed: {e}")
+            all_issues.append(ValidationIssue(severity="error", message=f"Semantic validation failed: {e}"))
+            return ValidationResult(valid=False, issues=all_issues)
+
+        has_errors = any(issue.severity == "error" for issue in all_issues)
+        return ValidationResult(valid=not has_errors, issues=all_issues)
+
+    def _convert_validation_results(self, results) -> List[ValidationIssue]:
+        """Convert ModelValidationResults to list of ValidationIssue."""
+        issues = []
+        for error in results.errors:
+            issues.append(ValidationIssue(
+                severity="error",
+                message=str(error),
+            ))
+        for warning in results.warnings:
+            issues.append(ValidationIssue(
+                severity="warning",
+                message=str(warning),
+            ))
+        return issues
+
+    # Helper methods
 
     def _map_metric_type(self, type_str: Optional[str]) -> Optional[MetricType]:
         """Map MetricFlow metric type to MetricType enum."""
@@ -273,105 +303,3 @@ class MetricFlowAdapter(BaseSemanticAdapter):
             "derived": MetricType.DERIVED,
         }
         return type_map.get(type_str.lower())
-
-    def _parse_metrics_table(self, output: str) -> List[MetricDefinition]:
-        """Parse table-format output from list-metrics."""
-        metrics = []
-        lines = output.strip().split("\n")
-
-        for line in lines[2:]:  # Skip header rows
-            line = line.strip()
-            if not line or line.startswith("-"):
-                continue
-
-            parts = re.split(r"\s{2,}", line)
-            if len(parts) >= 1:
-                metrics.append(
-                    MetricDefinition(
-                        name=parts[0].strip(),
-                        description=parts[1].strip() if len(parts) > 1 else None,
-                    )
-                )
-
-        return metrics
-
-    def _parse_dimensions_output(self, output: str) -> List[str]:
-        """Parse 'mf list-dimensions' output."""
-        dimensions = []
-
-        try:
-            data = json.loads(output)
-            if isinstance(data, list):
-                dimensions = [str(d) for d in data]
-            elif isinstance(data, dict) and "dimensions" in data:
-                dimensions = [str(d) for d in data["dimensions"]]
-        except json.JSONDecodeError:
-            lines = output.strip().split("\n")
-            for line in lines[2:]:  # Skip headers
-                line = line.strip()
-                if line and not line.startswith("-"):
-                    parts = re.split(r"\s{2,}", line)
-                    if parts:
-                        dimensions.append(parts[0].strip())
-
-        return dimensions
-
-    def _parse_query_result(self, output: str, dry_run: bool) -> QueryResult:
-        """Parse query result or explain plan."""
-        if dry_run:
-            return QueryResult(
-                columns=["sql"],
-                data=[[output]],
-                metadata={"explain": True, "sql": output},
-            )
-
-        try:
-            data = json.loads(output)
-            if isinstance(data, dict) and "columns" in data and "data" in data:
-                return QueryResult(
-                    columns=data["columns"],
-                    data=data["data"],
-                    metadata=data.get("metadata", {}),
-                )
-        except json.JSONDecodeError:
-            pass
-
-        lines = output.strip().split("\n")
-        if len(lines) < 2:
-            return QueryResult(columns=[], data=[])
-
-        columns = re.split(r"\s{2,}", lines[0].strip())
-        data = []
-
-        for line in lines[2:]:  # Skip header and separator
-            line = line.strip()
-            if line and not line.startswith("-"):
-                row = re.split(r"\s{2,}", line)
-                data.append(row)
-
-        return QueryResult(columns=columns, data=data)
-
-    def _parse_validation_errors(self, error_output: str) -> List[ValidationIssue]:
-        """Parse validation error messages."""
-        issues = []
-        lines = error_output.strip().split("\n")
-
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-
-            severity = "error"
-            if "warning" in line.lower():
-                severity = "warning"
-            elif "info" in line.lower():
-                severity = "info"
-
-            issues.append(
-                ValidationIssue(
-                    severity=severity,
-                    message=line,
-                )
-            )
-
-        return issues
