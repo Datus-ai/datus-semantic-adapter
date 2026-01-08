@@ -1,6 +1,6 @@
 from datus.tools.semantic_tools.base import BaseSemanticAdapter
 from datus_semantic_metricflow.adapter import MetricFlowAdapter
-from datus_semantic_metricflow.config import MetricFlowConfig, SemanticAdapterConfig
+from datus_semantic_metricflow.config import MetricFlowConfig
 from datus_semantic_metricflow.models import (
     MetricDefinition,
     MetricType,
@@ -31,7 +31,6 @@ __all__ = [
     "MetricFlowAdapter",
     "BaseSemanticAdapter",
     "MetricFlowConfig",
-    "SemanticAdapterConfig",
     "MetricDefinition",
     "MetricType",
     "QueryResult",

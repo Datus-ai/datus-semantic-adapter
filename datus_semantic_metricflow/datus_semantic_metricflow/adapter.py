@@ -64,18 +64,18 @@ class MetricFlowAdapter(BaseSemanticAdapter):
     def get_semantic_model(
         self,
         table_name: str,
-        catalog: Optional[str] = None,
-        database: Optional[str] = None,
-        schema: Optional[str] = None,
+        catalog_name: str = "",
+        database_name: str = "",
+        schema_name: str = "",
     ) -> Optional[Dict[str, Any]]:
         """MetricFlow doesn't directly expose semantic models."""
         return None
 
     def list_semantic_models(
         self,
-        catalog: Optional[str] = None,
-        database: Optional[str] = None,
-        schema: Optional[str] = None,
+        catalog_name: str = "",
+        database_name: str = "",
+        schema_name: str = "",
     ) -> List[str]:
         """MetricFlow uses semantic models internally."""
         return []

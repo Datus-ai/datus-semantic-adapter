@@ -1,11 +1,7 @@
 from typing import Optional
-from pydantic import BaseModel, Field
 
-
-class SemanticAdapterConfig(BaseModel):
-    """Base configuration for semantic adapters."""
-    namespace: str = Field(..., description="Namespace for this semantic layer instance")
-    service_type: str = Field(default="metricflow", description="Type of semantic service")
+from datus.tools.semantic_tools import SemanticAdapterConfig
+from pydantic import Field
 
 
 class MetricFlowConfig(SemanticAdapterConfig):
