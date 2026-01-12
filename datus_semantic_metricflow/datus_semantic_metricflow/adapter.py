@@ -4,6 +4,7 @@ from datus.tools.semantic_tools.base import BaseSemanticAdapter
 from datus.utils.loggings import get_logger
 from datus_semantic_metricflow.config import MetricFlowConfig
 from datus_semantic_metricflow.models import (
+    DimensionInfo,
     MetricDefinition,
     MetricType,
     QueryResult,
@@ -123,7 +124,7 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         self,
         metric_name: str,
         path: Optional[List[str]] = None,
-    ) -> List[str]:
+    ) -> List[DimensionInfo]:
         """
         Get dimensions for a metric using MetricFlow client.
 
@@ -132,13 +133,13 @@ class MetricFlowAdapter(BaseSemanticAdapter):
             path: Optional subject area filter
 
         Returns:
-            List of dimension names
+            List of DimensionInfo objects containing name and description
         """
         # Get dimensions from client (returns List[Dimension])
         dimensions = self.client.list_dimensions(metric_names=[metric_name])
 
-        # Extract dimension names
-        return [d.name for d in dimensions]
+        # Convert to DimensionInfo objects
+        return [DimensionInfo(name=d.name, description=d.description) for d in dimensions]
 
     async def query_metrics(
         self,

@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 # Re-export common models from datus-agent
 from datus.tools.semantic_tools.models import (
+    DimensionInfo,
     QueryResult,
     ValidationIssue,
     ValidationResult,
@@ -20,6 +21,7 @@ from datus.tools.semantic_tools.models import (
 __all__ = [
     "MetricType",
     "MetricDefinition",
+    "DimensionInfo",
     "QueryResult",
     "ValidationIssue",
     "ValidationResult",
