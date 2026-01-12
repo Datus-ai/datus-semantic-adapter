@@ -1,0 +1,3 @@
+[submodule "datus_semantic_metricflow/metricflow"]
+	path = datus_semantic_metricflow/metricflow
+	url = git@github.com:Datus-ai/metricflow.git
