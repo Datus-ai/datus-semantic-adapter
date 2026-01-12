@@ -54,7 +54,8 @@ async def main():
 
     # Get dimensions for a metric
     dimensions = await adapter.get_dimensions("revenue")
-    print(f"Dimensions: {dimensions}")
+    for dim in dimensions:
+        print(f"{dim.name}: {dim.description}")
 
     # Query metrics
     result = await adapter.query_metrics(
@@ -155,7 +156,7 @@ Get available dimensions for a metric.
 - `metric_name` (str): Name of the metric
 - `path` (List[str], optional): Subject area filter
 
-**Returns:** `List[str]`
+**Returns:** `List[DimensionInfo]`
 
 ##### `query_metrics(metrics, dimensions=[], path=None, time_range=None, where=None, limit=None, order_by=None, dry_run=False)`
 
@@ -180,6 +181,14 @@ Validate semantic layer configuration.
 **Returns:** `ValidationResult`
 
 ## Data Models
+
+### DimensionInfo
+
+```python
+class DimensionInfo(BaseModel):
+    name: str
+    description: Optional[str]
+```
 
 ### MetricDefinition
 
