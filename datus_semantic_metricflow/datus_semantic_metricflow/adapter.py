@@ -100,19 +100,23 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         Returns:
             List of metric definitions
         """
-        # Get metrics from client (returns Dict[str, Metric])
-        metrics_dict = self.client.list_metrics()
+        # Get full metric objects directly from semantic_model
+        metric_semantics = self.client.semantic_model.metric_semantics
+        metric_refs = metric_semantics.metric_references
+        full_metrics = metric_semantics.get_metrics(metric_refs)
 
         # Convert to MetricDefinition list
         metrics = []
-        for metric in metrics_dict.values():
+        for metric in full_metrics:
+            # Get dimensions for this metric
+            dimensions = self.client.engine.simple_dimensions_for_metrics([metric.name])
             metrics.append(MetricDefinition(
                 name=metric.name,
                 description=metric.description,
-                type=self._map_metric_type(metric.type) if hasattr(metric, 'type') else None,
-                dimensions=[d.name for d in metric.dimensions] if hasattr(metric, 'dimensions') else [],
-                measures=getattr(metric, 'measures', []),
-                metadata={'metric': metric},
+                type=metric.type,
+                dimensions=[d.name for d in dimensions],
+                measures=[m.name for m in metric.input_measures],
+                metadata={},
             ))
 
         if path:
@@ -290,17 +294,3 @@ class MetricFlowAdapter(BaseSemanticAdapter):
             ))
         return issues
 
-    # Helper methods
-
-    def _map_metric_type(self, type_str: Optional[str]) -> Optional[MetricType]:
-        """Map MetricFlow metric type to MetricType enum."""
-        if not type_str:
-            return None
-
-        type_map = {
-            "simple": MetricType.SIMPLE,
-            "ratio": MetricType.RATIO,
-            "cumulative": MetricType.CUMULATIVE,
-            "derived": MetricType.DERIVED,
-        }
-        return type_map.get(type_str.lower())
