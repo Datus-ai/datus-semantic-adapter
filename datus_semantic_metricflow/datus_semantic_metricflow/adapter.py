@@ -231,6 +231,7 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         1. Lint validation (YAML format)
         2. Parsing validation (model building)
         3. Semantic validation (model semantics)
+        4. Data warehouse validation
 
         Returns:
             Validation result
@@ -238,6 +239,7 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         from metricflow.engine.utils import path_to_models, model_build_result_from_config
         from metricflow.model.model_validator import ModelValidator
         from metricflow.model.parsing.config_linter import ConfigLinter
+        from metricflow.model.data_warehouse_model_validator import DataWarehouseModelValidator
 
         all_issues: List[ValidationIssue] = []
 
@@ -271,13 +273,46 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         try:
             semantic_result = ModelValidator().validate_model(user_model)
             all_issues.extend(self._convert_validation_results(semantic_result.issues))
+            if semantic_result.issues.has_blocking_issues:
+                return ValidationResult(valid=False, issues=all_issues)
         except Exception as e:
             logger.error(f"Semantic validation failed: {e}")
             all_issues.append(ValidationIssue(severity="error", message=f"Semantic validation failed: {e}"))
             return ValidationResult(valid=False, issues=all_issues)
 
+        # Step 4: Data Warehouse Validation
+        try:
+            dw_validator = DataWarehouseModelValidator(
+                sql_client=self.client.sql_client,
+                system_schema=self.client.system_schema,
+            )
+            dw_results = self._run_dw_validations(dw_validator, user_model)
+            all_issues.extend(self._convert_validation_results(dw_results))
+        except Exception as e:
+            logger.error(f"Data warehouse validation failed: {e}")
+            all_issues.append(ValidationIssue(severity="error", message=f"Data warehouse validation failed: {e}"))
+
         has_errors = any(issue.severity == "error" for issue in all_issues)
         return ValidationResult(valid=not has_errors, issues=all_issues)
+
+    def _run_dw_validations(self, dw_validator, model):
+        """Run all data warehouse validations and merge results."""
+        from metricflow.model.validations.validator_helpers import ModelValidationResults
+
+        timeout = self.timeout
+        data_source_results = dw_validator.validate_data_sources(model, timeout)
+        dimension_results = dw_validator.validate_dimensions(model, timeout)
+        identifier_results = dw_validator.validate_identifiers(model, timeout)
+        measure_results = dw_validator.validate_measures(model, timeout)
+        metric_results = dw_validator.validate_metrics(model, timeout)
+
+        return ModelValidationResults.merge([
+            data_source_results,
+            dimension_results,
+            identifier_results,
+            measure_results,
+            metric_results,
+        ])
 
     def _convert_validation_results(self, results) -> List[ValidationIssue]:
         """Convert ModelValidationResults to list of ValidationIssue."""
