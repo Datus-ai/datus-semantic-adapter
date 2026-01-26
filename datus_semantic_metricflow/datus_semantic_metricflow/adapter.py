@@ -180,11 +180,18 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         start_time = time_start
         end_time = time_end
 
+        # Handle time_granularity: convert to metric_time__xxx dimension
+        query_dimensions = list(dimensions) if dimensions else []
+        if time_granularity:
+            time_dim = f"metric_time__{time_granularity}"
+            if time_dim not in query_dimensions:
+                query_dimensions.append(time_dim)
+
         if dry_run:
             # Use explain to get SQL without executing
             result = self.client.explain(
                 metrics=metrics,
-                dimensions=dimensions,
+                dimensions=query_dimensions,
                 start_time=start_time,
                 end_time=end_time,
                 where=where,
@@ -202,7 +209,7 @@ class MetricFlowAdapter(BaseSemanticAdapter):
             # Execute the query
             result = self.client.query(
                 metrics=metrics,
-                dimensions=dimensions,
+                dimensions=query_dimensions,
                 start_time=start_time,
                 end_time=end_time,
                 where=where,
