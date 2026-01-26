@@ -176,14 +176,29 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         Returns:
             Query result
         """
-        # Prepare query parameters
-        start_time = time_start
-        end_time = time_end
+        # Helper to convert "null" string to None
+        def _normalize_null(value):
+            if value is None or value == "null" or value == "":
+                return None
+            return value
+
+        # Prepare query parameters (normalize "null" strings to None)
+        start_time = _normalize_null(time_start)
+        end_time = _normalize_null(time_end)
+        granularity = _normalize_null(time_granularity)
+        where_clause = _normalize_null(where)
+
+        # Handle order_by: filter out "null" strings from list
+        order_list = None
+        if order_by:
+            order_list = [o for o in order_by if o and o != "null"]
+            if not order_list:
+                order_list = None
 
         # Handle time_granularity: convert to metric_time__xxx dimension
         query_dimensions = list(dimensions) if dimensions else []
-        if time_granularity:
-            time_dim = f"metric_time__{time_granularity}"
+        if granularity:
+            time_dim = f"metric_time__{granularity}"
             if time_dim not in query_dimensions:
                 query_dimensions.append(time_dim)
 
@@ -194,9 +209,9 @@ class MetricFlowAdapter(BaseSemanticAdapter):
                 dimensions=query_dimensions,
                 start_time=start_time,
                 end_time=end_time,
-                where=where,
+                where=where_clause,
                 limit=limit,
-                order=order_by,
+                order=order_list,
             )
             # Return SQL as result
             sql = result.rendered_sql_without_descriptions.sql_query
@@ -207,15 +222,20 @@ class MetricFlowAdapter(BaseSemanticAdapter):
             )
         else:
             # Execute the query
+            logger.debug(
+                f"Executing query: metrics={metrics}, dimensions={query_dimensions}, "
+                f"start_time={start_time}, end_time={end_time}, where={where_clause}, limit={limit}"
+            )
             result = self.client.query(
                 metrics=metrics,
                 dimensions=query_dimensions,
                 start_time=start_time,
                 end_time=end_time,
-                where=where,
+                where=where_clause,
                 limit=limit,
-                order=order_by,
+                order=order_list,
             )
+            logger.debug(f"Query result: result_df={result.result_df is not None}, empty={result.result_df.empty if result.result_df is not None else 'N/A'}")
 
             # Convert DataFrame to QueryResult
             if result.result_df is not None and not result.result_df.empty:
