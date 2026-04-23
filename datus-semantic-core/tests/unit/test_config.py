@@ -9,7 +9,7 @@ from datus_semantic_core.config import SemanticAdapterConfig
 class TestSemanticAdapterConfig:
     def test_defaults(self):
         c = SemanticAdapterConfig()
-        assert c.namespace is None
+        assert c.datasource is None
         assert c.timeout_seconds == 30
         assert c.api_base_url is None
         assert c.auth_token is None
@@ -17,8 +17,8 @@ class TestSemanticAdapterConfig:
         assert c.password is None
 
     def test_existing_fields(self):
-        c = SemanticAdapterConfig(namespace="prod", timeout_seconds=60)
-        assert c.namespace == "prod"
+        c = SemanticAdapterConfig(datasource="prod", timeout_seconds=60)
+        assert c.datasource == "prod"
         assert c.timeout_seconds == 60
 
     def test_auth_fields(self):
@@ -40,6 +40,6 @@ class TestSemanticAdapterConfig:
         assert c.custom_field == "custom"
 
     def test_backward_compat(self):
-        c = SemanticAdapterConfig(namespace="test")
+        c = SemanticAdapterConfig(datasource="test")
         assert c.api_base_url is None
         assert c.auth_token is None

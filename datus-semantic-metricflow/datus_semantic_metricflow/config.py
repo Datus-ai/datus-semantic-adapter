@@ -15,3 +15,6 @@ class MetricFlowConfig(SemanticAdapterConfig):
         description="Database config dict (type, host, port, username, password, database, schema, uri, etc.)",
     )
     agent_home: Optional[str] = Field(None, description="Datus agent home path, for resolving model_path")
+    semantic_models_path: Optional[str] = Field(
+        None, description="Path to semantic model YAML directory. Overrides default {agent_home}/semantic_models/{datasource}."
+    )

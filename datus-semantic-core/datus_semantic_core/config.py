@@ -14,7 +14,7 @@ class SemanticAdapterConfig(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    namespace: Optional[str] = Field(default=None, description="Datus namespace for configuration")
+    datasource: Optional[str] = Field(default=None, description="Datus datasource for configuration")
     timeout_seconds: int = Field(default=30, description="Operation timeout in seconds")
     api_base_url: Optional[str] = Field(default=None, description="API base URL")
     auth_token: Optional[str] = Field(default=None, description="Auth token (JWT, API key, service token)")

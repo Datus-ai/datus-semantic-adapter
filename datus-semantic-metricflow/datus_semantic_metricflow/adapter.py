@@ -30,10 +30,10 @@ class MetricFlowAdapter(BaseSemanticAdapter):
 
     def __init__(self, config: MetricFlowConfig):
         super().__init__(config, service_type="metricflow")
-        self.namespace = config.namespace
+        self.datasource = config.datasource
         self.timeout = config.timeout
 
-        logger.info(f"Initializing MetricFlowAdapter for namespace: {self.namespace}")
+        logger.info(f"Initializing MetricFlowAdapter for datasource: {self.datasource}")
 
         try:
             # Import MetricFlow utilities
@@ -62,7 +62,7 @@ class MetricFlowAdapter(BaseSemanticAdapter):
                 logger.info("Using DictConfigHandler (in-memory config, no file read)")
             else:
                 config_path = getattr(config, 'config_path', None)
-                self._config_handler = DatusConfigHandler(namespace=self.namespace, config_path=config_path)
+                self._config_handler = DatusConfigHandler(namespace=self.datasource, config_path=config_path)
                 logger.info("Using DatusConfigHandler (reading agent.yml from disk)")
 
             # Build client components using the config handler
@@ -86,8 +86,16 @@ class MetricFlowAdapter(BaseSemanticAdapter):
     def _resolve_model_path(config: MetricFlowConfig) -> str:
         """Resolve semantic models path from config."""
         import pathlib
+
+        if config.semantic_models_path:
+            path = pathlib.Path(config.semantic_models_path)
+            path.mkdir(parents=True, exist_ok=True)
+            return str(path)
+
         agent_home = config.agent_home or "~/.datus"
-        return str(pathlib.Path(agent_home).expanduser().resolve() / "semantic_models" / config.namespace)
+        path = pathlib.Path(agent_home).expanduser().resolve() / "semantic_models" / config.datasource
+        path.mkdir(parents=True, exist_ok=True)
+        return str(path)
 
     # Semantic Model Interface
 

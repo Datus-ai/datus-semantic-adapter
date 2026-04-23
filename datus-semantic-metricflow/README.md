@@ -21,7 +21,7 @@ import asyncio
 from datus_semantic_metricflow import MetricFlowAdapter, MetricFlowConfig
 
 config = MetricFlowConfig(
-    namespace="my_project",
+    datasource="my_project",
     config_path="/path/to/metricflow/config",  # optional
 )
 
@@ -54,7 +54,7 @@ asyncio.run(main())
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `namespace` | str | Required | Namespace for this semantic layer instance |
+| `datasource` | str | Required | Datasource for this semantic layer instance |
 | `config_path` | str | None | Path to MetricFlow configuration file |
 | `timeout` | int | 300 | Query timeout in seconds |
 

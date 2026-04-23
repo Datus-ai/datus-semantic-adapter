@@ -21,7 +21,7 @@ from datus_semantic_metricflow import (
 async def main():
     # Configure the adapter
     config = MetricFlowConfig(
-        namespace="my_project",
+        datasource="my_project",
         project_root="/path/to/your/metricflow/project",
         cli_path="mf",  # or "/path/to/mf" if not in PATH
     )

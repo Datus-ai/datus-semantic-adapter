@@ -40,16 +40,16 @@ class TestBaseSemanticAdapterInit:
         adapter = _ConcreteAdapter(config=MagicMock(), service_type="cube")
         assert adapter.service_type == "cube"
 
-    def test_extracts_namespace_from_config(self):
+    def test_extracts_datasource_from_config(self):
         config = MagicMock()
-        config.namespace = "prod"
+        config.datasource = "prod"
         adapter = _ConcreteAdapter(config=config, service_type="test")
-        assert adapter.namespace == "prod"
+        assert adapter.datasource == "prod"
 
-    def test_namespace_none_when_config_has_no_namespace(self):
-        config = object()  # no namespace attribute
+    def test_datasource_none_when_config_has_no_datasource(self):
+        config = object()  # no datasource attribute
         adapter = _ConcreteAdapter(config=config, service_type="test")
-        assert adapter.namespace is None
+        assert adapter.datasource is None
 
     def test_service_type_fallback_to_config(self):
         config = MagicMock()

@@ -33,14 +33,14 @@ def _validation_results(*, errors=None, warnings=None, has_blocking_issues=False
 
 @pytest.fixture
 def config():
-    return MetricFlowConfig(namespace="test", timeout=300)
+    return MetricFlowConfig(datasource="test", timeout=300)
 
 
 @pytest.fixture
 def adapter():
     instance = MetricFlowAdapter.__new__(MetricFlowAdapter)
     instance.service_type = "metricflow"
-    instance.namespace = "test"
+    instance.datasource = "test"
     instance.timeout = 300
     instance.client = MagicMock()
     instance._config_handler = MagicMock()
@@ -48,8 +48,8 @@ def adapter():
 
 
 class TestMetricFlowAdapter:
-    def test_resolve_model_path_uses_agent_home_and_namespace(self):
-        config = MetricFlowConfig(namespace="analytics", agent_home="/tmp/datus-home")
+    def test_resolve_model_path_uses_agent_home_and_datasource(self):
+        config = MetricFlowConfig(datasource="analytics", agent_home="/tmp/datus-home")
 
         result = MetricFlowAdapter._resolve_model_path(config)
 
@@ -73,7 +73,7 @@ class TestMetricFlowAdapter:
         ):
             adapter = MetricFlowAdapter(
                 MetricFlowConfig(
-                    namespace="test",
+                    datasource="test",
                     db_config={"type": "duckdb", "database": "demo"},
                     agent_home="/tmp/home",
                 )
@@ -98,7 +98,7 @@ class TestMetricFlowAdapter:
             patch("metricflow.engine.utils.build_user_configured_model_from_config", return_value=MagicMock()),
             patch("metricflow.configuration.constants.CONFIG_DWH_SCHEMA", "datus_system"),
         ):
-            adapter = MetricFlowAdapter(MetricFlowConfig(namespace="test", config_path="/tmp/agent.yml"))
+            adapter = MetricFlowAdapter(MetricFlowConfig(datasource="test", config_path="/tmp/agent.yml"))
 
         mock_handler_cls.assert_called_once_with(namespace="test", config_path="/tmp/agent.yml")
         assert adapter.client is mock_client
@@ -289,9 +289,9 @@ class TestMetricFlowAdapter:
 
 class TestConfiguration:
     def test_config_defaults(self):
-        config = MetricFlowConfig(namespace="test")
+        config = MetricFlowConfig(datasource="test")
 
-        assert config.namespace == "test"
+        assert config.datasource == "test"
         assert config.service_type == "metricflow"
         assert config.config_path is None
         assert config.timeout == 300
@@ -300,14 +300,14 @@ class TestConfiguration:
 
     def test_config_custom_values(self):
         config = MetricFlowConfig(
-            namespace="prod",
+            datasource="prod",
             config_path="/tmp/agent.yml",
             timeout=600,
             db_config={"type": "postgres", "database": "analytics"},
             agent_home="/tmp/datus-home",
         )
 
-        assert config.namespace == "prod"
+        assert config.datasource == "prod"
         assert config.config_path == "/tmp/agent.yml"
         assert config.timeout == 600
         assert config.db_config == {"type": "postgres", "database": "analytics"}
