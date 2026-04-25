@@ -1,6 +1,9 @@
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 import logging
+import os
 
 from datus_semantic_core import BaseSemanticAdapter
 from datus_semantic_metricflow.config import MetricFlowConfig
@@ -32,13 +35,13 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         super().__init__(config, service_type="metricflow")
         self.datasource = config.datasource
         self.timeout = config.timeout
+        self._client_init_error: Optional[Exception] = None
 
         logger.info(f"Initializing MetricFlowAdapter for datasource: {self.datasource}")
 
         try:
             # Import MetricFlow utilities
             from metricflow.configuration.constants import CONFIG_DWH_SCHEMA
-            from metricflow.engine.utils import build_user_configured_model_from_config
             from metricflow.sql_clients.sql_utils import make_sql_client_from_config
 
             # Initialize config handler: dict-based or file-based
@@ -67,16 +70,24 @@ class MetricFlowAdapter(BaseSemanticAdapter):
 
             # Build client components using the config handler
             sql_client = make_sql_client_from_config(self._config_handler)
-            user_configured_model = build_user_configured_model_from_config(self._config_handler)
             schema = self._config_handler.get_value(CONFIG_DWH_SCHEMA)
-
-            # Construct MetricFlowClient directly
-            self.client = MetricFlowClient(
-                sql_client=sql_client,
-                user_configured_model=user_configured_model,
-                system_schema=schema,
-            )
-            logger.info("MetricFlowClient initialized successfully")
+            try:
+                user_configured_model = self._build_user_configured_model_from_config(self._config_handler)
+                # Construct MetricFlowClient directly
+                self.client = MetricFlowClient(
+                    sql_client=sql_client,
+                    user_configured_model=user_configured_model,
+                    system_schema=schema,
+                )
+                logger.info("MetricFlowClient initialized successfully")
+            except Exception as e:
+                self._client_init_error = e
+                self.client = SimpleNamespace(sql_client=sql_client, system_schema=schema)
+                logger.warning(
+                    "MetricFlowClient initialization deferred until semantic configuration is valid: %s",
+                    e,
+                )
+                logger.debug("Deferred MetricFlowClient initialization details", exc_info=True)
 
         except Exception as e:
             logger.error(f"Failed to initialize MetricFlowAdapter: {e}", exc_info=True)
@@ -85,17 +96,52 @@ class MetricFlowAdapter(BaseSemanticAdapter):
     @staticmethod
     def _resolve_model_path(config: MetricFlowConfig) -> str:
         """Resolve semantic models path from config."""
-        import pathlib
 
         if config.semantic_models_path:
-            path = pathlib.Path(config.semantic_models_path)
+            path = Path(config.semantic_models_path)
             path.mkdir(parents=True, exist_ok=True)
             return str(path)
 
         agent_home = config.agent_home or "~/.datus"
-        path = pathlib.Path(agent_home).expanduser().resolve() / "semantic_models" / config.datasource
+        path = Path(agent_home).expanduser().resolve() / "semantic_models" / config.datasource
         path.mkdir(parents=True, exist_ok=True)
         return str(path)
+
+    @staticmethod
+    def _collect_model_file_paths(model_path: str) -> List[str]:
+        """Collect MetricFlow YAML files from the configured model path.
+
+        MetricFlow's directory collector skips files ignored by the nearest
+        .gitignore. Datus stores generated semantic models under project-local
+        subject/ directories, which are intentionally gitignored, so the adapter
+        must treat the configured semantic_models_path as authoritative.
+        """
+        config_file_paths: List[str] = []
+        for root, dirs, files in os.walk(model_path):
+            dirs[:] = [directory for directory in dirs if not directory.startswith(".")]
+            for file_name in files:
+                if file_name.startswith("."):
+                    continue
+                if Path(file_name).suffix.lower() not in {".yml", ".yaml"}:
+                    continue
+                config_file_paths.append(os.path.join(root, file_name))
+        return sorted(config_file_paths)
+
+    @classmethod
+    def _model_build_result_from_config(cls, handler, raise_issues_as_exceptions: bool = True):
+        from metricflow.engine.utils import path_to_models
+        from metricflow.model.parsing.dir_to_model import parse_yaml_file_paths_to_model
+
+        model_path = path_to_models(handler=handler)
+        file_paths = cls._collect_model_file_paths(model_path)
+        return parse_yaml_file_paths_to_model(
+            file_paths,
+            raise_issues_as_exceptions=raise_issues_as_exceptions,
+        )
+
+    @classmethod
+    def _build_user_configured_model_from_config(cls, handler):
+        return cls._model_build_result_from_config(handler).model
 
     # Semantic Model Interface
 
@@ -300,7 +346,7 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         Returns:
             Validation result
         """
-        from metricflow.engine.utils import path_to_models, model_build_result_from_config
+        from metricflow.engine.utils import path_to_models
         from metricflow.model.model_validator import ModelValidator
         from metricflow.model.parsing.config_linter import ConfigLinter
         from metricflow.model.data_warehouse_model_validator import DataWarehouseModelValidator
@@ -310,7 +356,8 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         # Step 1: Lint Validation
         try:
             model_path = path_to_models(handler=self._config_handler)
-            lint_results = ConfigLinter().lint_dir(model_path)
+            config_file_paths = self._collect_model_file_paths(model_path)
+            lint_results = ConfigLinter().lint_files(config_file_paths)
             all_issues.extend(self._convert_validation_results(lint_results))
             if lint_results.has_blocking_issues:
                 return ValidationResult(valid=False, issues=all_issues)
@@ -321,8 +368,9 @@ class MetricFlowAdapter(BaseSemanticAdapter):
 
         # Step 2: Parsing Validation
         try:
-            parsing_result = model_build_result_from_config(
-                handler=self._config_handler, raise_issues_as_exceptions=False
+            parsing_result = self._model_build_result_from_config(
+                self._config_handler,
+                raise_issues_as_exceptions=False,
             )
             all_issues.extend(self._convert_validation_results(parsing_result.issues))
             if parsing_result.issues.has_blocking_issues:
@@ -392,4 +440,3 @@ class MetricFlowAdapter(BaseSemanticAdapter):
                 message=str(warning),
             ))
         return issues
-

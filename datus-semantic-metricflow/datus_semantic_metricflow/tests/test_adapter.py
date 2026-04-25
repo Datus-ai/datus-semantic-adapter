@@ -55,6 +55,21 @@ class TestMetricFlowAdapter:
 
         assert result.endswith("/tmp/datus-home/semantic_models/analytics")
 
+    def test_collect_model_file_paths_includes_gitignored_yaml(self, tmp_path):
+        (tmp_path / ".gitignore").write_text("/subject/\n")
+        model_dir = tmp_path / "subject" / "semantic_models" / "analytics"
+        model_dir.mkdir(parents=True)
+        yaml_file = model_dir / "orders.yml"
+        yaml_file.write_text("data_source:\n  name: orders\n")
+        hidden_file = model_dir / ".ignored.yml"
+        hidden_file.write_text("data_source:\n  name: ignored\n")
+        non_yaml_file = model_dir / "notes.txt"
+        non_yaml_file.write_text("ignored")
+
+        result = MetricFlowAdapter._collect_model_file_paths(str(model_dir))
+
+        assert result == [str(yaml_file)]
+
     def test_init_uses_dict_config_handler_when_db_config_present(self):
         mock_handler = MagicMock()
         mock_handler.get_value.return_value = "datus_system"
@@ -67,7 +82,7 @@ class TestMetricFlowAdapter:
             patch("datus_semantic_metricflow.adapter.DictConfigHandler", return_value=mock_handler) as mock_dict_handler,
             patch("datus_semantic_metricflow.adapter.MetricFlowClient", return_value=mock_client) as mock_client_cls,
             patch("metricflow.sql_clients.sql_utils.make_sql_client_from_config", return_value=mock_sql_client),
-            patch("metricflow.engine.utils.build_user_configured_model_from_config", return_value=mock_user_model),
+            patch.object(MetricFlowAdapter, "_build_user_configured_model_from_config", return_value=mock_user_model),
             patch("metricflow.configuration.constants.CONFIG_DWH_SCHEMA", "datus_system"),
             patch.object(MetricFlowAdapter, "_resolve_model_path", return_value="/tmp/models"),
         ):
@@ -95,13 +110,33 @@ class TestMetricFlowAdapter:
             patch("datus_semantic_metricflow.adapter.DatusConfigHandler", return_value=mock_handler) as mock_handler_cls,
             patch("datus_semantic_metricflow.adapter.MetricFlowClient", return_value=mock_client),
             patch("metricflow.sql_clients.sql_utils.make_sql_client_from_config", return_value=MagicMock()),
-            patch("metricflow.engine.utils.build_user_configured_model_from_config", return_value=MagicMock()),
+            patch.object(MetricFlowAdapter, "_build_user_configured_model_from_config", return_value=MagicMock()),
             patch("metricflow.configuration.constants.CONFIG_DWH_SCHEMA", "datus_system"),
         ):
             adapter = MetricFlowAdapter(MetricFlowConfig(datasource="test", config_path="/tmp/agent.yml"))
 
         mock_handler_cls.assert_called_once_with(namespace="test", config_path="/tmp/agent.yml")
         assert adapter.client is mock_client
+
+    def test_init_defers_client_errors_so_validation_can_report_yaml_issues(self):
+        mock_handler = MagicMock()
+        mock_handler.get_value.return_value = "datus_system"
+        mock_sql_client = MagicMock()
+        parse_error = ValueError("bad yaml")
+
+        with (
+            patch("datus_semantic_metricflow.adapter.DatusConfigHandler", return_value=mock_handler),
+            patch("datus_semantic_metricflow.adapter.MetricFlowClient") as mock_client_cls,
+            patch("metricflow.sql_clients.sql_utils.make_sql_client_from_config", return_value=mock_sql_client),
+            patch.object(MetricFlowAdapter, "_build_user_configured_model_from_config", side_effect=parse_error),
+            patch("metricflow.configuration.constants.CONFIG_DWH_SCHEMA", "datus_system"),
+        ):
+            adapter = MetricFlowAdapter(MetricFlowConfig(datasource="test", config_path="/tmp/agent.yml"))
+
+        mock_client_cls.assert_not_called()
+        assert adapter._client_init_error is parse_error
+        assert adapter.client.sql_client is mock_sql_client
+        assert adapter.client.system_schema == "datus_system"
 
     @pytest.mark.asyncio
     async def test_list_metrics_returns_metric_definitions(self, adapter):
@@ -232,15 +267,17 @@ class TestMetricFlowAdapter:
         with (
             patch("metricflow.engine.utils.path_to_models", return_value="/tmp/models"),
             patch("metricflow.model.parsing.config_linter.ConfigLinter") as mock_linter_cls,
-            patch(
-                "metricflow.engine.utils.model_build_result_from_config",
+            patch.object(adapter, "_collect_model_file_paths", return_value=["/tmp/models/orders.yml"]),
+            patch.object(
+                adapter,
+                "_model_build_result_from_config",
                 return_value=SimpleNamespace(issues=parsing_issues, model="user-model"),
             ),
             patch("metricflow.model.model_validator.ModelValidator") as mock_validator_cls,
             patch("metricflow.model.data_warehouse_model_validator.DataWarehouseModelValidator"),
             patch.object(adapter, "_run_dw_validations", return_value=_validation_results()),
         ):
-            mock_linter_cls.return_value.lint_dir.return_value = lint_results
+            mock_linter_cls.return_value.lint_files.return_value = lint_results
             mock_validator_cls.return_value.validate_model.return_value = SimpleNamespace(issues=semantic_issues)
 
             result = await adapter.validate_semantic()
@@ -254,8 +291,9 @@ class TestMetricFlowAdapter:
         with (
             patch("metricflow.engine.utils.path_to_models", return_value="/tmp/models"),
             patch("metricflow.model.parsing.config_linter.ConfigLinter") as mock_linter_cls,
+            patch.object(adapter, "_collect_model_file_paths", return_value=["/tmp/models/orders.yml"]),
         ):
-            mock_linter_cls.return_value.lint_dir.return_value = lint_results
+            mock_linter_cls.return_value.lint_files.return_value = lint_results
 
             result = await adapter.validate_semantic()
 
