@@ -43,6 +43,7 @@ def adapter():
     instance.datasource = "test"
     instance.timeout = 300
     instance.client = MagicMock()
+    instance._client_initialized = True
     instance._config_handler = MagicMock()
     return instance
 
@@ -95,12 +96,10 @@ class TestMetricFlowAdapter:
             )
 
         mock_dict_handler.assert_called_once_with({"k": "v"})
-        mock_client_cls.assert_called_once_with(
-            sql_client=mock_sql_client,
-            user_configured_model=mock_user_model,
-            system_schema="datus_system",
-        )
-        assert adapter.client is mock_client
+        mock_client_cls.assert_not_called()
+        assert adapter.client.sql_client is mock_sql_client
+        assert adapter.client.system_schema == "datus_system"
+        assert adapter._client_initialized is False
 
     def test_init_uses_file_config_handler_when_db_config_missing(self):
         mock_handler = MagicMock()
@@ -108,7 +107,7 @@ class TestMetricFlowAdapter:
 
         with (
             patch("datus_semantic_metricflow.adapter.DatusConfigHandler", return_value=mock_handler) as mock_handler_cls,
-            patch("datus_semantic_metricflow.adapter.MetricFlowClient", return_value=mock_client),
+            patch("datus_semantic_metricflow.adapter.MetricFlowClient", return_value=mock_client) as mock_client_cls,
             patch("metricflow.sql_clients.sql_utils.make_sql_client_from_config", return_value=MagicMock()),
             patch.object(MetricFlowAdapter, "_build_user_configured_model_from_config", return_value=MagicMock()),
             patch("metricflow.configuration.constants.CONFIG_DWH_SCHEMA", "datus_system"),
@@ -116,9 +115,10 @@ class TestMetricFlowAdapter:
             adapter = MetricFlowAdapter(MetricFlowConfig(datasource="test", config_path="/tmp/agent.yml"))
 
         mock_handler_cls.assert_called_once_with(namespace="test", config_path="/tmp/agent.yml")
-        assert adapter.client is mock_client
+        mock_client_cls.assert_not_called()
+        assert adapter._client_initialized is False
 
-    def test_init_defers_client_errors_so_validation_can_report_yaml_issues(self):
+    def test_init_does_not_parse_yaml_so_validation_can_report_yaml_issues(self):
         mock_handler = MagicMock()
         mock_handler.get_value.return_value = "datus_system"
         mock_sql_client = MagicMock()
@@ -134,9 +134,43 @@ class TestMetricFlowAdapter:
             adapter = MetricFlowAdapter(MetricFlowConfig(datasource="test", config_path="/tmp/agent.yml"))
 
         mock_client_cls.assert_not_called()
-        assert adapter._client_init_error is parse_error
+        assert adapter._client_init_error is None
+        assert adapter._client_initialized is False
         assert adapter.client.sql_client is mock_sql_client
         assert adapter.client.system_schema == "datus_system"
+
+    @pytest.mark.asyncio
+    async def test_list_metrics_reports_yaml_error_without_breaking_startup(self, adapter):
+        adapter._client_initialized = False
+        parse_error = ValueError("bad yaml")
+
+        with patch.object(adapter, "_build_user_configured_model_from_config", side_effect=parse_error):
+            with pytest.raises(RuntimeError, match="MetricFlow semantic configuration is invalid"):
+                await adapter.list_metrics()
+
+        assert adapter._client_init_error is parse_error
+
+    def test_ensure_client_ready_initializes_metricflow_client_on_first_use(self, adapter):
+        adapter._client_initialized = False
+        adapter.client = SimpleNamespace(sql_client="sql-client", system_schema="datus_system")
+        user_model = MagicMock()
+        mock_client = MagicMock()
+
+        with (
+            patch.object(adapter, "_build_user_configured_model_from_config", return_value=user_model),
+            patch("datus_semantic_metricflow.adapter.MetricFlowClient", return_value=mock_client) as mock_client_cls,
+        ):
+            result = adapter._ensure_client_ready()
+
+        assert result is mock_client
+        assert adapter.client is mock_client
+        assert adapter._client_initialized is True
+        assert adapter._client_init_error is None
+        mock_client_cls.assert_called_once_with(
+            sql_client="sql-client",
+            user_configured_model=user_model,
+            system_schema="datus_system",
+        )
 
     @pytest.mark.asyncio
     async def test_list_metrics_returns_metric_definitions(self, adapter):

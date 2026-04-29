@@ -36,6 +36,7 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         self.datasource = config.datasource
         self.timeout = config.timeout
         self._client_init_error: Optional[Exception] = None
+        self._client_initialized = False
 
         logger.info(f"Initializing MetricFlowAdapter for datasource: {self.datasource}")
 
@@ -71,27 +72,40 @@ class MetricFlowAdapter(BaseSemanticAdapter):
             # Build client components using the config handler
             sql_client = make_sql_client_from_config(self._config_handler)
             schema = self._config_handler.get_value(CONFIG_DWH_SCHEMA)
-            try:
-                user_configured_model = self._build_user_configured_model_from_config(self._config_handler)
-                # Construct MetricFlowClient directly
-                self.client = MetricFlowClient(
-                    sql_client=sql_client,
-                    user_configured_model=user_configured_model,
-                    system_schema=schema,
-                )
-                logger.info("MetricFlowClient initialized successfully")
-            except Exception as e:
-                self._client_init_error = e
-                self.client = SimpleNamespace(sql_client=sql_client, system_schema=schema)
-                logger.warning(
-                    "MetricFlowClient initialization deferred until semantic configuration is valid: %s",
-                    e,
-                )
-                logger.debug("Deferred MetricFlowClient initialization details", exc_info=True)
+            self.client = SimpleNamespace(sql_client=sql_client, system_schema=schema)
+            logger.info("MetricFlowAdapter initialized; MetricFlowClient will load semantic YAML on first use")
 
         except Exception as e:
             logger.error(f"Failed to initialize MetricFlowAdapter: {e}", exc_info=True)
             raise
+
+    def _ensure_client_ready(self) -> MetricFlowClient:
+        """Build the MetricFlowClient lazily so bad YAML does not break adapter startup."""
+        if getattr(self, "_client_initialized", True):
+            return self.client
+
+        try:
+            user_configured_model = self._build_user_configured_model_from_config(self._config_handler)
+            self.client = MetricFlowClient(
+                sql_client=self.client.sql_client,
+                user_configured_model=user_configured_model,
+                system_schema=self.client.system_schema,
+            )
+            self._client_initialized = True
+            self._client_init_error = None
+            logger.info("MetricFlowClient initialized successfully")
+            return self.client
+        except Exception as e:
+            self._client_init_error = e
+            logger.warning(
+                "MetricFlowClient initialization deferred until semantic configuration is valid: %s",
+                e,
+            )
+            logger.debug("Deferred MetricFlowClient initialization details", exc_info=True)
+            raise RuntimeError(
+                "MetricFlow semantic configuration is invalid. "
+                "Run validate_semantic to inspect YAML errors before listing or querying metrics."
+            ) from e
 
     @staticmethod
     def _resolve_model_path(config: MetricFlowConfig) -> str:
@@ -183,8 +197,10 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         Returns:
             List of metric definitions
         """
+        client = self._ensure_client_ready()
+
         # Get full metric objects directly from semantic_model
-        metric_semantics = self.client.semantic_model.metric_semantics
+        metric_semantics = client.semantic_model.metric_semantics
         metric_refs = metric_semantics.metric_references
         full_metrics = metric_semantics.get_metrics(metric_refs)
 
@@ -192,7 +208,7 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         metrics = []
         for metric in full_metrics:
             # Get dimensions for this metric
-            dimensions = self.client.engine.simple_dimensions_for_metrics([metric.name])
+            dimensions = client.engine.simple_dimensions_for_metrics([metric.name])
             metrics.append(MetricDefinition(
                 name=metric.name,
                 description=metric.description,
@@ -222,8 +238,10 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         Returns:
             List of DimensionInfo objects containing name and description
         """
+        client = self._ensure_client_ready()
+
         # Get dimensions from client (returns List[Dimension])
-        dimensions = self.client.list_dimensions(metric_names=[metric_name])
+        dimensions = client.list_dimensions(metric_names=[metric_name])
 
         # Convert to DimensionInfo objects
         return [DimensionInfo(name=d.name, description=d.description) for d in dimensions]
@@ -259,6 +277,8 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         Returns:
             Query result
         """
+        client = self._ensure_client_ready()
+
         # Helper to convert "null" string to None
         def _normalize_null(value):
             if value is None or value == "null" or value == "":
@@ -287,7 +307,7 @@ class MetricFlowAdapter(BaseSemanticAdapter):
 
         if dry_run:
             # Use explain to get SQL without executing
-            result = self.client.explain(
+            result = client.explain(
                 metrics=metrics,
                 dimensions=query_dimensions,
                 start_time=start_time,
@@ -309,7 +329,7 @@ class MetricFlowAdapter(BaseSemanticAdapter):
                 f"Executing query: metrics={metrics}, dimensions={query_dimensions}, "
                 f"start_time={start_time}, end_time={end_time}, where={where_clause}, limit={limit}"
             )
-            result = self.client.query(
+            result = client.query(
                 metrics=metrics,
                 dimensions=query_dimensions,
                 start_time=start_time,
