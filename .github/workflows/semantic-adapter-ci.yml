@@ -56,5 +56,5 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Build packages
+      - name: Build and smoke-check packages
         run: ci/run-build.sh

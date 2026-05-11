@@ -11,14 +11,15 @@ PACKAGES=(
 
 usage() {
   cat <<'USAGE'
-Usage: ci/run-build.sh [--list] [--dry-run] [package ...]
+Usage: ci/run-build.sh [--list] [--dry-run] [--skip-smoke] [package ...]
 
-Builds semantic adapter workspace packages.
+Builds semantic adapter workspace packages and smoke-checks the built wheels.
 
 Options:
-  --list      List configured packages.
-  --dry-run   Print selected build commands without running them.
-  -h, --help  Show this help.
+  --list        List configured packages.
+  --dry-run     Print selected build commands without running them.
+  --skip-smoke  Skip install/import smoke checks for built wheels.
+  -h, --help    Show this help.
 USAGE
 }
 
@@ -39,6 +40,7 @@ list_packages() {
 
 requested_packages=()
 dry_run=0
+skip_smoke=0
 dist_dir="${DIST_DIR:-$ROOT_DIR/dist}"
 
 while [ "$#" -gt 0 ]; do
@@ -49,6 +51,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --dry-run)
       dry_run=1
+      shift
+      ;;
+    --skip-smoke)
+      skip_smoke=1
       shift
       ;;
     -h|--help)
@@ -91,6 +97,91 @@ should_run_package() {
 
 require_command uv
 
+single_artifact() {
+  local package="$1"
+  local output_dir="$2"
+  local pattern="$3"
+  local label="$4"
+  local count
+
+  count="$(find "$output_dir" -maxdepth 1 -type f -name "$pattern" | wc -l | tr -d ' ')"
+  if [ "$count" != "1" ]; then
+    echo "Expected exactly one $label for $package in $output_dir, found $count" >&2
+    find "$output_dir" -maxdepth 1 -type f -print >&2
+    exit 1
+  fi
+
+  find "$output_dir" -maxdepth 1 -type f -name "$pattern" | sort | head -n 1
+}
+
+smoke_check_package() {
+  local package="$1"
+  local wheel_path="$2"
+  local core_wheel_path
+
+  echo ""
+  echo "=== Package smoke: $package ==="
+
+  case "$package" in
+    datus-semantic-core)
+      uv run --no-project --isolated \
+        --with "$wheel_path" \
+        python - <<'PY'
+from datus_semantic_core import BaseSemanticAdapter, SemanticAdapterConfig
+from datus_semantic_core.models import MetricDefinition, SemanticModelInfo
+
+assert BaseSemanticAdapter is not None
+assert SemanticAdapterConfig(type="metricflow") is not None
+assert MetricDefinition(name="orders") is not None
+assert SemanticModelInfo(name="sales") is not None
+PY
+      ;;
+    datus-semantic-metricflow)
+      core_wheel_path=""
+      if [ -d "$dist_dir/datus-semantic-core" ]; then
+        core_wheel_path="$(find "$dist_dir/datus-semantic-core" -maxdepth 1 -type f -name '*.whl' | sort | head -n 1)"
+      fi
+
+      if [ -n "$core_wheel_path" ]; then
+        uv run --no-project --isolated \
+          --with "$core_wheel_path" \
+          --with "$wheel_path" \
+          python - <<'PY'
+from importlib import metadata
+
+import datus_semantic_metricflow
+
+assert datus_semantic_metricflow is not None
+entry_points = metadata.entry_points(group="datus.semantic_adapters")
+metricflow = [entry_point for entry_point in entry_points if entry_point.name == "metricflow"]
+assert metricflow, "metricflow semantic adapter entry point is missing"
+register = metricflow[0].load()
+assert callable(register)
+PY
+      else
+        uv run --no-project --isolated \
+          --with "$wheel_path" \
+          python - <<'PY'
+from importlib import metadata
+
+import datus_semantic_metricflow
+
+assert datus_semantic_metricflow is not None
+entry_points = metadata.entry_points(group="datus.semantic_adapters")
+metricflow = [entry_point for entry_point in entry_points if entry_point.name == "metricflow"]
+assert metricflow, "metricflow semantic adapter entry point is missing"
+register = metricflow[0].load()
+assert callable(register)
+PY
+      fi
+      ;;
+    *)
+      echo "No package smoke configured for package: $package" >&2
+      exit 2
+      ;;
+  esac
+}
+
 for package in "${PACKAGES[@]}"; do
   if ! should_run_package "$package"; then
     continue
@@ -102,10 +193,20 @@ for package in "${PACKAGES[@]}"; do
   echo "=== Build package: $package ==="
   if [ "$dry_run" -eq 1 ]; then
     echo "uv build --package $package --out-dir $output_dir"
+    if [ "$skip_smoke" -ne 1 ]; then
+      echo "package smoke: $package"
+    fi
     continue
   fi
 
   rm -rf "$output_dir"
   mkdir -p "$output_dir"
   uv build --package "$package" --out-dir "$output_dir"
+
+  single_artifact "$package" "$output_dir" "*.whl" "wheel" >/dev/null
+  single_artifact "$package" "$output_dir" "*.tar.gz" "sdist" >/dev/null
+
+  if [ "$skip_smoke" -ne 1 ]; then
+    smoke_check_package "$package" "$(single_artifact "$package" "$output_dir" "*.whl" "wheel")"
+  fi
 done
