@@ -139,7 +139,11 @@ PY
     datus-semantic-metricflow)
       core_wheel_path=""
       if [ -d "$dist_dir/datus-semantic-core" ]; then
-        core_wheel_path="$(find "$dist_dir/datus-semantic-core" -maxdepth 1 -type f -name '*.whl' | sort | head -n 1)"
+        core_wheel_path="$(single_artifact \
+          "datus-semantic-core" \
+          "$dist_dir/datus-semantic-core" \
+          "*.whl" \
+          "wheel")"
       fi
 
       if [ -n "$core_wheel_path" ]; then
