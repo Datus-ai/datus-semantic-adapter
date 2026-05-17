@@ -1,6 +1,6 @@
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 import logging
 import os
@@ -10,7 +10,6 @@ from datus_semantic_metricflow.config import MetricFlowConfig
 from datus_semantic_metricflow.models import (
     DimensionInfo,
     MetricDefinition,
-    MetricType,
     QueryResult,
     ValidationIssue,
     ValidationResult,
@@ -61,6 +60,7 @@ class MetricFlowAdapter(BaseSemanticAdapter):
                     account=config.db_config.get("account", ""),
                     project_id=config.db_config.get("project_id", ""),
                     model_path=model_path,
+                    sslmode=config.db_config.get("sslmode", ""),
                 )
                 self._config_handler = DictConfigHandler(config_dict)
                 logger.info("Using DictConfigHandler (in-memory config, no file read)")

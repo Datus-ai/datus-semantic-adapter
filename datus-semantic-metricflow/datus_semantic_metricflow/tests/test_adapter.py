@@ -79,8 +79,14 @@ class TestMetricFlowAdapter:
         mock_client = MagicMock()
 
         with (
-            patch("datus_semantic_metricflow.adapter.build_config_dict_from_db_params", return_value={"k": "v"}),
-            patch("datus_semantic_metricflow.adapter.DictConfigHandler", return_value=mock_handler) as mock_dict_handler,
+            patch(
+                "datus_semantic_metricflow.adapter.build_config_dict_from_db_params",
+                return_value={"k": "v"},
+            ) as mock_build_config,
+            patch(
+                "datus_semantic_metricflow.adapter.DictConfigHandler",
+                return_value=mock_handler,
+            ) as mock_dict_handler,
             patch("datus_semantic_metricflow.adapter.MetricFlowClient", return_value=mock_client) as mock_client_cls,
             patch("metricflow.sql_clients.sql_utils.make_sql_client_from_config", return_value=mock_sql_client),
             patch.object(MetricFlowAdapter, "_build_user_configured_model_from_config", return_value=mock_user_model),
@@ -90,11 +96,13 @@ class TestMetricFlowAdapter:
             adapter = MetricFlowAdapter(
                 MetricFlowConfig(
                     datasource="test",
-                    db_config={"type": "duckdb", "database": "demo"},
+                    db_config={"type": "greenplum", "database": "demo", "sslmode": "disable"},
                     agent_home="/tmp/home",
                 )
             )
 
+        mock_build_config.assert_called_once()
+        assert mock_build_config.call_args.kwargs["sslmode"] == "disable"
         mock_dict_handler.assert_called_once_with({"k": "v"})
         mock_client_cls.assert_not_called()
         assert adapter.client.sql_client is mock_sql_client
