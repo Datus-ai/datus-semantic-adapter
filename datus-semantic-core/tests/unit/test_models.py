@@ -4,6 +4,7 @@
 """Unit tests for datus_semantic_core.models"""
 
 import pytest
+from pydantic import ValidationError
 
 from datus_semantic_core.models import (
     AnomalyContext,
@@ -137,6 +138,13 @@ class TestMetricDefinition:
         assert m.path == ["Finance"]
         assert m.metadata["cube_name"] == "orders"
 
+    def test_arbitrary_depth_path_is_preserved(self):
+        path = ["Sales", "Region", "Store", "Promotion"]
+
+        metric = MetricDefinition(name="promo_revenue", path=path)
+
+        assert metric.path == path
+
 
 class TestQueryResult:
     def test_empty(self):
@@ -154,6 +162,18 @@ class TestQueryResult:
         assert len(qr.data) == 1
         assert qr.metadata["execution_time"] == 0.5
 
+    def test_default_collections_are_isolated(self):
+        first = QueryResult()
+        second = QueryResult()
+
+        first.columns.append("region")
+        first.data.append({"region": "US"})
+        first.metadata["source"] = "test"
+
+        assert second.columns == []
+        assert second.data == []
+        assert second.metadata == {}
+
 
 class TestValidationResult:
     def test_valid(self):
@@ -170,10 +190,12 @@ class TestValidationResult:
         assert len(vr.issues) == 1
 
     def test_validation_issue_with_location(self):
-        from datus_semantic_core.models import ValidationIssue
-
         issue = ValidationIssue(severity="warning", message="bad join", location="models/orders.yml:42")
         assert issue.location == "models/orders.yml:42"
+
+    def test_validation_issue_rejects_unknown_severity(self):
+        with pytest.raises(ValidationError):
+            ValidationIssue(severity="fatal", message="unsupported severity")
 
 
 class TestAnomalyContext:
@@ -183,7 +205,5 @@ class TestAnomalyContext:
         assert ac.observed_change_pct == 25.5
 
     def test_anomaly_context_forbids_extra_fields(self):
-        from pydantic import ValidationError
-
         with pytest.raises(ValidationError):
             AnomalyContext(rule="test", observed_change_pct=10.0, unknown_field="bad")

@@ -1,3 +1,4 @@
+from importlib import metadata
 from unittest.mock import patch
 
 import pytest
@@ -31,6 +32,16 @@ def reset_registry_state():
 
 
 class TestSemanticAdapterRegistry:
+    def test_metricflow_entry_point_loads_register_function(self):
+        entry_points = metadata.entry_points(group="datus.semantic_adapters")
+        metricflow_entry_points = [
+            entry_point for entry_point in entry_points if entry_point.name == "metricflow"
+        ]
+
+        assert len(metricflow_entry_points) == 1
+        loaded_register = metricflow_entry_points[0].load()
+        assert loaded_register is register
+
     def test_register_adds_metricflow_metadata(self):
         register()
 

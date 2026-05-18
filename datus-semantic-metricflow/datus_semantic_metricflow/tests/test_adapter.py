@@ -136,6 +136,61 @@ class TestMetricFlowAdapter:
 
         assert result.endswith("/tmp/datus-home/semantic_models/analytics")
 
+    def test_resolve_model_path_honors_explicit_semantic_models_path(self, tmp_path):
+        semantic_models_path = tmp_path / "semantic" / "models"
+        config = MetricFlowConfig(
+            datasource="analytics",
+            agent_home="/tmp/datus-home",
+            semantic_models_path=str(semantic_models_path),
+        )
+
+        result = MetricFlowAdapter._resolve_model_path(config)
+
+        assert result == str(semantic_models_path)
+        assert semantic_models_path.is_dir()
+
+    def test_build_metricflow_config_dict_normalizes_db_config(self):
+        captured_kwargs = {}
+
+        def fake_build_config_dict_from_db_params(**kwargs):
+            captured_kwargs.update(kwargs)
+            return {"config": "ok"}
+
+        with patch(
+            "datus_semantic_metricflow.adapter.build_config_dict_from_db_params",
+            fake_build_config_dict_from_db_params,
+        ):
+            result = MetricFlowAdapter._build_metricflow_config_dict(
+                {
+                    "type": "postgres",
+                    "host": "localhost",
+                    "port": 15432,
+                    "username": "datus",
+                    "password": "secret",
+                    "database": "analytics",
+                    "schema": "public",
+                    "sslmode": "require",
+                },
+                "/tmp/models",
+            )
+
+        assert result == {"config": "ok"}
+        assert captured_kwargs == {
+            "db_type": "postgres",
+            "host": "localhost",
+            "port": "15432",
+            "username": "datus",
+            "password": "secret",
+            "database": "analytics",
+            "schema": "public",
+            "uri": "",
+            "warehouse": "",
+            "account": "",
+            "project_id": "",
+            "model_path": "/tmp/models",
+            "sslmode": "require",
+        }
+
     def test_collect_model_file_paths_includes_gitignored_yaml(self, tmp_path):
         (tmp_path / ".gitignore").write_text("/subject/\n")
         model_dir = tmp_path / "subject" / "semantic_models" / "analytics"
@@ -516,6 +571,117 @@ class TestMetricFlowAdapter:
 
         assert result.valid is False
         assert result.issues == [ValidationIssue(severity="error", message="bad lint")]
+
+    @pytest.mark.asyncio
+    async def test_validate_semantic_returns_errors_from_parsing_stage(self, adapter):
+        lint_results = _validation_results()
+        parsing_issues = _validation_results(
+            errors=["missing primary entity"],
+            has_blocking_issues=True,
+        )
+
+        with (
+            patch("metricflow.engine.utils.path_to_models", return_value="/tmp/models"),
+            patch("metricflow.model.parsing.config_linter.ConfigLinter") as mock_linter_cls,
+            patch.object(
+                adapter,
+                "_collect_model_file_paths",
+                return_value=["/tmp/models/orders.yml"],
+            ),
+            patch.object(
+                adapter,
+                "_model_build_result_from_config",
+                return_value=SimpleNamespace(issues=parsing_issues, model=None),
+            ),
+            patch("metricflow.model.model_validator.ModelValidator") as mock_validator_cls,
+        ):
+            mock_linter_cls.return_value.lint_files.return_value = lint_results
+
+            result = await adapter.validate_semantic()
+
+        assert result.valid is False
+        assert result.issues == [
+            ValidationIssue(severity="error", message="missing primary entity")
+        ]
+        mock_validator_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_validate_semantic_classifies_semantic_validation_exception(self, adapter):
+        lint_results = _validation_results()
+        parsing_issues = _validation_results()
+
+        with (
+            patch("metricflow.engine.utils.path_to_models", return_value="/tmp/models"),
+            patch("metricflow.model.parsing.config_linter.ConfigLinter") as mock_linter_cls,
+            patch.object(
+                adapter,
+                "_collect_model_file_paths",
+                return_value=["/tmp/models/orders.yml"],
+            ),
+            patch.object(
+                adapter,
+                "_model_build_result_from_config",
+                return_value=SimpleNamespace(issues=parsing_issues, model="user-model"),
+            ),
+            patch("metricflow.model.model_validator.ModelValidator") as mock_validator_cls,
+        ):
+            mock_linter_cls.return_value.lint_files.return_value = lint_results
+            mock_validator_cls.return_value.validate_model.side_effect = RuntimeError(
+                "invalid metric graph"
+            )
+
+            result = await adapter.validate_semantic()
+
+        assert result.valid is False
+        assert result.issues == [
+            ValidationIssue(
+                severity="error",
+                message="Semantic validation failed: invalid metric graph",
+            )
+        ]
+
+    @pytest.mark.asyncio
+    async def test_validate_semantic_classifies_data_warehouse_exception(self, adapter):
+        adapter.client = SimpleNamespace(sql_client=MagicMock(), system_schema="datus_system")
+        lint_results = _validation_results()
+        parsing_issues = _validation_results()
+        semantic_issues = _validation_results()
+
+        with (
+            patch("metricflow.engine.utils.path_to_models", return_value="/tmp/models"),
+            patch("metricflow.model.parsing.config_linter.ConfigLinter") as mock_linter_cls,
+            patch.object(
+                adapter,
+                "_collect_model_file_paths",
+                return_value=["/tmp/models/orders.yml"],
+            ),
+            patch.object(
+                adapter,
+                "_model_build_result_from_config",
+                return_value=SimpleNamespace(issues=parsing_issues, model="user-model"),
+            ),
+            patch("metricflow.model.model_validator.ModelValidator") as mock_validator_cls,
+            patch("metricflow.model.data_warehouse_model_validator.DataWarehouseModelValidator"),
+            patch.object(
+                adapter,
+                "_run_dw_validations",
+                side_effect=RuntimeError("warehouse unavailable"),
+            ),
+        ):
+            mock_linter_cls.return_value.lint_files.return_value = lint_results
+            mock_validator_cls.return_value.validate_model.return_value = SimpleNamespace(
+                issues=semantic_issues
+            )
+
+            result = await adapter.validate_semantic()
+
+        assert result.valid is False
+        assert result.issues == [
+            ValidationIssue(
+                severity="error",
+                message="Data warehouse validation failed: warehouse unavailable",
+            )
+        ]
 
     def test_convert_validation_results_maps_errors_and_warnings(self, adapter):
         results = _validation_results(errors=["bad metric"], warnings=["deprecated field"])
