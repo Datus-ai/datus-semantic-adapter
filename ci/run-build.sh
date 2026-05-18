@@ -153,6 +153,7 @@ PY
           python - <<'PY'
 from importlib import metadata
 
+from datus_semantic_core import semantic_adapter_registry
 import datus_semantic_metricflow
 
 assert datus_semantic_metricflow is not None
@@ -161,6 +162,10 @@ metricflow = [entry_point for entry_point in entry_points if entry_point.name ==
 assert metricflow, "metricflow semantic adapter entry point is missing"
 register = metricflow[0].load()
 assert callable(register)
+register()
+metadata = semantic_adapter_registry.get_metadata("metricflow")
+assert metadata is not None
+assert metadata.adapter_class.__name__ == "MetricFlowAdapter"
 PY
       else
         uv run --no-project --isolated \
@@ -168,6 +173,7 @@ PY
           python - <<'PY'
 from importlib import metadata
 
+from datus_semantic_core import semantic_adapter_registry
 import datus_semantic_metricflow
 
 assert datus_semantic_metricflow is not None
@@ -176,6 +182,10 @@ metricflow = [entry_point for entry_point in entry_points if entry_point.name ==
 assert metricflow, "metricflow semantic adapter entry point is missing"
 register = metricflow[0].load()
 assert callable(register)
+register()
+metadata = semantic_adapter_registry.get_metadata("metricflow")
+assert metadata is not None
+assert metadata.adapter_class.__name__ == "MetricFlowAdapter"
 PY
       fi
       ;;
