@@ -1,3 +1,4 @@
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 from typing import List, Optional
@@ -18,7 +19,10 @@ from datus_semantic_metricflow.models import (
 # Import MetricFlow API
 from metricflow.api.metricflow_client import MetricFlowClient
 from metricflow.configuration.datus_config_handler import DatusConfigHandler
-from metricflow.configuration.dict_config_handler import DictConfigHandler, build_config_dict_from_db_params
+from metricflow.configuration.dict_config_handler import (
+    DictConfigHandler,
+    build_config_dict_from_db_params,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,33 +51,23 @@ class MetricFlowAdapter(BaseSemanticAdapter):
             # Initialize config handler: dict-based or file-based
             if config.db_config:
                 model_path = self._resolve_model_path(config)
-                config_dict = build_config_dict_from_db_params(
-                    db_type=config.db_config.get("type", ""),
-                    host=config.db_config.get("host", ""),
-                    port=str(config.db_config.get("port", "")),
-                    username=config.db_config.get("username", ""),
-                    password=config.db_config.get("password", ""),
-                    database=config.db_config.get("database", ""),
-                    schema=config.db_config.get("schema", ""),
-                    uri=config.db_config.get("uri", ""),
-                    warehouse=config.db_config.get("warehouse", ""),
-                    account=config.db_config.get("account", ""),
-                    project_id=config.db_config.get("project_id", ""),
-                    model_path=model_path,
-                    sslmode=config.db_config.get("sslmode", ""),
-                )
+                config_dict = self._build_metricflow_config_dict(config.db_config, model_path)
                 self._config_handler = DictConfigHandler(config_dict)
                 logger.info("Using DictConfigHandler (in-memory config, no file read)")
             else:
-                config_path = getattr(config, 'config_path', None)
-                self._config_handler = DatusConfigHandler(namespace=self.datasource, config_path=config_path)
+                config_path = getattr(config, "config_path", None)
+                self._config_handler = DatusConfigHandler(
+                    namespace=self.datasource, config_path=config_path
+                )
                 logger.info("Using DatusConfigHandler (reading agent.yml from disk)")
 
             # Build client components using the config handler
             sql_client = make_sql_client_from_config(self._config_handler)
             schema = self._config_handler.get_value(CONFIG_DWH_SCHEMA)
             self.client = SimpleNamespace(sql_client=sql_client, system_schema=schema)
-            logger.info("MetricFlowAdapter initialized; MetricFlowClient will load semantic YAML on first use")
+            logger.info(
+                "MetricFlowAdapter initialized; MetricFlowClient will load semantic YAML on first use"
+            )
 
         except Exception as e:
             logger.error(f"Failed to initialize MetricFlowAdapter: {e}", exc_info=True)
@@ -85,7 +79,9 @@ class MetricFlowAdapter(BaseSemanticAdapter):
             return self.client
 
         try:
-            user_configured_model = self._build_user_configured_model_from_config(self._config_handler)
+            user_configured_model = self._build_user_configured_model_from_config(
+                self._config_handler
+            )
             self.client = MetricFlowClient(
                 sql_client=self.client.sql_client,
                 user_configured_model=user_configured_model,
@@ -120,6 +116,35 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         path = Path(agent_home).expanduser().resolve() / "semantic_models" / config.datasource
         path.mkdir(parents=True, exist_ok=True)
         return str(path)
+
+    @staticmethod
+    def _build_metricflow_config_dict(db_config: dict, model_path: str) -> dict:
+        kwargs = {
+            "db_type": db_config.get("type", ""),
+            "host": db_config.get("host", ""),
+            "port": str(db_config.get("port", "")),
+            "username": db_config.get("username", ""),
+            "password": db_config.get("password", ""),
+            "database": db_config.get("database", ""),
+            "schema": db_config.get("schema", ""),
+            "uri": db_config.get("uri", ""),
+            "warehouse": db_config.get("warehouse", ""),
+            "account": db_config.get("account", ""),
+            "project_id": db_config.get("project_id", ""),
+            "model_path": model_path,
+        }
+        sslmode = db_config.get("sslmode")
+        if sslmode and MetricFlowAdapter._build_config_supports_kwarg("sslmode"):
+            kwargs["sslmode"] = sslmode
+        return build_config_dict_from_db_params(**kwargs)
+
+    @staticmethod
+    def _build_config_supports_kwarg(name: str) -> bool:
+        signature = inspect.signature(build_config_dict_from_db_params)
+        return name in signature.parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
 
     @staticmethod
     def _collect_model_file_paths(model_path: str) -> List[str]:
@@ -209,14 +234,16 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         for metric in full_metrics:
             # Get dimensions for this metric
             dimensions = client.engine.simple_dimensions_for_metrics([metric.name])
-            metrics.append(MetricDefinition(
-                name=metric.name,
-                description=metric.description,
-                type=metric.type,
-                dimensions=[d.name for d in dimensions],
-                measures=[m.name for m in metric.input_measures],
-                metadata={},
-            ))
+            metrics.append(
+                MetricDefinition(
+                    name=metric.name,
+                    description=metric.description,
+                    type=metric.type,
+                    dimensions=[d.name for d in dimensions],
+                    measures=[m.name for m in metric.input_measures],
+                    metadata={},
+                )
+            )
 
         if path:
             metrics = [m for m in metrics if m.path and m.path[: len(path)] == path]
@@ -338,7 +365,9 @@ class MetricFlowAdapter(BaseSemanticAdapter):
                 limit=limit,
                 order=order_list,
             )
-            logger.debug(f"Query result: result_df={result.result_df is not None}, empty={result.result_df.empty if result.result_df is not None else 'N/A'}")
+            logger.debug(
+                f"Query result: result_df={result.result_df is not None}, empty={result.result_df.empty if result.result_df is not None else 'N/A'}"
+            )
 
             # Convert DataFrame to QueryResult
             if result.result_df is not None and not result.result_df.empty:
@@ -383,7 +412,9 @@ class MetricFlowAdapter(BaseSemanticAdapter):
                 return ValidationResult(valid=False, issues=all_issues)
         except Exception as e:
             logger.error(f"Lint validation failed: {e}")
-            all_issues.append(ValidationIssue(severity="error", message=f"Lint validation failed: {e}"))
+            all_issues.append(
+                ValidationIssue(severity="error", message=f"Lint validation failed: {e}")
+            )
             return ValidationResult(valid=False, issues=all_issues)
 
         # Step 2: Parsing Validation
@@ -398,7 +429,9 @@ class MetricFlowAdapter(BaseSemanticAdapter):
             user_model = parsing_result.model
         except Exception as e:
             logger.error(f"Parsing validation failed: {e}")
-            all_issues.append(ValidationIssue(severity="error", message=f"Parsing validation failed: {e}"))
+            all_issues.append(
+                ValidationIssue(severity="error", message=f"Parsing validation failed: {e}")
+            )
             return ValidationResult(valid=False, issues=all_issues)
 
         # Step 3: Semantic Validation
@@ -409,7 +442,9 @@ class MetricFlowAdapter(BaseSemanticAdapter):
                 return ValidationResult(valid=False, issues=all_issues)
         except Exception as e:
             logger.error(f"Semantic validation failed: {e}")
-            all_issues.append(ValidationIssue(severity="error", message=f"Semantic validation failed: {e}"))
+            all_issues.append(
+                ValidationIssue(severity="error", message=f"Semantic validation failed: {e}")
+            )
             return ValidationResult(valid=False, issues=all_issues)
 
         # Step 4: Data Warehouse Validation
@@ -422,7 +457,9 @@ class MetricFlowAdapter(BaseSemanticAdapter):
             all_issues.extend(self._convert_validation_results(dw_results))
         except Exception as e:
             logger.error(f"Data warehouse validation failed: {e}")
-            all_issues.append(ValidationIssue(severity="error", message=f"Data warehouse validation failed: {e}"))
+            all_issues.append(
+                ValidationIssue(severity="error", message=f"Data warehouse validation failed: {e}")
+            )
 
         has_errors = any(issue.severity == "error" for issue in all_issues)
         return ValidationResult(valid=not has_errors, issues=all_issues)
@@ -438,25 +475,31 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         measure_results = dw_validator.validate_measures(model, timeout)
         metric_results = dw_validator.validate_metrics(model, timeout)
 
-        return ModelValidationResults.merge([
-            data_source_results,
-            dimension_results,
-            identifier_results,
-            measure_results,
-            metric_results,
-        ])
+        return ModelValidationResults.merge(
+            [
+                data_source_results,
+                dimension_results,
+                identifier_results,
+                measure_results,
+                metric_results,
+            ]
+        )
 
     def _convert_validation_results(self, results) -> List[ValidationIssue]:
         """Convert ModelValidationResults to list of ValidationIssue."""
         issues = []
         for error in results.errors:
-            issues.append(ValidationIssue(
-                severity="error",
-                message=str(error),
-            ))
+            issues.append(
+                ValidationIssue(
+                    severity="error",
+                    message=str(error),
+                )
+            )
         for warning in results.warnings:
-            issues.append(ValidationIssue(
-                severity="warning",
-                message=str(warning),
-            ))
+            issues.append(
+                ValidationIssue(
+                    severity="warning",
+                    message=str(warning),
+                )
+            )
         return issues
