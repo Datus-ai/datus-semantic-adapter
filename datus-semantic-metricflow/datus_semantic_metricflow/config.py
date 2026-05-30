@@ -12,7 +12,10 @@ class MetricFlowConfig(SemanticAdapterConfig):
     timeout: int = Field(default=300, description="Query timeout in seconds")
     db_config: Optional[Dict[str, str]] = Field(
         None,
-        description="Database config dict (type, host, port, username, password, database, schema, uri, etc.)",
+        description=(
+            "Database config dict (type, host, port, username, password, "
+            "private_key_file, database, schema, uri, etc.)"
+        ),
     )
     agent_home: Optional[str] = Field(None, description="Datus agent home path, for resolving model_path")
     semantic_models_path: Optional[str] = Field(

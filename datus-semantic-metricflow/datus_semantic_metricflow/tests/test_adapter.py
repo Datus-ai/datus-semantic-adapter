@@ -191,6 +191,61 @@ class TestMetricFlowAdapter:
             "sslmode": "require",
         }
 
+    def test_build_metricflow_config_dict_forwards_snowflake_key_pair_fields(self):
+        captured_kwargs = {}
+
+        def fake_build_config_dict_from_db_params(**kwargs):
+            captured_kwargs.update(kwargs)
+            return {"config": "ok"}
+
+        with patch(
+            "datus_semantic_metricflow.adapter.build_config_dict_from_db_params",
+            fake_build_config_dict_from_db_params,
+        ):
+            result = MetricFlowAdapter._build_metricflow_config_dict(
+                {
+                    "type": "snowflake",
+                    "account": "sf_account",
+                    "username": "sf_user",
+                    "database": "sf_db",
+                    "schema": "public",
+                    "warehouse": "wh1",
+                    "role": "analyst",
+                    "private_key_file": "/tmp/rsa_key.p8",
+                    "private_key_file_pwd": 1234,
+                },
+                "/tmp/models",
+            )
+
+        assert result == {"config": "ok"}
+        assert captured_kwargs["password"] == ""
+        assert captured_kwargs["role"] == "analyst"
+        assert captured_kwargs["private_key_file"] == "/tmp/rsa_key.p8"
+        assert captured_kwargs["private_key_file_pwd"] == "1234"
+
+    def test_build_metricflow_config_dict_omits_snowflake_key_pair_fields_when_unsupported(self):
+        _build_config_with_sslmode.calls.clear()
+
+        with patch(
+            "datus_semantic_metricflow.adapter.build_config_dict_from_db_params",
+            _build_config_with_sslmode,
+        ):
+            result = MetricFlowAdapter._build_metricflow_config_dict(
+                {
+                    "type": "snowflake",
+                    "account": "sf_account",
+                    "username": "sf_user",
+                    "database": "sf_db",
+                    "warehouse": "wh1",
+                    "private_key_file": "/tmp/rsa_key.p8",
+                },
+                "/tmp/models",
+            )
+
+        assert result == {"k": "v"}
+        assert len(_build_config_with_sslmode.calls) == 1
+        assert "private_key_file" not in _build_config_with_sslmode.calls[0]
+
     def test_collect_model_file_paths_includes_gitignored_yaml(self, tmp_path):
         (tmp_path / ".gitignore").write_text("/subject/\n")
         model_dir = tmp_path / "subject" / "semantic_models" / "analytics"

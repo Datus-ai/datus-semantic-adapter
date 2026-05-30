@@ -136,6 +136,14 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         sslmode = db_config.get("sslmode")
         if sslmode and MetricFlowAdapter._build_config_supports_kwarg("sslmode"):
             kwargs["sslmode"] = sslmode
+        for optional_key in ("role", "private_key_file", "private_key_file_pwd"):
+            value = db_config.get(optional_key)
+            if (
+                value is not None
+                and value != ""
+                and MetricFlowAdapter._build_config_supports_kwarg(optional_key)
+            ):
+                kwargs[optional_key] = str(value)
         return build_config_dict_from_db_params(**kwargs)
 
     @staticmethod
