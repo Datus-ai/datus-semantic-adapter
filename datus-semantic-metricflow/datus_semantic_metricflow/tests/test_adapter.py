@@ -609,6 +609,96 @@ class TestMetricFlowAdapter:
         assert result == ValidationResult(valid=True, issues=[])
 
     @pytest.mark.asyncio
+    async def test_validate_semantic_model_scope_ignores_no_metrics_but_runs_dw(self, adapter):
+        adapter.client = SimpleNamespace(sql_client=MagicMock(), system_schema="datus_system")
+        lint_results = _validation_results()
+        parsing_issues = _validation_results()
+        semantic_issues = _validation_results(
+            errors=["message='No metrics present in the model.' context=None"],
+            has_blocking_issues=True,
+        )
+
+        with (
+            patch("metricflow.engine.utils.path_to_models", return_value="/tmp/models"),
+            patch("metricflow.model.parsing.config_linter.ConfigLinter") as mock_linter_cls,
+            patch.object(
+                adapter,
+                "_collect_model_file_paths",
+                return_value=["/tmp/models/orders.yml"],
+            ),
+            patch.object(
+                adapter,
+                "_model_build_result_from_config",
+                return_value=SimpleNamespace(issues=parsing_issues, model="user-model"),
+            ),
+            patch("metricflow.model.model_validator.ModelValidator") as mock_validator_cls,
+            patch("metricflow.model.data_warehouse_model_validator.DataWarehouseModelValidator"),
+            patch.object(adapter, "_run_dw_validations", return_value=_validation_results()) as mock_dw,
+        ):
+            mock_linter_cls.return_value.lint_files.return_value = lint_results
+            mock_validator_cls.return_value.validate_model.return_value = SimpleNamespace(
+                issues=semantic_issues
+            )
+
+            result = await adapter.validate_semantic(scope="semantic_model")
+
+        assert result == ValidationResult(valid=True, issues=[])
+        mock_dw.assert_called_once_with(
+            mock_dw.call_args.args[0],
+            "user-model",
+            include_metrics=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_validate_semantic_model_scope_keeps_real_semantic_errors(self, adapter):
+        lint_results = _validation_results()
+        parsing_issues = _validation_results()
+        semantic_issues = _validation_results(
+            errors=[
+                "message='No metrics present in the model.' context=None",
+                "bad time dimension",
+            ],
+            has_blocking_issues=True,
+        )
+
+        with (
+            patch("metricflow.engine.utils.path_to_models", return_value="/tmp/models"),
+            patch("metricflow.model.parsing.config_linter.ConfigLinter") as mock_linter_cls,
+            patch.object(
+                adapter,
+                "_collect_model_file_paths",
+                return_value=["/tmp/models/orders.yml"],
+            ),
+            patch.object(
+                adapter,
+                "_model_build_result_from_config",
+                return_value=SimpleNamespace(issues=parsing_issues, model="user-model"),
+            ),
+            patch("metricflow.model.model_validator.ModelValidator") as mock_validator_cls,
+            patch.object(adapter, "_run_dw_validations") as mock_dw,
+        ):
+            mock_linter_cls.return_value.lint_files.return_value = lint_results
+            mock_validator_cls.return_value.validate_model.return_value = SimpleNamespace(
+                issues=semantic_issues
+            )
+
+            result = await adapter.validate_semantic(scope="semantic_model")
+
+        assert result.valid is False
+        assert result.issues == [ValidationIssue(severity="error", message="bad time dimension")]
+        mock_dw.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kwargs", [{"scope": ""}, {"validation_scope": ""}])
+    async def test_validate_semantic_rejects_empty_scope(self, adapter, kwargs):
+        result = await adapter.validate_semantic(**kwargs)
+
+        assert result.valid is False
+        assert result.issues == [
+            ValidationIssue(severity="error", message="scope must be one of: all, semantic_model")
+        ]
+
+    @pytest.mark.asyncio
     async def test_validate_semantic_returns_errors_from_lint_stage(self, adapter):
         lint_results = _validation_results(errors=["bad lint"], has_blocking_issues=True)
 
@@ -763,6 +853,24 @@ class TestMetricFlowAdapter:
         dw_validator.validate_identifiers.assert_called_once_with("user-model", 42)
         dw_validator.validate_measures.assert_called_once_with("user-model", 42)
         dw_validator.validate_metrics.assert_called_once_with("user-model", 42)
+
+    def test_run_dw_validations_can_skip_metrics(self, adapter):
+        adapter.timeout = 42
+        dw_validator = MagicMock()
+
+        with patch(
+            "metricflow.model.validations.validator_helpers.ModelValidationResults.merge",
+            return_value="merged",
+        ) as mock_merge:
+            merged = adapter._run_dw_validations(dw_validator, model="user-model", include_metrics=False)
+
+        assert merged == "merged"
+        dw_validator.validate_data_sources.assert_called_once_with("user-model", 42)
+        dw_validator.validate_dimensions.assert_called_once_with("user-model", 42)
+        dw_validator.validate_identifiers.assert_called_once_with("user-model", 42)
+        dw_validator.validate_measures.assert_called_once_with("user-model", 42)
+        dw_validator.validate_metrics.assert_not_called()
+        assert len(mock_merge.call_args.args[0]) == 4
 
 
 class TestConfiguration:

@@ -73,7 +73,7 @@ class _CorrectAdapter(BaseSemanticAdapter):
             metadata={"execution_time_ms": 12},
         )
 
-    async def validate_semantic(self):
+    async def validate_semantic(self, scope: str = "all"):
         return ValidationResult(
             valid=True,
             issues=[
@@ -111,7 +111,7 @@ class _BrokenListMetricsReturnsDict(BaseSemanticAdapter):
     async def query_metrics(self, metrics, **kwargs):
         return QueryResult()
 
-    async def validate_semantic(self):
+    async def validate_semantic(self, scope: str = "all"):
         return ValidationResult(valid=True)
 
 
@@ -132,7 +132,7 @@ class _BrokenMetricDimensionsAreObjects(BaseSemanticAdapter):
     async def query_metrics(self, metrics, **kwargs):
         return QueryResult()
 
-    async def validate_semantic(self):
+    async def validate_semantic(self, scope: str = "all"):
         return ValidationResult(valid=True)
 
 
@@ -146,7 +146,7 @@ class _BrokenGetDimensionsReturnsStrings(BaseSemanticAdapter):
     async def query_metrics(self, metrics, **kwargs):
         return QueryResult()
 
-    async def validate_semantic(self):
+    async def validate_semantic(self, scope: str = "all"):
         return ValidationResult(valid=True)
 
 
@@ -165,7 +165,7 @@ class _BrokenQueryDataIsListOfList(BaseSemanticAdapter):
             metadata={},
         )
 
-    async def validate_semantic(self):
+    async def validate_semantic(self, scope: str = "all"):
         return ValidationResult(valid=True)
 
 
@@ -185,7 +185,7 @@ class _BrokenDryRunNoIndicator(BaseSemanticAdapter):
             metadata={},
         )
 
-    async def validate_semantic(self):
+    async def validate_semantic(self, scope: str = "all"):
         return ValidationResult(valid=True)
 
 
@@ -199,7 +199,7 @@ class _BrokenValidateReturnsDict(BaseSemanticAdapter):
     async def query_metrics(self, metrics, **kwargs):
         return QueryResult()
 
-    async def validate_semantic(self):
+    async def validate_semantic(self, scope: str = "all"):
         return {"valid": True, "issues": []}  # type: ignore[return-value]
 
 
@@ -314,7 +314,7 @@ class _AdapterOverridingOptionalMethods(BaseSemanticAdapter):
             return QueryResult(columns=["sql"], data=[{"sql": "SELECT 1"}], metadata={"dry_run": True})
         return QueryResult()
 
-    async def validate_semantic(self):
+    async def validate_semantic(self, scope: str = "all"):
         return ValidationResult(valid=True)
 
     def list_semantic_models(self, catalog_name="", database_name="", schema_name=""):

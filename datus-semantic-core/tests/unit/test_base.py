@@ -24,7 +24,7 @@ class _ConcreteAdapter(BaseSemanticAdapter):
 
         return QueryResult()
 
-    async def validate_semantic(self):
+    async def validate_semantic(self, scope: str = "all"):
         from datus_semantic_core.models import ValidationResult
 
         return ValidationResult(valid=True)

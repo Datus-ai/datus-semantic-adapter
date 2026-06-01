@@ -90,6 +90,6 @@ class BaseSemanticAdapter(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    async def validate_semantic(self) -> ValidationResult:
+    async def validate_semantic(self, scope: str = "all") -> ValidationResult:
         """Validate the semantic layer configuration files."""
         raise NotImplementedError()
