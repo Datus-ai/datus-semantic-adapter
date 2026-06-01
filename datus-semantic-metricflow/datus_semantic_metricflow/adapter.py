@@ -397,7 +397,11 @@ class MetricFlowAdapter(BaseSemanticAdapter):
             else:
                 return QueryResult(columns=[], data=[])
 
-    async def validate_semantic(self) -> ValidationResult:
+    async def validate_semantic(
+        self,
+        scope: str = "all",
+        validation_scope: Optional[str] = None,
+    ) -> ValidationResult:
         """
         Validate MetricFlow configuration using full validation pipeline.
 
@@ -407,6 +411,13 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         3. Semantic validation (model semantics)
         4. Data warehouse validation
 
+        Args:
+            scope: "all" validates semantic models and metrics. "semantic_model"
+                validates semantic models before metric files exist: the expected
+                no-metrics semantic issue is ignored, but data-source, dimension,
+                identifier, and measure warehouse validations still run.
+            validation_scope: Alias for scope.
+
         Returns:
             Validation result
         """
@@ -414,6 +425,18 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         from metricflow.model.model_validator import ModelValidator
         from metricflow.model.parsing.config_linter import ConfigLinter
         from metricflow.model.data_warehouse_model_validator import DataWarehouseModelValidator
+
+        scope = validation_scope or scope or "all"
+        if scope not in {"all", "semantic_model"}:
+            return ValidationResult(
+                valid=False,
+                issues=[
+                    ValidationIssue(
+                        severity="error",
+                        message="scope must be one of: all, semantic_model",
+                    )
+                ],
+            )
 
         all_issues: List[ValidationIssue] = []
 
@@ -452,9 +475,18 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         # Step 3: Semantic Validation
         try:
             semantic_result = ModelValidator().validate_model(user_model)
-            all_issues.extend(self._convert_validation_results(semantic_result.issues))
+            semantic_issues = self._convert_validation_results(semantic_result.issues)
+            if scope == "semantic_model":
+                effective_semantic_issues = [
+                    issue for issue in semantic_issues if not self._is_no_metrics_present_issue(issue)
+                ]
+            else:
+                effective_semantic_issues = semantic_issues
+            all_issues.extend(effective_semantic_issues)
             if semantic_result.issues.has_blocking_issues:
-                return ValidationResult(valid=False, issues=all_issues)
+                has_effective_errors = any(issue.severity == "error" for issue in effective_semantic_issues)
+                if has_effective_errors or scope != "semantic_model":
+                    return ValidationResult(valid=False, issues=all_issues)
         except Exception as e:
             logger.error(f"Semantic validation failed: {e}")
             all_issues.append(
@@ -468,7 +500,11 @@ class MetricFlowAdapter(BaseSemanticAdapter):
                 sql_client=self.client.sql_client,
                 system_schema=self.client.system_schema,
             )
-            dw_results = self._run_dw_validations(dw_validator, user_model)
+            dw_results = self._run_dw_validations(
+                dw_validator,
+                user_model,
+                include_metrics=scope == "all",
+            )
             all_issues.extend(self._convert_validation_results(dw_results))
         except Exception as e:
             logger.error(f"Data warehouse validation failed: {e}")
@@ -479,26 +515,21 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         has_errors = any(issue.severity == "error" for issue in all_issues)
         return ValidationResult(valid=not has_errors, issues=all_issues)
 
-    def _run_dw_validations(self, dw_validator, model):
+    def _run_dw_validations(self, dw_validator, model, *, include_metrics: bool = True):
         """Run all data warehouse validations and merge results."""
         from metricflow.model.validations.validator_helpers import ModelValidationResults
 
         timeout = self.timeout
-        data_source_results = dw_validator.validate_data_sources(model, timeout)
-        dimension_results = dw_validator.validate_dimensions(model, timeout)
-        identifier_results = dw_validator.validate_identifiers(model, timeout)
-        measure_results = dw_validator.validate_measures(model, timeout)
-        metric_results = dw_validator.validate_metrics(model, timeout)
+        results = [
+            dw_validator.validate_data_sources(model, timeout),
+            dw_validator.validate_dimensions(model, timeout),
+            dw_validator.validate_identifiers(model, timeout),
+            dw_validator.validate_measures(model, timeout),
+        ]
+        if include_metrics:
+            results.append(dw_validator.validate_metrics(model, timeout))
 
-        return ModelValidationResults.merge(
-            [
-                data_source_results,
-                dimension_results,
-                identifier_results,
-                measure_results,
-                metric_results,
-            ]
-        )
+        return ModelValidationResults.merge(results)
 
     def _convert_validation_results(self, results) -> List[ValidationIssue]:
         """Convert ModelValidationResults to list of ValidationIssue."""
@@ -518,3 +549,10 @@ class MetricFlowAdapter(BaseSemanticAdapter):
                 )
             )
         return issues
+
+    @staticmethod
+    def _is_no_metrics_present_issue(issue: ValidationIssue) -> bool:
+        return (
+            issue.severity == "error"
+            and "No metrics present in the model" in str(issue.message)
+        )
