@@ -136,14 +136,21 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         sslmode = db_config.get("sslmode")
         if sslmode and MetricFlowAdapter._build_config_supports_kwarg("sslmode"):
             kwargs["sslmode"] = sslmode
+        unsupported_keys = []
         for optional_key in ("role", "private_key_file", "private_key_file_pwd"):
             value = db_config.get(optional_key)
-            if (
-                value is not None
-                and value != ""
-                and MetricFlowAdapter._build_config_supports_kwarg(optional_key)
-            ):
+            if value is None or value == "":
+                continue
+            if MetricFlowAdapter._build_config_supports_kwarg(optional_key):
                 kwargs[optional_key] = str(value)
+            else:
+                unsupported_keys.append(optional_key)
+        if unsupported_keys:
+            unsupported = ", ".join(unsupported_keys)
+            raise RuntimeError(
+                "Installed datus-metricflow does not support Snowflake config fields: "
+                f"{unsupported}. Install the matching datus-metricflow build before using Snowflake metrics."
+            )
         return build_config_dict_from_db_params(**kwargs)
 
     @staticmethod

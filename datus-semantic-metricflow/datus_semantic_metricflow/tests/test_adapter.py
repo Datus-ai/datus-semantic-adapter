@@ -223,28 +223,27 @@ class TestMetricFlowAdapter:
         assert captured_kwargs["private_key_file"] == "/tmp/rsa_key.p8"
         assert captured_kwargs["private_key_file_pwd"] == "1234"
 
-    def test_build_metricflow_config_dict_omits_snowflake_key_pair_fields_when_unsupported(self):
+    def test_build_metricflow_config_dict_rejects_snowflake_key_pair_fields_when_unsupported(self):
         _build_config_with_sslmode.calls.clear()
 
         with patch(
             "datus_semantic_metricflow.adapter.build_config_dict_from_db_params",
             _build_config_with_sslmode,
         ):
-            result = MetricFlowAdapter._build_metricflow_config_dict(
-                {
-                    "type": "snowflake",
-                    "account": "sf_account",
-                    "username": "sf_user",
-                    "database": "sf_db",
-                    "warehouse": "wh1",
-                    "private_key_file": "/tmp/rsa_key.p8",
-                },
-                "/tmp/models",
-            )
+            with pytest.raises(RuntimeError, match="does not support Snowflake config fields: private_key_file"):
+                MetricFlowAdapter._build_metricflow_config_dict(
+                    {
+                        "type": "snowflake",
+                        "account": "sf_account",
+                        "username": "sf_user",
+                        "database": "sf_db",
+                        "warehouse": "wh1",
+                        "private_key_file": "/tmp/rsa_key.p8",
+                    },
+                    "/tmp/models",
+                )
 
-        assert result == {"k": "v"}
-        assert len(_build_config_with_sslmode.calls) == 1
-        assert "private_key_file" not in _build_config_with_sslmode.calls[0]
+        assert _build_config_with_sslmode.calls == []
 
     def test_collect_model_file_paths_includes_gitignored_yaml(self, tmp_path):
         (tmp_path / ".gitignore").write_text("/subject/\n")
