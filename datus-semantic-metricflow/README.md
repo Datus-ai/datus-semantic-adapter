@@ -57,6 +57,7 @@ asyncio.run(main())
 | `datasource` | str | Required | Datasource for this semantic layer instance |
 | `config_path` | str | None | Path to MetricFlow configuration file |
 | `timeout` | int | 300 | Query timeout in seconds |
+| `db_config` | dict | None | Datus datasource config; Snowflake supports password or `private_key_file` / `private_key_file_pwd` plus optional `role` |
 
 ## API
 
