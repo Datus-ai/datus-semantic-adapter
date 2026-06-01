@@ -426,7 +426,9 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         from metricflow.model.parsing.config_linter import ConfigLinter
         from metricflow.model.data_warehouse_model_validator import DataWarehouseModelValidator
 
-        scope = validation_scope or scope or "all"
+        scope = validation_scope if validation_scope is not None else scope
+        if scope is None:
+            scope = "all"
         if scope not in {"all", "semantic_model"}:
             return ValidationResult(
                 valid=False,

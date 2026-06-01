@@ -689,6 +689,16 @@ class TestMetricFlowAdapter:
         mock_dw.assert_not_called()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("kwargs", [{"scope": ""}, {"validation_scope": ""}])
+    async def test_validate_semantic_rejects_empty_scope(self, adapter, kwargs):
+        result = await adapter.validate_semantic(**kwargs)
+
+        assert result.valid is False
+        assert result.issues == [
+            ValidationIssue(severity="error", message="scope must be one of: all, semantic_model")
+        ]
+
+    @pytest.mark.asyncio
     async def test_validate_semantic_returns_errors_from_lint_stage(self, adapter):
         lint_results = _validation_results(errors=["bad lint"], has_blocking_issues=True)
 
