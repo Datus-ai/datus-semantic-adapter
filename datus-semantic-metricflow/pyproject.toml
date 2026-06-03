@@ -1,6 +1,6 @@
 [project]
 name = "datus-semantic-metricflow"
-version = "0.2.6"
+version = "0.2.7"
 description = "MetricFlow adapter for Datus semantic layer"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -9,7 +9,7 @@ authors = [
 ]
 dependencies = [
     "pydantic>=2.0.0",
-    "datus-metricflow[snowflake]>=0.2.5",
+    "datus-metricflow>=0.2.5",
     "datus-semantic-core>=0.2.0",
 ]
 
