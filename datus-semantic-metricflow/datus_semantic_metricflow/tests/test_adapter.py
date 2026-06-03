@@ -87,6 +87,19 @@ def _build_config_with_sslmode(
 _build_config_with_sslmode.calls = []
 
 
+def _build_config_from_datus_datasource(db_config, model_path=""):
+    _build_config_from_datus_datasource.calls.append(
+        {
+            "db_config": dict(db_config),
+            "model_path": model_path,
+        }
+    )
+    return {"k": "v"}
+
+
+_build_config_from_datus_datasource.calls = []
+
+
 class _FakeColumns(list):
     def tolist(self):
         return list(self)
@@ -149,16 +162,57 @@ class TestMetricFlowAdapter:
         assert result == str(semantic_models_path)
         assert semantic_models_path.is_dir()
 
-    def test_build_metricflow_config_dict_normalizes_db_config(self):
+    def test_build_metricflow_config_dict_uses_datus_datasource_builder(self):
+        _build_config_from_datus_datasource.calls.clear()
+
+        with patch(
+            "datus_semantic_metricflow.adapter.build_config_dict_from_datus_datasource",
+            _build_config_from_datus_datasource,
+        ):
+            result = MetricFlowAdapter._build_metricflow_config_dict(
+                {
+                    "type": "snowflake",
+                    "account": "sf_account",
+                    "username": "sf_user",
+                    "database": "sf_db",
+                    "warehouse": "wh1",
+                    "private_key": "inline-private-key",
+                    "private_key_file_pwd": 1234,
+                },
+                "/tmp/models",
+            )
+
+        assert result == {"k": "v"}
+        assert _build_config_from_datus_datasource.calls == [
+            {
+                "db_config": {
+                    "type": "snowflake",
+                    "account": "sf_account",
+                    "username": "sf_user",
+                    "database": "sf_db",
+                    "warehouse": "wh1",
+                    "private_key": "inline-private-key",
+                    "private_key_file_pwd": 1234,
+                },
+                "model_path": "/tmp/models",
+            }
+        ]
+
+    def test_build_metricflow_config_dict_legacy_normalizes_db_config(self):
         captured_kwargs = {}
 
         def fake_build_config_dict_from_db_params(**kwargs):
             captured_kwargs.update(kwargs)
             return {"config": "ok"}
 
-        with patch(
-            "datus_semantic_metricflow.adapter.build_config_dict_from_db_params",
-            fake_build_config_dict_from_db_params,
+        with (
+            patch(
+                "datus_semantic_metricflow.adapter.build_config_dict_from_db_params",
+                fake_build_config_dict_from_db_params,
+            ),
+            patch(
+                "datus_semantic_metricflow.adapter.build_config_dict_from_datus_datasource", None
+            ),
         ):
             result = MetricFlowAdapter._build_metricflow_config_dict(
                 {
@@ -191,16 +245,21 @@ class TestMetricFlowAdapter:
             "sslmode": "require",
         }
 
-    def test_build_metricflow_config_dict_forwards_snowflake_key_pair_fields(self):
+    def test_build_metricflow_config_dict_legacy_forwards_snowflake_key_pair_fields(self):
         captured_kwargs = {}
 
         def fake_build_config_dict_from_db_params(**kwargs):
             captured_kwargs.update(kwargs)
             return {"config": "ok"}
 
-        with patch(
-            "datus_semantic_metricflow.adapter.build_config_dict_from_db_params",
-            fake_build_config_dict_from_db_params,
+        with (
+            patch(
+                "datus_semantic_metricflow.adapter.build_config_dict_from_db_params",
+                fake_build_config_dict_from_db_params,
+            ),
+            patch(
+                "datus_semantic_metricflow.adapter.build_config_dict_from_datus_datasource", None
+            ),
         ):
             result = MetricFlowAdapter._build_metricflow_config_dict(
                 {
@@ -211,6 +270,7 @@ class TestMetricFlowAdapter:
                     "schema": "public",
                     "warehouse": "wh1",
                     "role": "analyst",
+                    "private_key": "inline-private-key",
                     "private_key_file": "/tmp/rsa_key.p8",
                     "private_key_file_pwd": 1234,
                 },
@@ -220,17 +280,25 @@ class TestMetricFlowAdapter:
         assert result == {"config": "ok"}
         assert captured_kwargs["password"] == ""
         assert captured_kwargs["role"] == "analyst"
+        assert captured_kwargs["private_key"] == "inline-private-key"
         assert captured_kwargs["private_key_file"] == "/tmp/rsa_key.p8"
         assert captured_kwargs["private_key_file_pwd"] == "1234"
 
     def test_build_metricflow_config_dict_rejects_snowflake_key_pair_fields_when_unsupported(self):
         _build_config_with_sslmode.calls.clear()
 
-        with patch(
-            "datus_semantic_metricflow.adapter.build_config_dict_from_db_params",
-            _build_config_with_sslmode,
+        with (
+            patch(
+                "datus_semantic_metricflow.adapter.build_config_dict_from_db_params",
+                _build_config_with_sslmode,
+            ),
+            patch(
+                "datus_semantic_metricflow.adapter.build_config_dict_from_datus_datasource", None
+            ),
         ):
-            with pytest.raises(RuntimeError, match="does not support Snowflake config fields: private_key_file"):
+            with pytest.raises(
+                RuntimeError, match="does not support Snowflake config fields: private_key_file"
+            ):
                 MetricFlowAdapter._build_metricflow_config_dict(
                     {
                         "type": "snowflake",
@@ -272,6 +340,9 @@ class TestMetricFlowAdapter:
             patch(
                 "datus_semantic_metricflow.adapter.build_config_dict_from_db_params",
                 _build_config_with_sslmode,
+            ),
+            patch(
+                "datus_semantic_metricflow.adapter.build_config_dict_from_datus_datasource", None
             ),
             patch(
                 "datus_semantic_metricflow.adapter.DictConfigHandler",
@@ -319,6 +390,9 @@ class TestMetricFlowAdapter:
             patch(
                 "datus_semantic_metricflow.adapter.build_config_dict_from_db_params",
                 _build_config_without_sslmode,
+            ),
+            patch(
+                "datus_semantic_metricflow.adapter.build_config_dict_from_datus_datasource", None
             ),
             patch(
                 "datus_semantic_metricflow.adapter.DictConfigHandler",
@@ -563,6 +637,72 @@ class TestMetricFlowAdapter:
         )
 
     @pytest.mark.asyncio
+    async def test_query_metrics_replaces_time_dimension_with_metric_time_granularity(
+        self, adapter
+    ):
+        adapter.client.semantic_model.metric_semantics.element_specs_for_metrics.return_value = [
+            SimpleNamespace(
+                element_name="order_date",
+                qualified_name="order_date",
+                time_granularity="day",
+                identifier_links=(),
+            )
+        ]
+        adapter.client.query.return_value = SimpleNamespace(
+            result_df=_FakeDataFrame([]), dataflow_plan=None
+        )
+
+        await adapter.query_metrics(
+            metrics=["order_count", "gross_order_value"],
+            dimensions=["order_date", "order_priority"],
+            time_granularity="quarter",
+            order_by=["order_date__quarter"],
+        )
+
+        adapter.client.query.assert_called_once_with(
+            metrics=["order_count", "gross_order_value"],
+            dimensions=["order_priority", "metric_time__quarter"],
+            start_time=None,
+            end_time=None,
+            where=None,
+            limit=None,
+            order=["metric_time__quarter"],
+        )
+
+    @pytest.mark.asyncio
+    async def test_query_metrics_canonicalizes_time_alias_without_touching_similar_categorical_name(
+        self, adapter
+    ):
+        adapter.client.semantic_model.metric_semantics.element_specs_for_metrics.return_value = [
+            SimpleNamespace(
+                element_name="order_date",
+                qualified_name="order_date",
+                time_granularity="day",
+                identifier_links=(),
+            )
+        ]
+        adapter.client.query.return_value = SimpleNamespace(
+            result_df=_FakeDataFrame([]), dataflow_plan=None
+        )
+
+        await adapter.query_metrics(
+            metrics=["order_count"],
+            dimensions=["order_date__year", "fiscal_period__month"],
+            time_granularity="year",
+            order_by=["-order_date__year", "fiscal_period__month"],
+        )
+
+        adapter.client.query.assert_called_once_with(
+            metrics=["order_count"],
+            dimensions=["fiscal_period__month", "metric_time__year"],
+            start_time=None,
+            end_time=None,
+            where=None,
+            limit=None,
+            order=["-metric_time__year", "fiscal_period__month"],
+        )
+
+    @pytest.mark.asyncio
     async def test_query_metrics_dry_run_returns_sql(self, adapter):
         adapter.client.explain.return_value = SimpleNamespace(
             rendered_sql_without_descriptions=SimpleNamespace(sql_query="SELECT 1")
@@ -633,7 +773,9 @@ class TestMetricFlowAdapter:
             ),
             patch("metricflow.model.model_validator.ModelValidator") as mock_validator_cls,
             patch("metricflow.model.data_warehouse_model_validator.DataWarehouseModelValidator"),
-            patch.object(adapter, "_run_dw_validations", return_value=_validation_results()) as mock_dw,
+            patch.object(
+                adapter, "_run_dw_validations", return_value=_validation_results()
+            ) as mock_dw,
         ):
             mock_linter_cls.return_value.lint_files.return_value = lint_results
             mock_validator_cls.return_value.validate_model.return_value = SimpleNamespace(
@@ -862,7 +1004,9 @@ class TestMetricFlowAdapter:
             "metricflow.model.validations.validator_helpers.ModelValidationResults.merge",
             return_value="merged",
         ) as mock_merge:
-            merged = adapter._run_dw_validations(dw_validator, model="user-model", include_metrics=False)
+            merged = adapter._run_dw_validations(
+                dw_validator, model="user-model", include_metrics=False
+            )
 
         assert merged == "merged"
         dw_validator.validate_data_sources.assert_called_once_with("user-model", 42)

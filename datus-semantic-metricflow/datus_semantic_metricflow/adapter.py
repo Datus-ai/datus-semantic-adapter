@@ -1,7 +1,7 @@
 import inspect
 from pathlib import Path
 from types import SimpleNamespace
-from typing import List, Optional
+from typing import List, Optional, Set, Tuple
 
 import logging
 import os
@@ -23,6 +23,13 @@ from metricflow.configuration.dict_config_handler import (
     DictConfigHandler,
     build_config_dict_from_db_params,
 )
+from metricflow.naming.linkable_spec_name import StructuredLinkableSpecName
+from metricflow.references import MetricReference
+
+try:
+    from metricflow.configuration.dict_config_handler import build_config_dict_from_datus_datasource
+except ImportError:
+    build_config_dict_from_datus_datasource = None
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +126,13 @@ class MetricFlowAdapter(BaseSemanticAdapter):
 
     @staticmethod
     def _build_metricflow_config_dict(db_config: dict, model_path: str) -> dict:
+        if build_config_dict_from_datus_datasource is not None:
+            return build_config_dict_from_datus_datasource(db_config, model_path=model_path)
+
+        return MetricFlowAdapter._build_metricflow_config_dict_legacy(db_config, model_path)
+
+    @staticmethod
+    def _build_metricflow_config_dict_legacy(db_config: dict, model_path: str) -> dict:
         kwargs = {
             "db_type": db_config.get("type", ""),
             "host": db_config.get("host", ""),
@@ -137,7 +151,7 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         if sslmode and MetricFlowAdapter._build_config_supports_kwarg("sslmode"):
             kwargs["sslmode"] = sslmode
         unsupported_keys = []
-        for optional_key in ("role", "private_key_file", "private_key_file_pwd"):
+        for optional_key in ("role", "private_key", "private_key_file", "private_key_file_pwd"):
             value = db_config.get(optional_key)
             if value is None or value == "":
                 continue
@@ -288,6 +302,114 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         # Convert to DimensionInfo objects
         return [DimensionInfo(name=d.name, description=d.description) for d in dimensions]
 
+    @staticmethod
+    def _normalize_time_granularity(granularity: Optional[str]) -> Optional[str]:
+        if granularity is None:
+            return None
+        value = str(granularity).strip().lower()
+        return value or None
+
+    @staticmethod
+    def _time_dimension_names_for_metrics(client, metrics: List[str]) -> Set[str]:
+        """Return queryable time dimension names for the metric set.
+
+        MetricFlow's public ``Dimension`` dataclass only exposes name and
+        description. For canonicalization we inspect the internal linkable specs
+        and use their type via the presence of ``time_granularity``.
+        """
+        try:
+            metric_refs = [MetricReference(element_name=metric) for metric in metrics]
+            specs = client.semantic_model.metric_semantics.element_specs_for_metrics(metric_refs)
+        except Exception:
+            return set()
+
+        names: Set[str] = set()
+        for spec in specs:
+            if getattr(spec, "time_granularity", None) is None:
+                continue
+
+            element_name = getattr(spec, "element_name", None)
+            if isinstance(element_name, str) and element_name:
+                names.add(element_name.lower())
+
+            qualified_name = getattr(spec, "qualified_name", None)
+            if isinstance(qualified_name, str) and qualified_name:
+                parsed = StructuredLinkableSpecName.from_name(qualified_name.lower())
+                names.add(parsed.qualified_name_without_granularity)
+                names.add(parsed.element_name)
+
+            identifier_links = getattr(spec, "identifier_links", ()) or ()
+            identifier_names = []
+            for identifier in identifier_links:
+                identifier_name = getattr(identifier, "element_name", None)
+                if isinstance(identifier_name, str) and identifier_name:
+                    identifier_names.append(identifier_name.lower())
+            if identifier_names and isinstance(element_name, str) and element_name:
+                names.add("__".join(identifier_names + [element_name.lower()]))
+
+        return names
+
+    @staticmethod
+    def _is_known_time_dimension_name(name: str, time_dimension_names: Set[str]) -> bool:
+        if not time_dimension_names:
+            return False
+
+        parsed = StructuredLinkableSpecName.from_name(name.lower())
+        return (
+            parsed.element_name in time_dimension_names
+            or parsed.qualified_name_without_granularity in time_dimension_names
+            or parsed.qualified_name in time_dimension_names
+        )
+
+    @classmethod
+    def _canonicalize_time_query_params(
+        cls,
+        client,
+        metrics: List[str],
+        dimensions: Optional[List[str]],
+        order_by: Optional[List[str]],
+        granularity: Optional[str],
+    ) -> Tuple[List[str], Optional[List[str]]]:
+        query_dimensions = list(dimensions) if dimensions else []
+        order_list = [o for o in (order_by or []) if o and o != "null"] or None
+
+        normalized_granularity = cls._normalize_time_granularity(granularity)
+        if not normalized_granularity:
+            return query_dimensions, order_list
+
+        metric_time_dimension = f"metric_time__{normalized_granularity}"
+        time_dimension_names = cls._time_dimension_names_for_metrics(client, metrics)
+        canonical_dimensions = []
+        for dimension in query_dimensions:
+            parsed = StructuredLinkableSpecName.from_name(dimension.lower())
+            is_metric_time = parsed.element_name == "metric_time"
+            is_time_dimension = cls._is_known_time_dimension_name(dimension, time_dimension_names)
+            if is_metric_time or is_time_dimension:
+                continue
+            canonical_dimensions.append(dimension)
+
+        if metric_time_dimension not in canonical_dimensions:
+            canonical_dimensions.append(metric_time_dimension)
+
+        if not order_list:
+            return canonical_dimensions, None
+
+        canonical_order = []
+        for order_item in order_list:
+            descending = order_item.startswith("-")
+            order_name = order_item[1:] if descending else order_item
+            parsed = StructuredLinkableSpecName.from_name(order_name.lower())
+            is_metric_time = parsed.element_name == "metric_time"
+            is_time_dimension = cls._is_known_time_dimension_name(order_name, time_dimension_names)
+            if is_metric_time or is_time_dimension:
+                order_name = metric_time_dimension
+
+            canonical_item = f"-{order_name}" if descending else order_name
+            if canonical_item not in canonical_order:
+                canonical_order.append(canonical_item)
+
+        return canonical_dimensions, canonical_order
+
     async def query_metrics(
         self,
         metrics: List[str],
@@ -330,22 +452,16 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         # Prepare query parameters (normalize "null" strings to None)
         start_time = _normalize_null(time_start)
         end_time = _normalize_null(time_end)
-        granularity = _normalize_null(time_granularity)
+        granularity = self._normalize_time_granularity(_normalize_null(time_granularity))
         where_clause = _normalize_null(where)
 
-        # Handle order_by: filter out "null" strings from list
-        order_list = None
-        if order_by:
-            order_list = [o for o in order_by if o and o != "null"]
-            if not order_list:
-                order_list = None
-
-        # Handle time_granularity: convert to metric_time__xxx dimension
-        query_dimensions = list(dimensions) if dimensions else []
-        if granularity:
-            time_dim = f"metric_time__{granularity}"
-            if time_dim not in query_dimensions:
-                query_dimensions.append(time_dim)
+        query_dimensions, order_list = self._canonicalize_time_query_params(
+            client=client,
+            metrics=metrics,
+            dimensions=dimensions,
+            order_by=order_by,
+            granularity=granularity,
+        )
 
         if dry_run:
             # Use explain to get SQL without executing
@@ -480,13 +596,17 @@ class MetricFlowAdapter(BaseSemanticAdapter):
             semantic_issues = self._convert_validation_results(semantic_result.issues)
             if scope == "semantic_model":
                 effective_semantic_issues = [
-                    issue for issue in semantic_issues if not self._is_no_metrics_present_issue(issue)
+                    issue
+                    for issue in semantic_issues
+                    if not self._is_no_metrics_present_issue(issue)
                 ]
             else:
                 effective_semantic_issues = semantic_issues
             all_issues.extend(effective_semantic_issues)
             if semantic_result.issues.has_blocking_issues:
-                has_effective_errors = any(issue.severity == "error" for issue in effective_semantic_issues)
+                has_effective_errors = any(
+                    issue.severity == "error" for issue in effective_semantic_issues
+                )
                 if has_effective_errors or scope != "semantic_model":
                     return ValidationResult(valid=False, issues=all_issues)
         except Exception as e:
@@ -554,7 +674,4 @@ class MetricFlowAdapter(BaseSemanticAdapter):
 
     @staticmethod
     def _is_no_metrics_present_issue(issue: ValidationIssue) -> bool:
-        return (
-            issue.severity == "error"
-            and "No metrics present in the model" in str(issue.message)
-        )
+        return issue.severity == "error" and "No metrics present in the model" in str(issue.message)
