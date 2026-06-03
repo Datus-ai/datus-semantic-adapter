@@ -132,7 +132,10 @@ jobs:
 
           def current_dependency_lower_bound(path: Path, dependency_name: str) -> Version | None:
               content = path.read_text(encoding="utf-8")
-              match = re.search(rf'"{re.escape(dependency_name)}>=([^"]+)"', content)
+              match = re.search(
+                  rf'"{re.escape(dependency_name)}(?:\[[^\]"]+\])?>=([^"]+)"',
+                  content,
+              )
               if match is None:
                   return None
               return Version(match.group(1))
@@ -141,8 +144,8 @@ jobs:
           def update_dependency_lower_bound(path: Path, dependency_name: str, version: Version) -> None:
               content = path.read_text(encoding="utf-8")
               updated, count = re.subn(
-                  rf'"{re.escape(dependency_name)}(?:[^"]*)"',
-                  f'"{dependency_name}>={version}"',
+                  rf'"(?P<prefix>{re.escape(dependency_name)}(?:\[[^\]"]+\])?>=)[^"]+"',
+                  lambda match: f'"{match.group("prefix")}{version}"',
                   content,
                   count=1,
               )
