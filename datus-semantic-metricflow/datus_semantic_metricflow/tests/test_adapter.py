@@ -567,6 +567,59 @@ class TestMetricFlowAdapter:
         ]
 
     @pytest.mark.asyncio
+    async def test_list_metrics_includes_derived_offset_metadata(self, adapter):
+        metric = SimpleNamespace(
+            name="revenue_mom",
+            description="Revenue month over month",
+            type="derived",
+            input_measures=[],
+            type_params=SimpleNamespace(
+                expr="(revenue - revenue_prev) / NULLIF(revenue_prev, 0)",
+                metrics=[
+                    SimpleNamespace(name="revenue"),
+                    SimpleNamespace(
+                        name="revenue",
+                        alias="revenue_prev",
+                        offset_window=SimpleNamespace(to_string=lambda: "1 month"),
+                    ),
+                ],
+                window=None,
+                grain_to_date=None,
+                measure=None,
+                numerator=None,
+                denominator=None,
+            ),
+        )
+        metric_semantics = MagicMock()
+        metric_semantics.metric_references = ["revenue_mom"]
+        metric_semantics.get_metrics.return_value = [metric]
+        adapter.client.semantic_model.metric_semantics = metric_semantics
+        adapter.client.engine.simple_dimensions_for_metrics.return_value = [
+            SimpleNamespace(name="metric_time")
+        ]
+
+        metrics = await adapter.list_metrics()
+
+        assert metrics == [
+            MetricDefinition(
+                name="revenue_mom",
+                description="Revenue month over month",
+                type="derived",
+                dimensions=["metric_time"],
+                measures=[],
+                metadata={
+                    "expr": "(revenue - revenue_prev) / NULLIF(revenue_prev, 0)",
+                    "inputs": [
+                        {"name": "revenue"},
+                        {"name": "revenue", "alias": "revenue_prev", "offset_window": "1 month"},
+                    ],
+                    "offset_window": "1 month",
+                    "metric_kind": "derived",
+                },
+            )
+        ]
+
+    @pytest.mark.asyncio
     async def test_get_dimensions_returns_dimension_info(self, adapter):
         adapter.client.list_dimensions.return_value = [
             SimpleNamespace(name="date", description="Calendar date"),

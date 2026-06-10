@@ -1,7 +1,7 @@
 import inspect
 from pathlib import Path
 from types import SimpleNamespace
-from typing import List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import logging
 import os
@@ -232,6 +232,107 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         """MetricFlow uses semantic models internally."""
         return []
 
+    @staticmethod
+    def _metricflow_metadata_value(value: Any) -> Any:
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+
+        to_string = getattr(value, "to_string", None)
+        if callable(to_string):
+            return to_string()
+
+        raw_value = getattr(value, "value", None)
+        if raw_value is not None:
+            return MetricFlowAdapter._metricflow_metadata_value(raw_value)
+
+        name = getattr(value, "name", None)
+        if isinstance(name, str):
+            return name
+
+        return str(value)
+
+    @staticmethod
+    def _metricflow_input_measure_name(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return value
+        name = getattr(value, "name", None)
+        if name is not None:
+            return str(name)
+        return None
+
+    @classmethod
+    def _metricflow_input_metric_metadata(cls, value: Any) -> Dict[str, Any]:
+        name = getattr(value, "name", None) or getattr(value, "element_name", None)
+        if not name:
+            return {}
+
+        item: Dict[str, Any] = {"name": str(name)}
+        for field in ("alias", "offset_window", "offset_to_grain"):
+            field_value = getattr(value, field, None)
+            if field_value is not None:
+                item[field] = cls._metricflow_metadata_value(field_value)
+
+        constraint = getattr(value, "constraint", None)
+        if constraint is not None:
+            where = getattr(constraint, "where", None)
+            item["constraint"] = cls._metricflow_metadata_value(where or constraint)
+
+        return item
+
+    @classmethod
+    def _metric_metadata(cls, metric) -> Dict[str, Any]:
+        """Expose MetricFlow type_params that are needed by metric-first agents."""
+        type_params = getattr(metric, "type_params", None)
+        if type_params is None:
+            return {}
+
+        metadata: Dict[str, Any] = {}
+
+        expr = getattr(type_params, "expr", None)
+        if expr:
+            metadata["expr"] = expr
+
+        input_metrics = getattr(metric, "input_metrics", None)
+        if input_metrics is None:
+            input_metrics = getattr(type_params, "metrics", None)
+        inputs = [
+            item
+            for item in (
+                cls._metricflow_input_metric_metadata(input_metric)
+                for input_metric in (input_metrics or [])
+            )
+            if item
+        ]
+        if inputs:
+            metadata["inputs"] = inputs
+            offset_window = next(
+                (item.get("offset_window") for item in inputs if item.get("offset_window")), None
+            )
+            if offset_window:
+                metadata["offset_window"] = offset_window
+
+        window = getattr(type_params, "window", None)
+        if window is not None:
+            metadata["window"] = cls._metricflow_metadata_value(window)
+
+        grain_to_date = getattr(type_params, "grain_to_date", None)
+        if grain_to_date is not None:
+            metadata["grain_to_date"] = cls._metricflow_metadata_value(grain_to_date)
+
+        for field in ("measure", "numerator", "denominator"):
+            field_name = cls._metricflow_input_measure_name(getattr(type_params, field, None))
+            if field_name:
+                metadata[field] = field_name
+
+        if metadata:
+            metric_kind = cls._metricflow_metadata_value(getattr(metric, "type", None))
+            if metric_kind:
+                metadata["metric_kind"] = metric_kind
+
+        return metadata
+
     # Metrics Interface
 
     async def list_metrics(
@@ -270,7 +371,7 @@ class MetricFlowAdapter(BaseSemanticAdapter):
                     type=metric.type,
                     dimensions=[d.name for d in dimensions],
                     measures=[m.name for m in metric.input_measures],
-                    metadata={},
+                    metadata=self._metric_metadata(metric),
                 )
             )
 
