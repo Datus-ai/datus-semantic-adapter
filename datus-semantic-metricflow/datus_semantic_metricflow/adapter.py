@@ -249,6 +249,14 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         if isinstance(name, str):
             return name
 
+        if isinstance(value, dict):
+            return {
+                str(key): MetricFlowAdapter._metricflow_metadata_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple, set)):
+            return [MetricFlowAdapter._metricflow_metadata_value(item) for item in value]
+
         return str(value)
 
     @staticmethod

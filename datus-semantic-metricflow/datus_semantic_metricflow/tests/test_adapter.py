@@ -619,6 +619,22 @@ class TestMetricFlowAdapter:
             )
         ]
 
+    def test_metricflow_metadata_value_preserves_nested_containers(self):
+        value = {
+            "constraint": {
+                "where": [
+                    SimpleNamespace(value="region = 'west'"),
+                    SimpleNamespace(name="sales_channel"),
+                ]
+            },
+            "offsets": (SimpleNamespace(to_string=lambda: "1 month"), "1 year"),
+        }
+
+        assert MetricFlowAdapter._metricflow_metadata_value(value) == {
+            "constraint": {"where": ["region = 'west'", "sales_channel"]},
+            "offsets": ["1 month", "1 year"],
+        }
+
     @pytest.mark.asyncio
     async def test_get_dimensions_returns_dimension_info(self, adapter):
         adapter.client.list_dimensions.return_value = [
