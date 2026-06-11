@@ -1,0 +1,22 @@
+---
+data_source:
+  name: orders
+  description: orders
+  owners:
+  - datus@datus.ai
+  sql_query: SELECT * FROM orders
+  identifiers:
+  - name: order_id
+    type: primary
+    expr: order_id
+  dimensions:
+  - name: order_date
+    type: time
+    type_params:
+      is_primary: true
+      time_granularity: day
+  measures:
+  - name: orders_amount_sum
+    agg: sum
+    expr: amount
+    create_metric: false

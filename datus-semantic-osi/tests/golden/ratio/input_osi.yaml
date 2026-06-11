@@ -1,0 +1,32 @@
+version: 0.2.0.dev0
+semantic_model:
+- name: avg_order
+  datasets:
+  - name: orders
+    source: orders
+    primary_key:
+    - order_id
+    fields:
+    - name: order_date
+      expression:
+        dialects:
+        - dialect: ANSI_SQL
+          expression: order_date
+      dimension:
+        is_time: true
+      custom_extensions:
+      - vendor_name: DATUS
+        data: '{"time_granularity": "day", "type": "time"}'
+    custom_extensions:
+    - vendor_name: DATUS
+      data: '{"time_dimension": {"granularity": "day", "name": "order_date"}}'
+  metrics:
+  - name: avg_order_amount
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: SUM(amount) / COUNT(DISTINCT order_id)
+    description: amount per order
+    custom_extensions:
+    - vendor_name: DATUS
+      data: '{"dataset": "orders", "format": "0.00"}'

@@ -1,0 +1,10 @@
+---
+metric:
+  name: order_count
+  owners:
+  - datus@datus.ai
+  description: number of orders
+  type: measure_proxy
+  type_params:
+    measures:
+    - orders_order_id_count_distinct

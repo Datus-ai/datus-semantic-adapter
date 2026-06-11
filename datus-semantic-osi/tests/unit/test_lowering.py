@@ -1,0 +1,104 @@
+# Copyright 2025-present DatusAI, Inc.
+# Licensed under the Apache License, Version 2.0.
+
+"""Tests for IR -> MetricFlow YAML lowering (legacy data_source dialect)."""
+
+from datus_semantic_osi.compiler import compile_document
+from datus_semantic_osi.metricflow_backend import lower_to_metricflow
+from datus_semantic_osi.profile import parse_osi_profile as parse_osi
+
+OSI_YAML = """
+semantic_model:
+  name: baisheng_activities
+datasets:
+  - name: new_product_activities
+    source:
+      table: v_udata_ac_info
+    filters:
+      - expression: "FIND_IN_SET('1', ac_tags)"
+        scope: dataset
+    primary_key: ac_code
+    time_dimension:
+      name: start_date
+      granularity: day
+    dimensions:
+      - name: ac_tags
+        expr: ac_tags
+metrics:
+  - name: new_product_activity_count
+    description: "5月包含新产品的活动数量"
+    expression: "COUNT(DISTINCT ac_code)"
+    dataset: new_product_activities
+    time_dimension: start_date
+"""
+
+
+def _lower():
+    return lower_to_metricflow(compile_document(parse_osi(OSI_YAML)))
+
+
+def test_dataset_filter_becomes_sql_query_with_where():
+    art = _lower()
+    ds = art.data_source_docs[0]["data_source"]
+    assert ds["name"] == "new_product_activities"
+    assert "sql_query" in ds
+    assert "v_udata_ac_info" in ds["sql_query"]
+    assert "FIND_IN_SET('1', ac_tags)" in ds["sql_query"]
+    assert ds["owners"]
+
+
+def test_data_source_has_primary_time_dimension_and_measure():
+    ds = _lower().data_source_docs[0]["data_source"]
+    time_dims = [d for d in ds["dimensions"] if d["type"] == "time"]
+    assert time_dims and time_dims[0]["type_params"]["is_primary"] is True
+    measures = {m["name"]: m for m in ds["measures"]}
+    name = "new_product_activities_ac_code_count_distinct"
+    assert measures[name]["agg"] == "count_distinct"
+    assert measures[name]["expr"] == "ac_code"
+
+
+def test_aggregate_metric_lowers_to_measure_proxy():
+    metric = _lower().metric_docs[0]["metric"]
+    assert metric["name"] == "new_product_activity_count"
+    assert metric["type"] == "measure_proxy"
+    assert metric["type_params"]["measures"] == [
+        "new_product_activities_ac_code_count_distinct"
+    ]
+
+
+def test_dimension_colliding_with_identifier_is_dropped():
+    # A column declared as both primary_key and a dimension must not be lowered
+    # as a MetricFlow dimension (identifier/dimension name collision is invalid).
+    osi = """
+semantic_model:
+  name: shop
+datasets:
+  - name: orders
+    source:
+      table: orders
+    primary_key: order_id
+    dimensions:
+      - name: order_id
+        expr: order_id
+      - name: status
+        expr: status
+metrics:
+  - name: order_count
+    expression: "COUNT(DISTINCT order_id)"
+    dataset: orders
+"""
+    art = lower_to_metricflow(compile_document(parse_osi(osi)))
+    ds = art.data_source_docs[0]["data_source"]
+    dim_names = {d["name"] for d in ds.get("dimensions", [])}
+    id_names = {i["name"] for i in ds.get("identifiers", [])}
+    assert "order_id" in id_names
+    assert "order_id" not in dim_names
+    assert "status" in dim_names
+
+
+def test_artifact_renders_multidoc_yaml():
+    art = _lower()
+    sm_yaml = art.semantic_models_yaml()
+    assert "data_source:" in sm_yaml
+    metrics_yaml = art.metrics_yaml()
+    assert "metric:" in metrics_yaml

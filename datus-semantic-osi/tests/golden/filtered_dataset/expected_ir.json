@@ -1,0 +1,64 @@
+{
+  "datasets": [
+    {
+      "fields": [
+        {
+          "description": "",
+          "expr": "order_date",
+          "is_primary_time": true,
+          "name": "order_date",
+          "time_granularity": "day",
+          "type": "time"
+        }
+      ],
+      "filters": [
+        {
+          "expression": "status = 'paid'",
+          "scope": "dataset"
+        }
+      ],
+      "identifiers": [
+        {
+          "expr": "order_id",
+          "name": "order_id",
+          "type": "primary"
+        }
+      ],
+      "name": "paid_orders",
+      "primary_time_dimension": "order_date",
+      "sql_query": null,
+      "sql_table": "orders"
+    }
+  ],
+  "metrics": [
+    {
+      "dataset": "paid_orders",
+      "denominator": null,
+      "description": "count of paid orders",
+      "expression": null,
+      "filters": [],
+      "format": null,
+      "grain_to_date": null,
+      "inputs": [],
+      "kind": "aggregate",
+      "measures": [
+        {
+          "agg": "count_distinct",
+          "description": "",
+          "expr": "order_id",
+          "name": "paid_orders_order_id_count_distinct",
+          "non_additive_dimension": null
+        }
+      ],
+      "metadata": {},
+      "name": "paid_order_count",
+      "numerator": null,
+      "offset_window": null,
+      "time_dimension": "order_date",
+      "unit": null,
+      "window": null
+    }
+  ],
+  "name": "paid_orders",
+  "relationships": []
+}

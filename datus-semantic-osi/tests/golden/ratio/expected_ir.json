@@ -1,0 +1,66 @@
+{
+  "datasets": [
+    {
+      "fields": [
+        {
+          "description": "",
+          "expr": "order_date",
+          "is_primary_time": true,
+          "name": "order_date",
+          "time_granularity": "day",
+          "type": "time"
+        }
+      ],
+      "filters": [],
+      "identifiers": [
+        {
+          "expr": "order_id",
+          "name": "order_id",
+          "type": "primary"
+        }
+      ],
+      "name": "orders",
+      "primary_time_dimension": "order_date",
+      "sql_query": null,
+      "sql_table": "orders"
+    }
+  ],
+  "metrics": [
+    {
+      "dataset": "orders",
+      "denominator": "orders_order_id_count_distinct",
+      "description": "amount per order",
+      "expression": null,
+      "filters": [],
+      "format": "0.00",
+      "grain_to_date": null,
+      "inputs": [],
+      "kind": "ratio",
+      "measures": [
+        {
+          "agg": "sum",
+          "description": "",
+          "expr": "amount",
+          "name": "orders_amount_sum",
+          "non_additive_dimension": null
+        },
+        {
+          "agg": "count_distinct",
+          "description": "",
+          "expr": "order_id",
+          "name": "orders_order_id_count_distinct",
+          "non_additive_dimension": null
+        }
+      ],
+      "metadata": {},
+      "name": "avg_order_amount",
+      "numerator": "orders_amount_sum",
+      "offset_window": null,
+      "time_dimension": null,
+      "unit": null,
+      "window": null
+    }
+  ],
+  "name": "avg_order",
+  "relationships": []
+}

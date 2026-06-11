@@ -1,0 +1,12 @@
+---
+metric:
+  name: net_revenue
+  owners:
+  - datus@datus.ai
+  description: revenue minus cost
+  type: expr
+  type_params:
+    expr: orders_revenue_sum - orders_cost_sum
+    measures:
+    - orders_revenue_sum
+    - orders_cost_sum
