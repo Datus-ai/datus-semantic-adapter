@@ -619,6 +619,72 @@ class TestMetricFlowAdapter:
             )
         ]
 
+    def test_metric_path_metadata_from_yaml_file_extracts_subject_tree_tags(self, tmp_path):
+        metric_file = tmp_path / "metrics.yml"
+        metric_file.write_text(
+            """
+metric:
+  name: revenue_mom
+  type: derived
+  locked_metadata:
+    tags:
+      - revenue/reporting
+      - "subject_tree: ac_manage/campaign/activity"
+  type_params:
+    metrics:
+      - name: revenue
+    expr: revenue
+---
+metric:
+  name: revenue
+  type: measure_proxy
+  type_params:
+    measures:
+      - revenue
+""",
+            encoding="utf-8",
+        )
+
+        assert MetricFlowAdapter._metric_path_metadata_from_yaml_file(str(metric_file)) == {
+            "revenue_mom": ["ac_manage", "campaign", "activity"]
+        }
+
+    @pytest.mark.asyncio
+    async def test_list_metrics_filters_by_locked_metadata_path(self, adapter):
+        metric = SimpleNamespace(
+            name="revenue_mom",
+            description="Revenue month over month",
+            type="derived",
+            input_measures=[],
+            type_params=SimpleNamespace(
+                expr="revenue - revenue_prev",
+                metrics=[SimpleNamespace(name="revenue")],
+                window=None,
+                grain_to_date=None,
+                measure=None,
+                numerator=None,
+                denominator=None,
+            ),
+        )
+        metric_semantics = MagicMock()
+        metric_semantics.metric_references = ["revenue_mom"]
+        metric_semantics.get_metrics.return_value = [metric]
+        adapter.client.semantic_model.metric_semantics = metric_semantics
+        adapter.client.engine.simple_dimensions_for_metrics.return_value = [
+            SimpleNamespace(name="metric_time")
+        ]
+
+        with patch.object(
+            adapter,
+            "_metric_path_metadata_by_name",
+            return_value={"revenue_mom": ["ac_manage", "campaign", "activity"]},
+        ):
+            metrics = await adapter.list_metrics(path=["ac_manage", "campaign", "activity"])
+
+        assert len(metrics) == 1
+        assert metrics[0].name == "revenue_mom"
+        assert metrics[0].path == ["ac_manage", "campaign", "activity"]
+
     def test_metricflow_metadata_value_preserves_nested_containers(self):
         value = {
             "constraint": {
