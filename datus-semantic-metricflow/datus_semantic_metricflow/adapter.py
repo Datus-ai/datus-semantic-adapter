@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import logging
 import os
 
+import yaml
+
 from datus_semantic_core import BaseSemanticAdapter
 from datus_semantic_metricflow.config import MetricFlowConfig
 from datus_semantic_metricflow.models import (
@@ -270,6 +272,64 @@ class MetricFlowAdapter(BaseSemanticAdapter):
             return str(name)
         return None
 
+    @staticmethod
+    def _subject_path_from_tags(tags: Any) -> Optional[List[str]]:
+        if not isinstance(tags, list):
+            return None
+
+        for raw_tag in tags:
+            if not isinstance(raw_tag, str):
+                continue
+            tag = raw_tag.strip()
+            if not tag:
+                continue
+            if tag.startswith("subject_tree:"):
+                tag = tag.split(":", 1)[1].strip()
+                path = [part.strip() for part in tag.split("/") if part.strip()]
+                if path:
+                    return path
+        return None
+
+    @classmethod
+    def _metric_path_metadata_from_yaml_file(cls, file_path: str) -> Dict[str, List[str]]:
+        metric_paths: Dict[str, List[str]] = {}
+        try:
+            with open(file_path, encoding="utf-8") as handle:
+                docs = yaml.safe_load_all(handle)
+                for doc in docs:
+                    if not isinstance(doc, dict):
+                        continue
+                    metric = doc.get("metric")
+                    if not isinstance(metric, dict):
+                        continue
+                    name = metric.get("name")
+                    if not isinstance(name, str) or not name.strip():
+                        continue
+                    locked_metadata = metric.get("locked_metadata")
+                    if not isinstance(locked_metadata, dict):
+                        continue
+                    path = cls._subject_path_from_tags(locked_metadata.get("tags"))
+                    if path:
+                        metric_paths[name.strip()] = path
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Skipping metric path metadata file %s: %s", file_path, exc)
+        return metric_paths
+
+    def _metric_path_metadata_by_name(self) -> Dict[str, List[str]]:
+        try:
+            from metricflow.engine.utils import path_to_models
+
+            model_path = path_to_models(handler=self._config_handler)
+            file_paths = self._collect_model_file_paths(model_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Unable to collect metric path metadata: %s", exc)
+            return {}
+
+        metric_paths: Dict[str, List[str]] = {}
+        for file_path in file_paths:
+            metric_paths.update(self._metric_path_metadata_from_yaml_file(file_path))
+        return metric_paths
+
     @classmethod
     def _metricflow_input_metric_metadata(cls, value: Any) -> Dict[str, Any]:
         name = getattr(value, "name", None) or getattr(value, "element_name", None)
@@ -366,6 +426,7 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         metric_semantics = client.semantic_model.metric_semantics
         metric_refs = metric_semantics.metric_references
         full_metrics = metric_semantics.get_metrics(metric_refs)
+        path_by_name = self._metric_path_metadata_by_name()
 
         # Convert to MetricDefinition list
         metrics = []
@@ -379,6 +440,7 @@ class MetricFlowAdapter(BaseSemanticAdapter):
                     type=metric.type,
                     dimensions=[d.name for d in dimensions],
                     measures=[m.name for m in metric.input_measures],
+                    path=path_by_name.get(metric.name),
                     metadata=self._metric_metadata(metric),
                 )
             )
