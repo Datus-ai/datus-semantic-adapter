@@ -54,11 +54,11 @@ class MetricFlowArtifact:
         directory.mkdir(parents=True, exist_ok=True)
         written: Dict[str, Path] = {}
         sm_path = directory / "semantic_models.yaml"
-        sm_path.write_text(self.semantic_models_yaml())
+        sm_path.write_text(self.semantic_models_yaml(), encoding="utf-8")
         written["semantic_models"] = sm_path
         if self.metric_docs:
             m_path = directory / "metrics.yaml"
-            m_path.write_text(self.metrics_yaml())
+            m_path.write_text(self.metrics_yaml(), encoding="utf-8")
             written["metrics"] = m_path
         return written
 
@@ -76,6 +76,7 @@ def _dataset_sql(ds: DatasetIR) -> dict:
         f.expression for f in ds.filters if f.scope is FilterScope.DATASET
     ]
     if dataset_filters:
+        base_is_query = bool(ds.sql_query)
         base = ds.sql_query or (
             f"SELECT * FROM {ds.sql_table}" if ds.sql_table else None
         )
@@ -85,8 +86,9 @@ def _dataset_sql(ds: DatasetIR) -> dict:
                 hint="Declare a source table or query for the dataset.",
             )
         where = " AND ".join(f"({expr})" for expr in dataset_filters)
-        # If base already has a WHERE, wrap as a subquery to stay unambiguous.
-        if " where " in base.lower():
+        # Query-backed datasets may contain GROUP BY / ORDER BY / LIMIT, so
+        # dataset filters must be applied outside the authored query.
+        if base_is_query or " where " in base.lower():
             return {"sql_query": f"SELECT * FROM ({base}) AS _filtered WHERE {where}"}
         return {"sql_query": f"{base} WHERE {where}"}
     if ds.sql_query:

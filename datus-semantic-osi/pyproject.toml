@@ -28,9 +28,6 @@ dev = [
 [project.entry-points."datus.semantic_adapters"]
 osi = "datus_semantic_osi:register"
 
-[project.scripts]
-datus-osi = "datus_semantic_osi.cli:main"
-
 [tool.uv.sources]
 datus-semantic-core = { workspace = true }
 datus-semantic-metricflow = { workspace = true }

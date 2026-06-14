@@ -47,6 +47,35 @@ def test_dataset_filter_becomes_sql_query_with_where():
     assert ds["owners"]
 
 
+def test_query_backed_dataset_filter_wraps_authored_query():
+    osi = """
+semantic_model:
+  name: filtered_query_model
+datasets:
+  - name: regional_orders
+    source:
+      query: |
+        SELECT region, SUM(amount) AS amount
+        FROM orders
+        GROUP BY region
+    filters:
+      - expression: "region = 'east'"
+        scope: dataset
+    dimensions:
+      - name: region
+        expr: region
+metrics:
+  - name: total_amount
+    expression: "SUM(amount)"
+    dataset: regional_orders
+"""
+    art = lower_to_metricflow(compile_document(parse_osi(osi)))
+    sql_query = art.data_source_docs[0]["data_source"]["sql_query"]
+    assert sql_query.startswith("SELECT * FROM (")
+    assert ") AS _filtered WHERE (region = 'east')" in sql_query
+    assert "GROUP BY region" in sql_query
+
+
 def test_data_source_has_primary_time_dimension_and_measure():
     ds = _lower().data_source_docs[0]["data_source"]
     time_dims = [d for d in ds["dimensions"] if d["type"] == "time"]

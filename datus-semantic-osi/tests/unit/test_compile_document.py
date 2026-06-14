@@ -3,7 +3,10 @@
 
 """Tests for compiling a whole OSI authoring document into a SemanticModelIR."""
 
+import pytest
+
 from datus_semantic_osi.compiler import compile_document
+from datus_semantic_osi.errors import OSIValidationError
 from datus_semantic_osi.ir import Aggregation, FilterScope, MetricKind
 from datus_semantic_osi.profile import parse_osi_profile as parse_osi
 
@@ -54,3 +57,24 @@ def test_compile_document_builds_metric_with_backing_measure():
     assert metric.time_dimension == "start_date"
     assert metric.measures[0].agg is Aggregation.COUNT_DISTINCT
     assert metric.measures[0].expr == "ac_code"
+
+
+def test_measure_metric_requires_dataset_when_model_has_multiple_datasets():
+    osi = """
+semantic_model:
+  name: multi_dataset_model
+datasets:
+  - name: orders
+    source:
+      table: orders
+    primary_key: order_id
+  - name: refunds
+    source:
+      table: refunds
+    primary_key: refund_id
+metrics:
+  - name: order_count
+    expression: "COUNT(DISTINCT order_id)"
+"""
+    with pytest.raises(OSIValidationError, match="must declare `dataset`"):
+        compile_document(parse_osi(osi))

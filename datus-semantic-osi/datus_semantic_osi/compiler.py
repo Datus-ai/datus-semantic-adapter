@@ -387,6 +387,12 @@ def compile_document(doc: OSIDocument) -> SemanticModelIR:
     metrics = []
     for m in doc.metrics:
         metric_ir = _compile_metric(m)
+        if len(doc.datasets) > 1 and metric_ir.measures and not metric_ir.dataset:
+            raise OSIValidationError(
+                "metric must declare `dataset` when the semantic model has multiple datasets.",
+                metric=metric_ir.name,
+                hint="Set the metric's DATUS custom extension `dataset` to the dataset that owns its measures.",
+            )
         prefix = metric_ir.dataset or default_dataset
         if prefix:
             _namespace_measures(metric_ir, prefix)

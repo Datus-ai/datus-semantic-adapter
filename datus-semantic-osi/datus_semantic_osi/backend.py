@@ -2,12 +2,12 @@
 # Licensed under the Apache License, Version 2.0.
 # See http://www.apache.org/licenses/LICENSE-2.0 for details.
 
-"""Semantic execution backends.
+"""Semantic execution backend.
 
 A backend lowers a :class:`SemanticModelIR` into its own artifact, validates it,
-and (optionally) executes / explains queries. The default ``MetricFlowBackend``
-wraps the existing ``datus-semantic-metricflow`` stack; new backends only need to
-implement this contract, not change OSI authoring or the LLM generation contract.
+and (optionally) executes / explains queries. ``MetricFlowBackend`` wraps the
+existing ``datus-semantic-metricflow`` stack; future backends should implement
+the same contract without changing OSI authoring or the LLM generation contract.
 """
 
 from __future__ import annotations
@@ -201,8 +201,4 @@ def make_backend(
             datasource=datasource,
             timeout=timeout,
         )
-    if name == "native":
-        from datus_semantic_osi.native_backend import DatusNativeBackend
-
-        return DatusNativeBackend()
     raise ValueError(f"Unknown execution backend: {name}")

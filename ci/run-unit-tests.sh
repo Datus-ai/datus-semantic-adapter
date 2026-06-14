@@ -7,6 +7,7 @@ cd "$ROOT_DIR"
 PACKAGE_SPECS=(
   "datus-semantic-core:datus-semantic-core/tests"
   "datus-semantic-metricflow:datus-semantic-metricflow/datus_semantic_metricflow/tests"
+  "datus-semantic-osi:datus-semantic-osi/tests"
 )
 
 usage() {
@@ -113,6 +114,22 @@ run_package_tests() {
         --with pytest-asyncio \
         --with-editable ./datus-semantic-core \
         --with-editable ./datus-semantic-metricflow \
+        pytest "$test_path" \
+        -m "not integration" \
+        --tb=short \
+        --verbose
+      ;;
+    datus-semantic-osi)
+      uv run --no-project --isolated \
+        --with pytest \
+        --with pytest-asyncio \
+        --with pydantic \
+        --with pyyaml \
+        --with sqlglot \
+        --with jsonschema \
+        --with-editable ./datus-semantic-core \
+        --with-editable ./datus-semantic-metricflow \
+        --with-editable ./datus-semantic-osi \
         pytest "$test_path" \
         -m "not integration" \
         --tb=short \

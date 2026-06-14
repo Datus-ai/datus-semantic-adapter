@@ -28,7 +28,7 @@ class DatusOSIConfig(SemanticAdapterConfig):
         description="Directory for generated backend artifacts. Disposable; defaults to a temp dir.",
     )
     execution_backend: str = Field(
-        default="metricflow", description="Execution backend: metricflow | native | ..."
+        default="metricflow", description="Execution backend: metricflow"
     )
     timeout: int = Field(default=300, description="Query timeout in seconds")
     db_config: Optional[Dict[str, str]] = Field(
