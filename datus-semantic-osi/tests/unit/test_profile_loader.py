@@ -1,7 +1,12 @@
 import pytest
 
 from datus_semantic_osi.compiler import compile_document
-from datus_semantic_osi.profile import load_osi_path, parse_osi, parse_osi_profile
+from datus_semantic_osi.profile import (
+    load_osi_path,
+    parse_osi,
+    parse_osi_profile,
+    to_core_schema_document,
+)
 
 
 DATASET_DOC = """
@@ -110,6 +115,55 @@ semantic_model:
     model = compile_document(doc)
     assert model.relationships[0].from_dataset == "orders"
     assert model.relationships[0].from_identifier == "customer_id"
+
+
+def test_primary_time_dimension_preserves_expression():
+    doc = parse_osi(
+        """
+version: 0.2.0.dev0
+semantic_model:
+  - name: shop
+    datasets:
+      - name: orders
+        source: orders
+        primary_key: [order_id]
+        fields:
+          - name: order_month
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: "DATE_TRUNC('month', order_date)"
+            dimension: {is_time: true}
+            custom_extensions:
+              - vendor_name: DATUS
+                data: '{"time_granularity":"month"}'
+    metrics:
+      - name: order_count
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: "COUNT(DISTINCT order_id)"
+        custom_extensions:
+          - vendor_name: DATUS
+            data: '{"dataset":"orders","time_dimension":"order_month"}'
+"""
+    )
+
+    time_dimension = doc.datasets[0].time_dimension
+    assert time_dimension is not None
+    assert time_dimension.expr == "DATE_TRUNC('month', order_date)"
+    model = compile_document(doc)
+    primary_time = next(
+        field for field in model.datasets[0].fields if field.is_primary_time
+    )
+    assert primary_time.expr == "DATE_TRUNC('month', order_date)"
+
+    core_doc = to_core_schema_document(doc)
+    field = core_doc["semantic_model"][0]["datasets"][0]["fields"][0]
+    assert (
+        field["expression"]["dialects"][0]["expression"]
+        == "DATE_TRUNC('month', order_date)"
+    )
 
 
 def test_parse_osi_rejects_relationships_inside_dataset():

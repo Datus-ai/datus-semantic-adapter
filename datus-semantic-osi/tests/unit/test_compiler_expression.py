@@ -20,6 +20,13 @@ def test_count_distinct_becomes_aggregate_with_one_measure():
     assert m.name == "ac_code_count_distinct"
 
 
+def test_count_distinct_multiple_columns_is_rejected():
+    with pytest.raises(OSIValidationError, match="exactly one expression"):
+        compile_metric_expression(
+            "activity_count", "COUNT(DISTINCT ac_code, customer_id)"
+        )
+
+
 def test_sum_becomes_aggregate():
     metric = compile_metric_expression("total_amount", "SUM(amount)")
     assert metric.kind is MetricKind.AGGREGATE
@@ -51,3 +58,8 @@ def test_window_function_is_rejected_as_metric():
 def test_non_aggregate_column_is_rejected():
     with pytest.raises(OSIValidationError):
         compile_metric_expression("just_a_column", "ac_code")
+
+
+def test_aggregate_name_collision_is_rejected():
+    with pytest.raises(OSIValidationError, match="same backing measure name"):
+        compile_metric_expression("ambiguous", "SUM(a - b) + SUM(a_b)")

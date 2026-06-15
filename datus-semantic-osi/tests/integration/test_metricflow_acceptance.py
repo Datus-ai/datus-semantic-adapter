@@ -97,7 +97,9 @@ def test_generated_yaml_passes_metricflow_validation(tmp_path):
 def test_dry_run_renders_sql_for_each_metric(tmp_path):
     art = lower_to_metricflow(compile_document(parse_osi(OSI_YAML)))
     art.write(tmp_path)
-    build, _, _ = _validate(tmp_path)
+    build, parse_errors, semantic_errors = _validate(tmp_path)
+    assert parse_errors == [], f"parse errors: {parse_errors}"
+    assert semantic_errors == [], f"semantic errors: {semantic_errors}"
 
     from metricflow.sql_clients.duckdb import DuckDbSqlClient
     from metricflow.api.metricflow_client import MetricFlowClient
@@ -107,7 +109,12 @@ def test_dry_run_renders_sql_for_each_metric(tmp_path):
         user_configured_model=build.model,
         system_schema="main",
     )
-    for metric in ["activity_count", "new_product_activity_count", "avg_sr_value"]:
+    for metric in [
+        "activity_count",
+        "new_product_activity_count",
+        "avg_sr_value",
+        "total_sr_value",
+    ]:
         sql = client.explain(
             metrics=[metric]
         ).rendered_sql_without_descriptions.sql_query

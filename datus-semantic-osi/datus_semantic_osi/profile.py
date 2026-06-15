@@ -45,6 +45,7 @@ class OSIDimension(BaseModel):
 
 class OSITimeDimension(BaseModel):
     name: str
+    expr: Optional[str] = None
     granularity: str = "day"
 
 
@@ -356,10 +357,13 @@ def _time_dimension_from_hint(value: Any) -> Optional[Dict[str, Any]]:
     if isinstance(value, str) and value:
         return {"name": value, "granularity": "day"}
     if isinstance(value, dict) and value.get("name"):
-        return {
+        result = {
             "name": value["name"],
             "granularity": value.get("granularity") or value.get("time_granularity") or "day",
         }
+        if value.get("expr"):
+            result["expr"] = value["expr"]
+        return result
     return None
 
 
@@ -399,10 +403,16 @@ def _core_dataset_to_profile(dataset: Dict[str, Any]) -> Dict[str, Any]:
             primary_time_field = str(name)
             profile["time_dimension"] = {
                 "name": str(name),
+                "expr": expr,
                 "granularity": granularity or "day",
             }
             continue
         if str(name) == primary_time_field:
+            time_dimension = profile.get("time_dimension")
+            if isinstance(time_dimension, dict):
+                time_dimension.setdefault("expr", expr)
+                if granularity:
+                    time_dimension.setdefault("granularity", granularity)
             continue
 
         dim_type = field_hints.get("type") or ("time" if is_time else "categorical")
@@ -744,7 +754,9 @@ def to_core_schema_document(doc: OSIDocument) -> Dict[str, Any]:
             fields.append(
                 {
                     "name": dataset.time_dimension.name,
-                    "expression": _core_expression(dataset.time_dimension.name),
+                    "expression": _core_expression(
+                        dataset.time_dimension.expr or dataset.time_dimension.name
+                    ),
                     "dimension": {"is_time": True},
                     "custom_extensions": _datus_extension(time_hints),
                 }

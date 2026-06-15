@@ -3,8 +3,12 @@
 
 """Tests for IR -> MetricFlow YAML lowering (legacy data_source dialect)."""
 
+import pytest
+
 from datus_semantic_osi.compiler import compile_document
-from datus_semantic_osi.metricflow_backend import lower_to_metricflow
+from datus_semantic_osi.errors import OSIValidationError
+from datus_semantic_osi.ir import DatasetIR, IdentifierIR, RelationshipIR, SemanticModelIR
+from datus_semantic_osi.metricflow_backend import MetricFlowArtifact, lower_to_metricflow
 from datus_semantic_osi.profile import parse_osi_profile as parse_osi
 
 OSI_YAML = """
@@ -131,3 +135,66 @@ def test_artifact_renders_multidoc_yaml():
     assert "data_source:" in sm_yaml
     metrics_yaml = art.metrics_yaml()
     assert "metric:" in metrics_yaml
+
+
+def test_artifact_write_removes_stale_metrics_yaml(tmp_path):
+    stale_metrics = tmp_path / "metrics.yaml"
+    stale_metrics.write_text("metric:\n  name: stale\n", encoding="utf-8")
+
+    artifact = MetricFlowArtifact(
+        data_source_docs=[
+            {"data_source": {"name": "empty_metrics", "sql_query": "SELECT 1"}}
+        ],
+        metric_docs=[],
+    )
+    written = artifact.write(tmp_path)
+
+    assert "metrics" not in written
+    assert not stale_metrics.exists()
+
+
+def test_duplicate_relationship_foreign_identifier_name_is_rejected():
+    model = SemanticModelIR(
+        datasets=[
+            DatasetIR(name="fact", sql_table="fact_orders"),
+            DatasetIR(
+                name="buyers",
+                sql_table="buyers",
+                identifiers=[
+                    IdentifierIR(
+                        name="customer_id", type="primary", expr="customer_id"
+                    )
+                ],
+            ),
+            DatasetIR(
+                name="sellers",
+                sql_table="sellers",
+                identifiers=[
+                    IdentifierIR(
+                        name="customer_id", type="primary", expr="customer_id"
+                    )
+                ],
+            ),
+        ],
+        relationships=[
+            RelationshipIR(
+                name="fact_to_buyers",
+                type="many_to_one",
+                from_dataset="fact",
+                from_identifier="buyer_id",
+                to_dataset="buyers",
+                to_identifier="customer_id",
+            ),
+            RelationshipIR(
+                name="fact_to_sellers",
+                type="many_to_one",
+                from_dataset="fact",
+                from_identifier="seller_id",
+                to_dataset="sellers",
+                to_identifier="customer_id",
+            ),
+        ],
+    )
+
+    with pytest.raises(OSIValidationError, match="duplicate foreign identifier"):
+        lower_to_metricflow(model)

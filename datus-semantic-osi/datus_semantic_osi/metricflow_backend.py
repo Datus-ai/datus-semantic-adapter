@@ -56,10 +56,12 @@ class MetricFlowArtifact:
         sm_path = directory / "semantic_models.yaml"
         sm_path.write_text(self.semantic_models_yaml(), encoding="utf-8")
         written["semantic_models"] = sm_path
+        m_path = directory / "metrics.yaml"
         if self.metric_docs:
-            m_path = directory / "metrics.yaml"
             m_path.write_text(self.metrics_yaml(), encoding="utf-8")
             written["metrics"] = m_path
+        else:
+            m_path.unlink(missing_ok=True)
         return written
 
 
@@ -248,7 +250,22 @@ def _relationship_identifiers(model: SemanticModelIR) -> Dict[str, List[dict]]:
     extras: Dict[str, List[dict]] = {ds.name: [] for ds in model.datasets}
     for rel in model.relationships:
         join_name = primary_name_by_ds.get(rel.to_dataset, rel.to_identifier)
-        extras.setdefault(rel.from_dataset, []).append(
+        dataset_extras = extras.setdefault(rel.from_dataset, [])
+        existing = next(
+            (item for item in dataset_extras if item["name"] == join_name), None
+        )
+        if existing is not None:
+            if existing["expr"] != rel.from_identifier:
+                raise OSIValidationError(
+                    "relationships lower to duplicate foreign identifier "
+                    f"`{join_name}` on dataset `{rel.from_dataset}` with "
+                    f"different expressions `{existing['expr']}` and "
+                    f"`{rel.from_identifier}`.",
+                    hint="Give the target datasets distinct primary identifier names "
+                    "or split the relationship roles into separate datasets.",
+                )
+            continue
+        dataset_extras.append(
             {"name": join_name, "type": "foreign", "expr": rel.from_identifier}
         )
     return extras

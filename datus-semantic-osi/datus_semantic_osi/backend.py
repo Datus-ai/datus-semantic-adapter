@@ -14,11 +14,13 @@ from __future__ import annotations
 
 import tempfile
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from pathlib import Path
-from typing import List, Optional
+from typing import Iterator, List, Optional
 
 from datus_semantic_core.models import ValidationIssue, ValidationResult
 
+from datus_semantic_osi.errors import OSIValidationError
 from datus_semantic_osi.ir import SemanticModelIR
 from datus_semantic_osi.metricflow_backend import (
     MetricFlowArtifact,
@@ -83,6 +85,7 @@ class MetricFlowBackend(SemanticExecutionBackend):
         self._db_config = db_config
         self._datasource = datasource
         self._timeout = timeout
+        self._live_temp_dir: Optional[tempfile.TemporaryDirectory] = None
 
     @property
     def has_live_connection(self) -> bool:
@@ -97,9 +100,12 @@ class MetricFlowBackend(SemanticExecutionBackend):
         """
         if not self._db_config:
             raise RuntimeError("No db_config configured for live MetricFlow execution.")
-        directory = self._write(model)
-        from datus_semantic_metricflow.adapter import MetricFlowAdapter
-        from datus_semantic_metricflow.config import MetricFlowConfig
+        directory = self._write_persistent(model)
+        try:
+            from datus_semantic_metricflow.adapter import MetricFlowAdapter
+            from datus_semantic_metricflow.config import MetricFlowConfig
+        except ImportError as e:
+            raise self._missing_metricflow_error() from e
 
         config = MetricFlowConfig(
             datasource=self._datasource or self._db_config.get("database", ""),
@@ -109,30 +115,64 @@ class MetricFlowBackend(SemanticExecutionBackend):
         )
         return MetricFlowAdapter(config)
 
-    def _artifact_dir(self) -> Path:
+    @staticmethod
+    def _missing_metricflow_error() -> OSIValidationError:
+        return OSIValidationError(
+            "MetricFlow backend requires the optional MetricFlow dependency. "
+            "Install with `pip install 'datus-semantic-osi[metricflow]'`."
+        )
+
+    @contextmanager
+    def _artifact_dir(self) -> Iterator[Path]:
+        if self._generated_path:
+            d = Path(self._generated_path)
+            d.mkdir(parents=True, exist_ok=True)
+            yield d
+            return
+        with tempfile.TemporaryDirectory(prefix="osi_metricflow_") as directory:
+            yield Path(directory)
+
+    def _persistent_artifact_dir(self) -> Path:
         if self._generated_path:
             d = Path(self._generated_path)
             d.mkdir(parents=True, exist_ok=True)
             return d
-        return Path(tempfile.mkdtemp(prefix="osi_metricflow_"))
+        if self._live_temp_dir is None:
+            self._live_temp_dir = tempfile.TemporaryDirectory(
+                prefix="osi_metricflow_live_"
+            )
+        return Path(self._live_temp_dir.name)
 
     def lower(self, model: SemanticModelIR) -> MetricFlowArtifact:
         return lower_to_metricflow(model)
 
-    def _write(self, model: SemanticModelIR) -> Path:
-        directory = self._artifact_dir()
+    def _write(self, model: SemanticModelIR, directory: Path) -> Path:
         self.lower(model).write(directory)
         return directory
 
+    def _write_persistent(self, model: SemanticModelIR) -> Path:
+        return self._write(model, self._persistent_artifact_dir())
+
     def validate(self, model: SemanticModelIR) -> ValidationResult:
-        directory = self._write(model)
-        from metricflow.model.model_validator import ModelValidator
-        from metricflow.model.parsing.dir_to_model import (
-            parse_directory_of_yaml_files_to_model,
-        )
+        try:
+            from metricflow.model.model_validator import ModelValidator
+            from metricflow.model.parsing.dir_to_model import (
+                parse_directory_of_yaml_files_to_model,
+            )
+        except ImportError:
+            return ValidationResult(
+                valid=False,
+                issues=[
+                    ValidationIssue(
+                        severity="error", message=str(self._missing_metricflow_error())
+                    )
+                ],
+            )
 
         issues: List[ValidationIssue] = []
-        build = parse_directory_of_yaml_files_to_model(str(directory))
+        with self._artifact_dir() as directory:
+            self._write(model, directory)
+            build = parse_directory_of_yaml_files_to_model(str(directory))
         for e in build.issues.errors:
             issues.append(ValidationIssue(severity="error", message=str(e)))
         for w in build.issues.warnings:
@@ -149,13 +189,15 @@ class MetricFlowBackend(SemanticExecutionBackend):
         has_errors = any(i.severity == "error" for i in issues)
         return ValidationResult(valid=not has_errors, issues=issues)
 
-    def _client(self, model: SemanticModelIR):
-        directory = self._write(model)
-        from metricflow.api.metricflow_client import MetricFlowClient
-        from metricflow.model.parsing.dir_to_model import (
-            parse_directory_of_yaml_files_to_model,
-        )
-        from metricflow.sql_clients.duckdb import DuckDbSqlClient
+    def _client(self, directory: Path):
+        try:
+            from metricflow.api.metricflow_client import MetricFlowClient
+            from metricflow.model.parsing.dir_to_model import (
+                parse_directory_of_yaml_files_to_model,
+            )
+            from metricflow.sql_clients.duckdb import DuckDbSqlClient
+        except ImportError as e:
+            raise self._missing_metricflow_error() from e
 
         build = parse_directory_of_yaml_files_to_model(str(directory))
         return MetricFlowClient(
@@ -174,15 +216,17 @@ class MetricFlowBackend(SemanticExecutionBackend):
         where: Optional[str] = None,
         limit: Optional[int] = None,
     ) -> str:
-        client = self._client(model)
-        result = client.explain(
-            metrics=metrics,
-            dimensions=dimensions or [],
-            start_time=time_start,
-            end_time=time_end,
-            where=where,
-            limit=limit,
-        )
+        with self._artifact_dir() as directory:
+            self._write(model, directory)
+            client = self._client(directory)
+            result = client.explain(
+                metrics=metrics,
+                dimensions=dimensions or [],
+                start_time=time_start,
+                end_time=time_end,
+                where=where,
+                limit=limit,
+            )
         return result.rendered_sql_without_descriptions.sql_query
 
 

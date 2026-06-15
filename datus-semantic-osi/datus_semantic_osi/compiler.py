@@ -66,6 +66,12 @@ def _measure_from_aggregate(node: exp.Expression) -> MeasureIR:
             return MeasureIR(name="rows_count", agg=Aggregation.COUNT, expr="1")
         if isinstance(arg, exp.Distinct):
             cols = arg.expressions or ([arg.this] if arg.this else [])
+            if len(cols) != 1:
+                raise OSIValidationError(
+                    "COUNT(DISTINCT ...) must contain exactly one expression.",
+                    hint="Declare separate metrics for multi-column distinct logic, or "
+                    "precompute a single distinct key in the dataset.",
+                )
             col_sql = cols[0].sql(dialect="mysql") if cols else "1"
             base = _sanitize(col_sql)
             return MeasureIR(
@@ -94,6 +100,18 @@ def _is_aggregate(node: exp.Expression) -> bool:
     return isinstance(node, (exp.Count, *_AGG_NODES.keys()))
 
 
+def _same_measure_signature(left: MeasureIR, right: MeasureIR) -> bool:
+    return left.agg is right.agg and left.expr == right.expr
+
+
+def _raise_measure_name_collision(name: str) -> None:
+    raise OSIValidationError(
+        f"aggregate expressions produce the same backing measure name `{name}`.",
+        hint="Use expressions that compile to distinct measure names, or define "
+        "separate metrics so the ambiguity is explicit.",
+    )
+
+
 def _collect_aggregate_measures(tree: exp.Expression):
     """Replace each aggregate subtree with a reference to its backing measure.
 
@@ -104,6 +122,11 @@ def _collect_aggregate_measures(tree: exp.Expression):
     def _replace(node: exp.Expression) -> exp.Expression:
         if _is_aggregate(node):
             measure = _measure_from_aggregate(node)
+            existing = measures.get(measure.name)
+            if existing is not None:
+                if _same_measure_signature(existing, measure):
+                    return exp.column(existing.name)
+                _raise_measure_name_collision(measure.name)
             measures[measure.name] = measure
             return exp.column(measure.name)
         return node
@@ -157,6 +180,8 @@ def compile_metric_expression(
     ):
         num = _measure_from_aggregate(tree.this)
         den = _measure_from_aggregate(tree.expression)
+        if num.name == den.name and not _same_measure_signature(num, den):
+            _raise_measure_name_collision(num.name)
         measures = [num] if num.name == den.name else [num, den]
         return MetricIR(
             name=name,
@@ -202,7 +227,7 @@ def _compile_dataset(ds: OSIDataset) -> DatasetIR:
         fields.append(
             FieldIR(
                 name=ds.time_dimension.name,
-                expr=ds.time_dimension.name,
+                expr=ds.time_dimension.expr or ds.time_dimension.name,
                 type="time",
                 is_primary_time=True,
                 time_granularity=ds.time_dimension.granularity,
