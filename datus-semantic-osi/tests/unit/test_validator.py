@@ -62,6 +62,14 @@ def test_profile_rejects_metric_pointing_at_unknown_dataset():
     assert any("nonexistent" in i for i in issues)
 
 
+def test_profile_unknown_dataset_with_time_dimension_returns_issue():
+    doc = parse_osi(GOOD)
+    doc.metrics[0].dataset = "nonexistent"
+    doc.metrics[0].time_dimension = "order_date"
+    issues = validate_profile(doc)
+    assert any("nonexistent" in i for i in issues)
+
+
 def test_profile_rejects_metric_without_expression_or_ratio_hints():
     doc = parse_osi(GOOD)
     doc.metrics[0].expression = None

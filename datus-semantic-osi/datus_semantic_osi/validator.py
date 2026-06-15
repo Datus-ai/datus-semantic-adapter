@@ -21,7 +21,8 @@ from datus_semantic_osi.profile import OSIDocument
 def validate_profile(doc: OSIDocument) -> List[str]:
     """Validate the executable OSI Profile subset (authoring-level rules)."""
     issues: List[str] = []
-    dataset_names = {d.name for d in doc.datasets}
+    datasets_by_name = {d.name: d for d in doc.datasets}
+    dataset_names = set(datasets_by_name)
 
     if not doc.datasets:
         issues.append("Document declares no datasets; at least one is required.")
@@ -50,7 +51,7 @@ def validate_profile(doc: OSIDocument) -> List[str]:
             )
         # time_dimension must be declared on the metric's dataset
         if metric.time_dimension and metric.dataset in dataset_names:
-            ds = next(d for d in doc.datasets if d.name == metric.dataset)
+            ds = datasets_by_name[metric.dataset]
             declared = {dim.name for dim in ds.dimensions}
             if ds.time_dimension:
                 declared.add(ds.time_dimension.name)
