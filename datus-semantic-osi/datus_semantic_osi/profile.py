@@ -41,12 +41,14 @@ class OSIDimension(BaseModel):
     type: str = "categorical"  # categorical | time | numeric
     granularity: Optional[str] = None
     description: Optional[str] = None
+    ai_context: Optional[Union[str, Dict[str, Any]]] = None
 
 
 class OSITimeDimension(BaseModel):
     name: str
     expr: Optional[str] = None
     granularity: str = "day"
+    ai_context: Optional[Union[str, Dict[str, Any]]] = None
 
 
 class OSIFilter(BaseModel):
@@ -58,6 +60,7 @@ class OSIDataset(BaseModel):
     name: str
     source: OSISource
     description: Optional[str] = None
+    ai_context: Optional[Union[str, Dict[str, Any]]] = None
     filters: List[OSIFilter] = Field(default_factory=list)
     primary_key: Optional[Union[str, List[str]]] = None
     time_dimension: Optional[OSITimeDimension] = None
@@ -92,6 +95,7 @@ class OSINonAdditiveDimension(BaseModel):
 class OSIMetric(BaseModel):
     name: str
     description: str = ""
+    ai_context: Optional[Union[str, Dict[str, Any]]] = None
     expression: Optional[str] = None
     metric_kind: Optional[str] = None
     metric_type: Optional[str] = None  # compatibility alias for metric_kind
@@ -108,6 +112,7 @@ class OSIMetric(BaseModel):
     format: Optional[str] = None
     unit: Optional[str] = None
     non_additive_dimension: Optional[OSINonAdditiveDimension] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
     @property
     def kind(self) -> Optional[str]:
@@ -130,6 +135,7 @@ class OSIRelationship(BaseModel):
     from_identifier: str
     to_dataset: str
     to_identifier: str
+    ai_context: Optional[Union[str, Dict[str, Any]]] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -140,9 +146,7 @@ class OSIRelationship(BaseModel):
         rel_name = normalized.get("name")
 
         forbidden = [
-            key
-            for key in ("join_on", "from_column", "to_column")
-            if key in normalized
+            key for key in ("join_on", "from_column", "to_column") if key in normalized
         ]
         if forbidden:
             name = f" `{rel_name}`" if rel_name else ""
@@ -273,6 +277,19 @@ def _merge_datus_extensions(obj: Dict[str, Any]) -> Dict[str, Any]:
     merged = {k: v for k, v in obj.items() if k != "custom_extensions"}
     for key, value in hints.items():
         merged.setdefault(key, value)
+    if "name" in merged and (
+        "expression" in merged or "metric_kind" in merged or "metric_type" in merged
+    ):
+        metric_fields = set(OSIMetric.model_fields)
+        metadata = dict(merged.get("metadata") or {})
+        for key in list(merged):
+            if key in metric_fields:
+                continue
+            if key in {"name", "description", "expression"}:
+                continue
+            metadata[key] = merged.pop(key)
+        if metadata:
+            merged["metadata"] = metadata
     return merged
 
 
@@ -359,7 +376,9 @@ def _time_dimension_from_hint(value: Any) -> Optional[Dict[str, Any]]:
     if isinstance(value, dict) and value.get("name"):
         result = {
             "name": value["name"],
-            "granularity": value.get("granularity") or value.get("time_granularity") or "day",
+            "granularity": value.get("granularity")
+            or value.get("time_granularity")
+            or "day",
         }
         if value.get("expr"):
             result["expr"] = value["expr"]
@@ -376,6 +395,8 @@ def _core_dataset_to_profile(dataset: Dict[str, Any]) -> Dict[str, Any]:
     }
     if dataset.get("description"):
         profile["description"] = dataset["description"]
+    if dataset.get("ai_context"):
+        profile["ai_context"] = dataset["ai_context"]
     if dataset.get("primary_key"):
         keys = list(dataset["primary_key"])
         profile["primary_key"] = keys[0] if len(keys) == 1 else keys
@@ -397,7 +418,9 @@ def _core_dataset_to_profile(dataset: Dict[str, Any]) -> Dict[str, Any]:
             continue
         is_time = bool((field.get("dimension") or {}).get("is_time"))
         expr = _first_core_expression(field) or str(name)
-        granularity = field_hints.get("time_granularity") or field_hints.get("granularity")
+        granularity = field_hints.get("time_granularity") or field_hints.get(
+            "granularity"
+        )
 
         if is_time and primary_time_field is None:
             primary_time_field = str(name)
@@ -406,6 +429,8 @@ def _core_dataset_to_profile(dataset: Dict[str, Any]) -> Dict[str, Any]:
                 "expr": expr,
                 "granularity": granularity or "day",
             }
+            if field.get("ai_context"):
+                profile["time_dimension"]["ai_context"] = field["ai_context"]
             continue
         if str(name) == primary_time_field:
             time_dimension = profile.get("time_dimension")
@@ -413,6 +438,8 @@ def _core_dataset_to_profile(dataset: Dict[str, Any]) -> Dict[str, Any]:
                 time_dimension.setdefault("expr", expr)
                 if granularity:
                     time_dimension.setdefault("granularity", granularity)
+                if field.get("ai_context"):
+                    time_dimension.setdefault("ai_context", field["ai_context"])
             continue
 
         dim_type = field_hints.get("type") or ("time" if is_time else "categorical")
@@ -423,6 +450,8 @@ def _core_dataset_to_profile(dataset: Dict[str, Any]) -> Dict[str, Any]:
         }
         if field.get("description"):
             dim["description"] = field["description"]
+        if field.get("ai_context"):
+            dim["ai_context"] = field["ai_context"]
         if granularity:
             dim["granularity"] = granularity
         dimensions.append(dim)
@@ -440,6 +469,27 @@ def _core_metric_to_profile(
         "name": metric["name"],
         "description": metric.get("description") or "",
         "expression": _first_core_expression(metric),
+    }
+    if metric.get("ai_context") not in (None, "", [], {}):
+        profile["ai_context"] = metric["ai_context"]
+    handled_hint_keys = {
+        "metric_kind",
+        "metric_type",
+        "numerator",
+        "denominator",
+        "inputs",
+        "dataset",
+        "time_dimension",
+        "filters",
+        "window",
+        "grain_to_date",
+        "offset_window",
+        "subject_path",
+        "format",
+        "unit",
+        "non_additive_dimension",
+        "filter",
+        "metadata",
     }
     for key in (
         "metric_kind",
@@ -462,6 +512,13 @@ def _core_metric_to_profile(
             profile[key] = hints[key]
     if "filter" in hints and "filters" not in profile:
         profile["filters"] = _filter_list(hints["filter"])
+    metadata = hints.get("metadata") if isinstance(hints.get("metadata"), dict) else {}
+    metadata = dict(metadata)
+    for key, value in hints.items():
+        if key not in handled_hint_keys:
+            metadata[key] = value
+    if metadata:
+        profile["metadata"] = metadata
     kind = str(profile.get("metric_kind") or profile.get("metric_type") or "").lower()
     if not profile.get("dataset") and default_dataset and kind != "derived":
         profile["dataset"] = default_dataset
@@ -588,9 +645,7 @@ def _dedupe_exact(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     fingerprints = set()
     result: List[Dict[str, Any]] = []
     for item in items:
-        fingerprint = json.dumps(
-            item, sort_keys=True, ensure_ascii=False, default=str
-        )
+        fingerprint = json.dumps(item, sort_keys=True, ensure_ascii=False, default=str)
         if fingerprint in fingerprints:
             continue
         fingerprints.add(fingerprint)
@@ -737,6 +792,8 @@ def to_core_schema_document(doc: OSIDocument) -> Dict[str, Any]:
         }
         if dataset.description:
             core_dataset["description"] = dataset.description
+        if dataset.ai_context:
+            core_dataset["ai_context"] = dataset.ai_context
         if dataset.primary_key:
             keys = (
                 [dataset.primary_key]
@@ -759,6 +816,11 @@ def to_core_schema_document(doc: OSIDocument) -> Dict[str, Any]:
                     ),
                     "dimension": {"is_time": True},
                     "custom_extensions": _datus_extension(time_hints),
+                    **(
+                        {"ai_context": dataset.time_dimension.ai_context}
+                        if dataset.time_dimension.ai_context
+                        else {}
+                    ),
                 }
             )
         for dim in dataset.dimensions:
@@ -769,6 +831,8 @@ def to_core_schema_document(doc: OSIDocument) -> Dict[str, Any]:
             }
             if dim.description:
                 field["description"] = dim.description
+            if dim.ai_context:
+                field["ai_context"] = dim.ai_context
             hints = {"type": dim.type, "time_granularity": dim.granularity}
             ext = _datus_extension(hints)
             if ext:
@@ -789,7 +853,11 @@ def to_core_schema_document(doc: OSIDocument) -> Dict[str, Any]:
             "from_columns": [rel.from_identifier],
             "to_columns": [rel.to_identifier],
         }
-        ext = _datus_extension({"type": rel.type if rel.type != "many_to_one" else None})
+        if rel.ai_context:
+            core_rel["ai_context"] = rel.ai_context
+        ext = _datus_extension(
+            {"type": rel.type if rel.type != "many_to_one" else None}
+        )
         if ext:
             core_rel["custom_extensions"] = ext
         model.setdefault("relationships", []).append(core_rel)
@@ -812,6 +880,8 @@ def to_core_schema_document(doc: OSIDocument) -> Dict[str, Any]:
             "unit": metric.unit,
             "non_additive_dimension": metric.non_additive_dimension,
         }
+        for key, value in metric.metadata.items():
+            metric_hints.setdefault(key, value)
         expression = metric.expression
         if not expression and metric.numerator and metric.denominator:
             expression = f"{metric.numerator} / {metric.denominator}"
@@ -826,6 +896,8 @@ def to_core_schema_document(doc: OSIDocument) -> Dict[str, Any]:
         }
         if metric.description:
             core_metric["description"] = metric.description
+        if metric.ai_context:
+            core_metric["ai_context"] = metric.ai_context
         ext = _datus_extension(metric_hints)
         if ext:
             core_metric["custom_extensions"] = ext

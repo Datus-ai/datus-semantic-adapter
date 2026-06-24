@@ -16,6 +16,12 @@ from datus_semantic_osi.errors import OSIValidationError
 from datus_semantic_osi.ir import MetricKind, SemanticModelIR
 from datus_semantic_osi.normalizer import normalization_errors
 from datus_semantic_osi.profile import OSIDocument
+from datus_semantic_osi.window_semantics import (
+    WINDOW_AGGREGATION_METADATA_KEYS,
+    base_metric_for_window_metric,
+    metadata_str,
+    window_aggregation,
+)
 
 
 def validate_profile(doc: OSIDocument) -> List[str]:
@@ -121,6 +127,31 @@ def validate_ir(model: SemanticModelIR) -> List[str]:
             issues.append(
                 f"Cumulative metric `{metric.name}` must declare a window or grain_to_date."
             )
+        if metric.window or metric.grain_to_date:
+            explicit_window_aggregation = metadata_str(
+                metric,
+                *WINDOW_AGGREGATION_METADATA_KEYS,
+            )
+            normalized_window_aggregation = window_aggregation(metric)
+            if not explicit_window_aggregation:
+                issues.append(
+                    f"Window metric `{metric.name}` must declare explicit "
+                    "`window_aggregation` metadata."
+                )
+            elif not normalized_window_aggregation:
+                issues.append(
+                    f"Window metric `{metric.name}` declares unsupported "
+                    f"`window_aggregation` `{explicit_window_aggregation}`. "
+                    "Supported values: avg, count, max, min, row_count, sum."
+                )
+            elif (
+                normalized_window_aggregation != "row_count"
+                and base_metric_for_window_metric(model, metric) is None
+            ):
+                issues.append(
+                    f"Window metric `{metric.name}` must have a separately declared "
+                    "aggregate base metric with the same dataset and measure expression."
+                )
         for measure in metric.measures:
             owner = measure_owner.get(measure.name)
             if owner is not None and owner != metric.dataset:

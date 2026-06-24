@@ -31,7 +31,7 @@ metrics:
         data: >
           {"metric_kind": "ratio", "numerator": "paid_revenue",
            "denominator": "order_count", "time_dimension": "order_date",
-           "format": "0.00%"}
+           "format": "0.00%", "window_aggregation": "avg"}
 """
 
 
@@ -50,6 +50,7 @@ def test_custom_extensions_datus_hints_are_merged_into_metric():
     assert metric.denominator == "order_count"
     assert metric.time_dimension == "order_date"
     assert metric.format == "0.00%"
+    assert metric.metadata["window_aggregation"] == "avg"
 
 
 def test_ratio_hints_compile_to_ratio_ir():
@@ -58,3 +59,4 @@ def test_ratio_hints_compile_to_ratio_ir():
     assert metric.kind is MetricKind.RATIO
     assert metric.numerator == "paid_revenue"
     assert metric.denominator == "order_count"
+    assert metric.metadata["window_aggregation"] == "avg"

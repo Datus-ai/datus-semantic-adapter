@@ -316,7 +316,7 @@ def _compile_metric(metric: OSIMetric) -> MetricIR:
             raise OSIValidationError(
                 "uses a SQL window function in a derived expression.",
                 metric=metric.name,
-                hint="Express period-over-period (同比/环比) as a derived metric whose "
+                hint="Express period-over-period changes as a derived metric whose "
                 "input declares `offset_window` (e.g. '1 month'), not LAG/OVER.",
             )
         metric_ir = MetricIR(
@@ -349,6 +349,7 @@ def _compile_metric(metric: OSIMetric) -> MetricIR:
     metric_ir.offset_window = metric.offset_window
     metric_ir.format = metric.format
     metric_ir.unit = metric.unit
+    metric_ir.metadata.update(metric.metadata)
     if metric.subject_path:
         metric_ir.metadata["subject_path"] = metric.subject_path
     metric_ir.filters = [

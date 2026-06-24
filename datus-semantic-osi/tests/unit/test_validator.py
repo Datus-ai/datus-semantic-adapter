@@ -24,6 +24,7 @@ from datus_semantic_osi.validator import (
     validate_ir,
     validate_profile,
 )
+from datus_semantic_osi.window_semantics import window_aggregation
 
 GOOD = """
 semantic_model:
@@ -107,6 +108,128 @@ def test_ir_flags_duplicate_measure_names():
     assert any("dup" in i for i in issues)
 
 
+def test_ir_accepts_window_metric_with_explicit_aggregation_and_base_metric():
+    base_measure = MeasureIR(name="revenue", agg=Aggregation.SUM, expr="amount")
+    model = SemanticModelIR(
+        datasets=[DatasetIR(name="orders", sql_table="orders")],
+        metrics=[
+            MetricIR(
+                name="revenue",
+                kind=MetricKind.AGGREGATE,
+                dataset="orders",
+                measures=[base_measure],
+            ),
+            MetricIR(
+                name="revenue_l7d",
+                kind=MetricKind.CUMULATIVE,
+                dataset="orders",
+                measures=[base_measure.model_copy()],
+                window="7 days",
+                metadata={"window_aggregation": "sum"},
+            ),
+        ],
+    )
+
+    assert validate_ir(model) == []
+
+
+def test_ir_rejects_window_metric_without_explicit_aggregation():
+    model = SemanticModelIR(
+        datasets=[DatasetIR(name="orders", sql_table="orders")],
+        metrics=[
+            MetricIR(
+                name="revenue_l7d",
+                kind=MetricKind.CUMULATIVE,
+                dataset="orders",
+                measures=[
+                    MeasureIR(name="revenue", agg=Aggregation.SUM, expr="amount")
+                ],
+                window="7 days",
+            )
+        ],
+    )
+
+    issues = validate_ir(model)
+    assert any("window_aggregation" in i for i in issues)
+
+
+def test_ir_rejects_window_metric_with_unsupported_aggregation():
+    model = SemanticModelIR(
+        datasets=[DatasetIR(name="orders", sql_table="orders")],
+        metrics=[
+            MetricIR(
+                name="revenue_l7d",
+                kind=MetricKind.CUMULATIVE,
+                dataset="orders",
+                measures=[
+                    MeasureIR(name="revenue", agg=Aggregation.SUM, expr="amount")
+                ],
+                window="7 days",
+                metadata={"window_aggregation": "median"},
+            )
+        ],
+    )
+
+    issues = validate_ir(model)
+    assert any("unsupported" in i and "median" in i for i in issues)
+
+
+def test_ir_rejects_window_metric_without_base_metric():
+    model = SemanticModelIR(
+        datasets=[DatasetIR(name="orders", sql_table="orders")],
+        metrics=[
+            MetricIR(
+                name="revenue_l7d",
+                kind=MetricKind.CUMULATIVE,
+                dataset="orders",
+                measures=[
+                    MeasureIR(name="revenue", agg=Aggregation.SUM, expr="amount")
+                ],
+                window="7 days",
+                metadata={"window_aggregation": "sum"},
+            )
+        ],
+    )
+
+    issues = validate_ir(model)
+    assert any("aggregate base metric" in i for i in issues)
+
+
+def test_ir_accepts_row_count_window_without_base_metric():
+    model = SemanticModelIR(
+        datasets=[DatasetIR(name="orders", sql_table="orders")],
+        metrics=[
+            MetricIR(
+                name="moving_window_period_count",
+                kind=MetricKind.CUMULATIVE,
+                dataset="orders",
+                measures=[
+                    MeasureIR(name="count_rows", agg=Aggregation.COUNT, expr="1")
+                ],
+                window="3 months",
+                metadata={"window_aggregation": "row_count"},
+            )
+        ],
+    )
+
+    assert validate_ir(model) == []
+
+
+def test_window_aggregation_ignores_blank_metadata_alias():
+    metric = MetricIR(
+        name="running_order_count",
+        kind=MetricKind.CUMULATIVE,
+        dataset="orders",
+        measures=[
+            MeasureIR(name="count_orders", agg=Aggregation.COUNT, expr="order_id")
+        ],
+        grain_to_date="month",
+        metadata={"window_aggregation": "  ", "window_function": "sum"},
+    )
+
+    assert window_aggregation(metric) == "sum"
+
+
 def test_identical_duplicate_datasets_are_merged(tmp_path):
     from datus_semantic_osi.profile import load_osi_path
 
@@ -141,12 +264,12 @@ def test_ir_flags_duplicate_dataset_names():
     # must not share a name (each becomes a separate backend data source).
     model = SemanticModelIR(
         datasets=[
-            DatasetIR(name="activity_info", sql_table="t"),
-            DatasetIR(name="activity_info", sql_table="t"),
+            DatasetIR(name="order_info", sql_table="t"),
+            DatasetIR(name="order_info", sql_table="t"),
         ],
     )
     issues = validate_ir(model)
-    assert any("activity_info" in i and "unique" in i.lower() for i in issues)
+    assert any("order_info" in i and "unique" in i.lower() for i in issues)
 
 
 def test_ir_flags_duplicate_metric_names():
@@ -154,13 +277,13 @@ def test_ir_flags_duplicate_metric_names():
         datasets=[DatasetIR(name="d", sql_table="t")],
         metrics=[
             MetricIR(
-                name="activity_count",
+                name="order_count",
                 kind=MetricKind.AGGREGATE,
                 dataset="d",
                 measures=[MeasureIR(name="m1", agg=Aggregation.COUNT, expr="1")],
             ),
             MetricIR(
-                name="activity_count",
+                name="order_count",
                 kind=MetricKind.AGGREGATE,
                 dataset="d",
                 measures=[MeasureIR(name="m2", agg=Aggregation.SUM, expr="x")],
@@ -169,7 +292,7 @@ def test_ir_flags_duplicate_metric_names():
     )
     issues = validate_ir(model)
     assert any(
-        "activity_count" in i and "metric" in i.lower() and "unique" in i.lower()
+        "order_count" in i and "metric" in i.lower() and "unique" in i.lower()
         for i in issues
     )
 
@@ -205,7 +328,7 @@ def test_ir_flags_element_type_conflict_across_datasets():
 
 
 def test_ir_flags_identifier_vs_dimension_conflict_across_datasets():
-    # `product_type` is a primary identifier in one dataset but a plain dimension
+    # `customer_id` is a primary identifier in one dataset but a plain dimension
     # in another -> inconsistent element type.
     model = SemanticModelIR(
         datasets=[
@@ -213,25 +336,21 @@ def test_ir_flags_identifier_vs_dimension_conflict_across_datasets():
                 name="dim",
                 sql_table="dim_pt",
                 identifiers=[
-                    IdentifierIR(
-                        name="product_type", type="primary", expr="product_type"
-                    )
+                    IdentifierIR(name="customer_id", type="primary", expr="customer_id")
                 ],
             ),
             DatasetIR(
                 name="fact",
                 sql_table="f",
                 fields=[
-                    FieldIR(
-                        name="product_type", expr="product_type", type="categorical"
-                    )
+                    FieldIR(name="customer_id", expr="customer_id", type="categorical")
                 ],
             ),
         ],
     )
     issues = validate_ir(model)
     assert any(
-        "product_type" in i and ("identifier" in i.lower() or "type" in i.lower())
+        "customer_id" in i and ("identifier" in i.lower() or "type" in i.lower())
         for i in issues
     )
 
