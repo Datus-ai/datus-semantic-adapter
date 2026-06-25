@@ -182,6 +182,31 @@ semantic_model:
     assert metric["ai_context"]["instructions"] == "Use for order volume questions."
 
 
+def test_parse_osi_rejects_datus_filter_hint():
+    with pytest.raises(Exception, match="not an OSI authoring field"):
+        parse_osi(
+            """
+version: 0.2.0.dev0
+semantic_model:
+  - name: shop
+    datasets:
+      - name: orders
+        source: orders
+        primary_key: [order_id]
+    metrics:
+      - name: paid_order_count
+        description: "Paid order count"
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: "COUNT(DISTINCT order_id)"
+        custom_extensions:
+          - vendor_name: DATUS
+            data: '{"dataset":"orders","filters":[{"expression":"status = ''paid''"}]}'
+"""
+        )
+
+
 def test_primary_time_dimension_preserves_expression():
     doc = parse_osi(
         """

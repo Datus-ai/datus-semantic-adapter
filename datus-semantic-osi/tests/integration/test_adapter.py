@@ -303,6 +303,48 @@ async def test_query_metrics_dry_run_renders_sql(adapter):
     assert "fact_orders" in sql
 
 
+async def test_query_metrics_dimension_preserving_dry_run_uses_policy_sql(tmp_path):
+    (tmp_path / "model.yaml").write_text(
+        _core_yaml(
+            """
+semantic_model:
+  name: shop
+datasets:
+  - name: orders
+    source: {table: orders}
+    primary_key: order_id
+    time_dimension: {name: order_date, granularity: day}
+  - name: customers
+    source: {table: customers}
+    primary_key: customer_id
+    dimensions: [{name: customer_name, expr: customer_name}]
+relationships:
+  - {name: o2c, from: orders, to: customers, from_columns: [customer_id], to_columns: [customer_id]}
+metrics:
+  - name: order_count
+    expression: "COUNT(DISTINCT order_id)"
+    dataset: orders
+"""
+        )
+    )
+    adapter = DatusOSIAdapter(
+        DatusOSIConfig(semantic_models_path=str(tmp_path), datasource="duckdb")
+    )
+
+    result = await adapter.query_metrics(
+        ["order_count"],
+        dimensions=["customer_id__customer_name"],
+        join_policy="dimension_preserving",
+        zero_fill=True,
+        dry_run=True,
+    )
+
+    sql = result.metadata["sql"]
+    assert "LEFT JOIN" in sql
+    assert "COALESCE(fact.order_count, 0)" in sql
+    assert result.metadata["join_policy"] == "dimension_preserving"
+
+
 async def test_query_metrics_match_only_drops_unmatched_joined_dimension(tmp_path):
     (tmp_path / "model.yaml").write_text(
         _core_yaml(
@@ -537,14 +579,15 @@ metrics:
     executor = _FakeExecutor(QueryResult(columns=["customer_name"], data=[]))
     adapter._backend = _FakeBackend(executor)
 
-    await adapter.query_metrics(
-        ["order_count", "refund_count"],
-        dimensions=["customer_id__customer_name"],
-        join_policy="dimension_preserving",
-    )
+    with pytest.raises(ValueError, match="dimension_preserving"):
+        await adapter.query_metrics(
+            ["order_count", "refund_count"],
+            dimensions=["customer_id__customer_name"],
+            join_policy="dimension_preserving",
+        )
 
     assert executor.sql_queries == []
-    assert executor.calls[0]["metrics"] == ["order_count", "refund_count"]
+    assert executor.calls == []
 
 
 async def test_query_metrics_dimension_preserving_falls_back_for_derived_metric(
@@ -586,14 +629,15 @@ metrics:
     executor = _FakeExecutor(QueryResult(columns=["customer_name"], data=[]))
     adapter._backend = _FakeBackend(executor)
 
-    await adapter.query_metrics(
-        ["average_order_value"],
-        dimensions=["customer_id__customer_name"],
-        join_policy="dimension_preserving",
-    )
+    with pytest.raises(ValueError, match="dimension_preserving"):
+        await adapter.query_metrics(
+            ["average_order_value"],
+            dimensions=["customer_id__customer_name"],
+            join_policy="dimension_preserving",
+        )
 
     assert executor.sql_queries == []
-    assert executor.calls[0]["metrics"] == ["average_order_value"]
+    assert executor.calls == []
 
 
 async def test_query_metrics_dimension_preserving_requires_shared_time_dimension(
@@ -632,15 +676,16 @@ metrics:
     executor = _FakeExecutor(QueryResult(columns=["customer_name"], data=[]))
     adapter._backend = _FakeBackend(executor)
 
-    await adapter.query_metrics(
-        ["order_count", "shipped_order_count"],
-        dimensions=["customer_id__customer_name"],
-        join_policy="dimension_preserving",
-        time_start="2025-01-01",
-    )
+    with pytest.raises(ValueError, match="dimension_preserving"):
+        await adapter.query_metrics(
+            ["order_count", "shipped_order_count"],
+            dimensions=["customer_id__customer_name"],
+            join_policy="dimension_preserving",
+            time_start="2025-01-01",
+        )
 
     assert executor.sql_queries == []
-    assert executor.calls[0]["metrics"] == ["order_count", "shipped_order_count"]
+    assert executor.calls == []
 
 
 async def test_query_metrics_postprocesses_window_metrics(adapter):

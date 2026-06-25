@@ -53,8 +53,10 @@ from datus_semantic_osi.query_window import (
     query_window_metrics,
 )
 from datus_semantic_osi.validator import (
+    validate_authoring_quality,
     validate_capabilities,
     validate_ir,
+    validate_mutation_guard,
     validate_profile,
 )
 
@@ -76,6 +78,34 @@ _DISALLOWED_WHERE_EXPRESSIONS = tuple(
     )
     if candidate is not None
 )
+_DEFAULT_VALIDATE_CHECKS = ("profile", "ir", "capability", "backend")
+_SUPPORTED_VALIDATE_CHECKS = {
+    "profile",
+    "ir",
+    "capability",
+    "backend",
+    "authoring_quality",
+    "mutation_guard",
+}
+
+
+def _normalize_validate_checks(checks: Optional[List[str] | str]) -> List[str]:
+    if checks is None:
+        return list(_DEFAULT_VALIDATE_CHECKS)
+    raw_items: List[Any]
+    if isinstance(checks, str):
+        raw_items = [item.strip() for item in checks.split(",")]
+    else:
+        raw_items = list(checks)
+    normalized: List[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        check = str(item).strip().lower()
+        if not check or check in seen:
+            continue
+        seen.add(check)
+        normalized.append(check)
+    return normalized
 
 
 class DatusOSIAdapter(BaseSemanticAdapter):
@@ -783,7 +813,36 @@ class DatusOSIAdapter(BaseSemanticAdapter):
         dimensions = dimensions or []
         policy = normalize_join_policy(join_policy)
 
+        if zero_fill and policy != "dimension_preserving":
+            raise ValueError("zero_fill requires join_policy='dimension_preserving'.")
+
         if dry_run and not live:
+            if policy == "dimension_preserving":
+                sql = self._dimension_preserving_sql(
+                    metrics=metrics,
+                    dimensions=dimensions,
+                    time_start=time_start,
+                    time_end=time_end,
+                    where=where,
+                    zero_fill=zero_fill,
+                    order_by=order_by,
+                    limit=limit,
+                )
+                if not sql:
+                    raise ValueError(
+                        "join_policy='dimension_preserving' cannot plan this query."
+                    )
+                return QueryResult(
+                    columns=["sql"],
+                    data=[{"sql": sql}],
+                    metadata={
+                        "explain": True,
+                        "sql": sql,
+                        "join_policy": "dimension_preserving",
+                        "zero_fill": bool(zero_fill),
+                        "execution": "osi_dimension_preserving_sql",
+                    },
+                )
             sql = self._backend.render_sql(
                 model,
                 metrics=metrics,
@@ -826,6 +885,9 @@ class DatusOSIAdapter(BaseSemanticAdapter):
             )
             if dimension_preserving_result is not None:
                 return dimension_preserving_result
+            raise ValueError(
+                "join_policy='dimension_preserving' cannot plan this query."
+            )
 
         if not dry_run and can_postprocess_window_metrics(model, query_metrics):
             result = await query_window_metrics(
@@ -867,7 +929,30 @@ class DatusOSIAdapter(BaseSemanticAdapter):
             join_policy=join_policy,
         )
 
-    async def validate_semantic(self, scope: str = "all") -> ValidationResult:
+    async def validate_semantic(
+        self,
+        scope: str = "all",
+        checks: Optional[List[str] | str] = None,
+        baseline_artifact: Optional[Dict[str, Any]] = None,
+    ) -> ValidationResult:
+        checks_list = _normalize_validate_checks(checks)
+        unsupported = sorted(
+            check for check in checks_list if check not in _SUPPORTED_VALIDATE_CHECKS
+        )
+        if unsupported:
+            return ValidationResult(
+                valid=False,
+                issues=[
+                    ValidationIssue(
+                        severity="error",
+                        message=(
+                            f"Unsupported validate_semantic check(s): {unsupported}. "
+                            f"Supported checks: {sorted(_SUPPORTED_VALIDATE_CHECKS)}."
+                        ),
+                    )
+                ],
+            )
+
         issues: List[ValidationIssue] = []
 
         # Stage 1: OSI Profile validation (authoring level).
@@ -882,9 +967,28 @@ class DatusOSIAdapter(BaseSemanticAdapter):
             ValidationIssue(severity="warning", message=m)
             for m in [*normalization.warnings, *normalization.actions]
         )
-        issues.extend(
-            ValidationIssue(severity="error", message=m) for m in validate_profile(doc)
-        )
+        if "profile" in checks_list:
+            issues.extend(
+                ValidationIssue(severity="error", message=m)
+                for m in validate_profile(doc)
+            )
+        if "authoring_quality" in checks_list:
+            issues.extend(
+                ValidationIssue(severity="error", message=m)
+                for m in validate_authoring_quality(doc)
+            )
+        if "mutation_guard" in checks_list:
+            issues.extend(
+                ValidationIssue(severity="error", message=m)
+                for m in validate_mutation_guard(doc, baseline_artifact)
+            )
+
+        if any(i.severity == "error" for i in issues):
+            return ValidationResult(valid=False, issues=issues)
+
+        needs_ir = bool({"ir", "capability", "backend"} & set(checks_list))
+        if not needs_ir:
+            return ValidationResult(valid=True, issues=issues)
 
         # Stage 2: compile to IR (business-semantic errors fail fast).
         try:
@@ -894,25 +998,34 @@ class DatusOSIAdapter(BaseSemanticAdapter):
             return ValidationResult(valid=False, issues=issues)
 
         # Stage 3: IR + backend capability validation.
-        issues.extend(
-            ValidationIssue(severity="error", message=m) for m in validate_ir(model)
-        )
-        caps = getattr(self._backend, "capabilities", {}) or {}
-        issues.extend(
-            ValidationIssue(severity="error", message=m)
-            for m in validate_capabilities(model, caps)
-        )
+        if "ir" in checks_list:
+            issues.extend(
+                ValidationIssue(severity="error", message=m) for m in validate_ir(model)
+            )
+        if "capability" in checks_list:
+            caps = getattr(self._backend, "capabilities", {}) or {}
+            issues.extend(
+                ValidationIssue(severity="error", message=m)
+                for m in validate_capabilities(model, caps)
+            )
         if any(i.severity == "error" for i in issues):
             return ValidationResult(valid=False, issues=issues)
 
         # Stage 4: backend validation. With a live connection, delegate to
         # MetricFlowAdapter for the full pipeline (lint + parse + semantic +
         # data-warehouse validation); otherwise run parse + semantic only.
-        if getattr(self._backend, "has_live_connection", False):
-            executor = self._backend.make_executor(model)
-            backend_result = await executor.validate_semantic(scope=scope)
-        else:
-            backend_result = self._backend.validate(model)
-        issues.extend(backend_result.issues)
-        valid = backend_result.valid and not any(i.severity == "error" for i in issues)
-        return ValidationResult(valid=valid, issues=issues)
+        if "backend" in checks_list:
+            if getattr(self._backend, "has_live_connection", False):
+                executor = self._backend.make_executor(model)
+                backend_result = await executor.validate_semantic(scope=scope)
+            else:
+                backend_result = self._backend.validate(model)
+            issues.extend(backend_result.issues)
+            valid = backend_result.valid and not any(
+                i.severity == "error" for i in issues
+            )
+            return ValidationResult(valid=valid, issues=issues)
+        return ValidationResult(
+            valid=not any(i.severity == "error" for i in issues),
+            issues=issues,
+        )

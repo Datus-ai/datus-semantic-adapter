@@ -18,10 +18,13 @@ from datus_semantic_osi.ir import (
     SemanticModelIR,
 )
 from datus_semantic_osi.profile import parse_osi_profile as parse_osi
+from datus_semantic_osi.profile import to_core_schema_document
 from datus_semantic_osi.validator import (
     ensure_valid,
+    validate_authoring_quality,
     validate_capabilities,
     validate_ir,
+    validate_mutation_guard,
     validate_profile,
 )
 from datus_semantic_osi.window_semantics import window_aggregation
@@ -228,6 +231,54 @@ def test_window_aggregation_ignores_blank_metadata_alias():
     )
 
     assert window_aggregation(metric) == "sum"
+
+
+def test_authoring_quality_requires_llm_context():
+    doc = parse_osi(GOOD)
+
+    issues = validate_authoring_quality(doc)
+
+    assert any(
+        "Dataset `orders`" in issue and "description" in issue for issue in issues
+    )
+    assert any(
+        "Dataset `orders`" in issue and "ai_context" in issue for issue in issues
+    )
+    assert any(
+        "Metric `order_count`" in issue and "description" in issue for issue in issues
+    )
+    assert any(
+        "Metric `order_count`" in issue and "ai_context" in issue for issue in issues
+    )
+
+
+def test_mutation_guard_allows_new_metrics_but_rejects_changed_datasets():
+    baseline = parse_osi(GOOD)
+    baseline.datasets[0].description = "Order rows."
+    baseline.datasets[0].ai_context = {"instructions": "Use for order analytics."}
+    baseline.metrics[0].description = "Order count."
+    baseline.metrics[0].ai_context = {"instructions": "Use for volume questions."}
+    baseline_artifact = to_core_schema_document(baseline)
+
+    current = parse_osi(GOOD)
+    current.datasets[0].description = "Changed description."
+    current.datasets[0].ai_context = {"instructions": "Use for order analytics."}
+    current.metrics[0].description = "Order count."
+    current.metrics[0].ai_context = {"instructions": "Use for volume questions."}
+    current.metrics.append(
+        current.metrics[0].model_copy(
+            update={
+                "name": "revenue",
+                "description": "Revenue.",
+                "expression": "SUM(amount)",
+            }
+        )
+    )
+
+    issues = validate_mutation_guard(current, baseline_artifact)
+
+    assert any("dataset `orders` was modified" in issue for issue in issues)
+    assert not any("metric `revenue`" in issue for issue in issues)
 
 
 def test_identical_duplicate_datasets_are_merged(tmp_path):

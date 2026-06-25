@@ -21,11 +21,40 @@ import yaml
 from pydantic import BaseModel, Field, model_validator
 
 from datus_semantic_osi.errors import OSIValidationError
+from datus_semantic_osi.window_semantics import WINDOW_AGGREGATION_METADATA_KEYS
 
 DATUS_VENDOR = "DATUS"
 CORE_SCHEMA_VERSION = "0.2.0.dev0"
 CORE_SCHEMA_RESOURCE = "osi-core-0.2.0.dev0.schema.json"
 DEFAULT_DIALECT = "ANSI_SQL"
+_DISALLOWED_DATUS_HINT_KEYS = {"filter", "filters"}
+_DATASET_DATUS_HINT_KEYS = {"source", "source_type", "time_dimension"}
+_FIELD_DATUS_HINT_KEYS = {"type", "time_granularity", "granularity"}
+_RELATIONSHIP_DATUS_HINT_KEYS = {"type"}
+_METRIC_METADATA_HINT_KEYS = set(WINDOW_AGGREGATION_METADATA_KEYS) | {
+    "base_metric_name",
+    "time_grain",
+    "time_granularity",
+    "window_order_by",
+    "window_frame",
+}
+_METRIC_DATUS_HINT_KEYS = {
+    "metric_kind",
+    "metric_type",
+    "numerator",
+    "denominator",
+    "inputs",
+    "dataset",
+    "time_dimension",
+    "window",
+    "grain_to_date",
+    "offset_window",
+    "subject_path",
+    "format",
+    "unit",
+    "non_additive_dimension",
+    "metadata",
+} | _METRIC_METADATA_HINT_KEYS
 
 
 class OSISource(BaseModel):
@@ -243,6 +272,7 @@ def _datus_hints(obj: Dict[str, Any]) -> Dict[str, Any]:
             continue
         raw = ext.get("data")
         if isinstance(raw, dict):
+            _reject_filter_hints(raw)
             hints.update(raw)
         elif isinstance(raw, str) and raw.strip():
             try:
@@ -255,8 +285,66 @@ def _datus_hints(obj: Dict[str, Any]) -> Dict[str, Any]:
                 raise OSIValidationError(
                     "DATUS custom extension data must decode to a JSON object."
                 )
+            _reject_filter_hints(parsed)
             hints.update(parsed)
     return hints
+
+
+def _reject_filter_hints(value: Any, path: str = "DATUS custom extension") -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            next_path = f"{path}.{key}"
+            if str(key).lower() in _DISALLOWED_DATUS_HINT_KEYS:
+                raise OSIValidationError(
+                    f"{next_path} is not an OSI authoring field. Encode fixed "
+                    "dataset scope in the dataset source/description/ai_context, "
+                    "and encode metric-specific conditional semantics inside the "
+                    "metric expression."
+                )
+            _reject_filter_hints(item, next_path)
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _reject_filter_hints(item, f"{path}[{index}]")
+
+
+def _validate_datus_hint_keys(
+    hints: Dict[str, Any],
+    allowed: set[str],
+    object_type: str,
+    object_name: Optional[str],
+) -> None:
+    unknown = sorted(str(key) for key in hints if key not in allowed)
+    if not unknown:
+        return
+    name = f" `{object_name}`" if object_name else ""
+    raise OSIValidationError(
+        f"{object_type}{name} declares unsupported DATUS custom extension key(s) "
+        f"{unknown}. Use only OSI core fields plus supported DATUS execution hints."
+    )
+
+
+def _metric_metadata_from_hints(
+    hints: Dict[str, Any], metric_name: Optional[str]
+) -> Dict[str, Any]:
+    metadata: Dict[str, Any] = {}
+    raw_metadata = hints.get("metadata")
+    if raw_metadata is not None:
+        if not isinstance(raw_metadata, dict):
+            name = f" `{metric_name}`" if metric_name else ""
+            raise OSIValidationError(
+                f"Metric{name} DATUS `metadata` hint must be a JSON object."
+            )
+        _validate_datus_hint_keys(
+            raw_metadata,
+            _METRIC_METADATA_HINT_KEYS,
+            "Metric metadata",
+            metric_name,
+        )
+        metadata.update(raw_metadata)
+    for key in _METRIC_METADATA_HINT_KEYS:
+        if key in hints:
+            metadata[key] = hints[key]
+    return metadata
 
 
 def _merge_datus_extensions(obj: Dict[str, Any]) -> Dict[str, Any]:
@@ -373,6 +461,9 @@ def _time_dimension_from_hint(value: Any) -> Optional[Dict[str, Any]]:
 
 def _core_dataset_to_profile(dataset: Dict[str, Any]) -> Dict[str, Any]:
     hints = _datus_hints(dataset)
+    _validate_datus_hint_keys(
+        hints, _DATASET_DATUS_HINT_KEYS, "Dataset", dataset.get("name")
+    )
     fields = [field for field in dataset.get("fields") or [] if isinstance(field, dict)]
     profile: Dict[str, Any] = {
         "name": dataset["name"],
@@ -396,6 +487,9 @@ def _core_dataset_to_profile(dataset: Dict[str, Any]) -> Dict[str, Any]:
     for field in fields:
         field_hints = _datus_hints(field)
         name = field.get("name")
+        _validate_datus_hint_keys(
+            field_hints, _FIELD_DATUS_HINT_KEYS, "Field", str(name) if name else None
+        )
         if not name:
             continue
         is_time = bool((field.get("dimension") or {}).get("is_time"))
@@ -447,6 +541,9 @@ def _core_metric_to_profile(
     metric: Dict[str, Any], default_dataset: Optional[str]
 ) -> Dict[str, Any]:
     hints = _datus_hints(metric)
+    _validate_datus_hint_keys(
+        hints, _METRIC_DATUS_HINT_KEYS, "Metric", metric.get("name")
+    )
     profile = {
         "name": metric["name"],
         "description": metric.get("description") or "",
@@ -454,23 +551,6 @@ def _core_metric_to_profile(
     }
     if metric.get("ai_context") not in (None, "", [], {}):
         profile["ai_context"] = metric["ai_context"]
-    handled_hint_keys = {
-        "metric_kind",
-        "metric_type",
-        "numerator",
-        "denominator",
-        "inputs",
-        "dataset",
-        "time_dimension",
-        "window",
-        "grain_to_date",
-        "offset_window",
-        "subject_path",
-        "format",
-        "unit",
-        "non_additive_dimension",
-        "metadata",
-    }
     for key in (
         "metric_kind",
         "metric_type",
@@ -489,11 +569,7 @@ def _core_metric_to_profile(
     ):
         if key in hints:
             profile[key] = hints[key]
-    metadata = hints.get("metadata") if isinstance(hints.get("metadata"), dict) else {}
-    metadata = dict(metadata)
-    for key, value in hints.items():
-        if key not in handled_hint_keys:
-            metadata[key] = value
+    metadata = _metric_metadata_from_hints(hints, metric.get("name"))
     if metadata:
         profile["metadata"] = metadata
     kind = str(profile.get("metric_kind") or profile.get("metric_type") or "").lower()
@@ -504,6 +580,9 @@ def _core_metric_to_profile(
 
 def _core_relationship_to_profile(relationship: Dict[str, Any]) -> Dict[str, Any]:
     hints = _datus_hints(relationship)
+    _validate_datus_hint_keys(
+        hints, _RELATIONSHIP_DATUS_HINT_KEYS, "Relationship", relationship.get("name")
+    )
     profile = {
         "name": relationship["name"],
         "from": relationship["from"],

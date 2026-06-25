@@ -10,12 +10,13 @@ turns a list of issues into an :class:`OSIValidationError`.
 
 from __future__ import annotations
 
-from typing import List
+import json
+from typing import Any, Dict, List, Optional
 
 from datus_semantic_osi.errors import OSIValidationError
 from datus_semantic_osi.ir import MetricKind, SemanticModelIR
 from datus_semantic_osi.normalizer import normalization_errors
-from datus_semantic_osi.profile import OSIDocument
+from datus_semantic_osi.profile import OSIDocument, to_core_schema_document
 from datus_semantic_osi.window_semantics import (
     WINDOW_AGGREGATION_METADATA_KEYS,
     base_metric_for_window_metric,
@@ -213,6 +214,67 @@ def validate_capabilities(model: SemanticModelIR, capabilities: dict) -> List[st
                 f"used by metric `{metric.name}`. Supported: {sorted(supported_kinds)}."
             )
     return issues
+
+
+def validate_authoring_quality(doc: OSIDocument) -> List[str]:
+    """Validate LLM-facing authoring quality without adding non-OSI fields."""
+    issues: List[str] = []
+    for dataset in doc.datasets:
+        if not str(dataset.description or "").strip():
+            issues.append(f"Dataset `{dataset.name}` should include `description`.")
+        if dataset.ai_context in (None, "", [], {}):
+            issues.append(f"Dataset `{dataset.name}` should include `ai_context`.")
+    for metric in doc.metrics:
+        if not str(metric.description or "").strip():
+            issues.append(f"Metric `{metric.name}` should include `description`.")
+        if metric.ai_context in (None, "", [], {}):
+            issues.append(f"Metric `{metric.name}` should include `ai_context`.")
+    return issues
+
+
+def validate_mutation_guard(
+    doc: OSIDocument,
+    baseline_artifact: Optional[Dict[str, Any]],
+) -> List[str]:
+    """Ensure a metrics update did not mutate existing OSI semantic objects."""
+    if not baseline_artifact:
+        return ["mutation_guard requires a baseline_artifact object."]
+    try:
+        current = _core_model(to_core_schema_document(doc))
+        baseline = _core_model(baseline_artifact)
+    except Exception as exc:
+        return [f"mutation_guard baseline could not be compared: {exc}"]
+
+    issues: List[str] = []
+    for collection_name in ("datasets", "relationships", "metrics"):
+        current_items = _items_by_name(current.get(collection_name) or [])
+        baseline_items = _items_by_name(baseline.get(collection_name) or [])
+        for name, baseline_item in baseline_items.items():
+            if name not in current_items:
+                issues.append(f"Existing {collection_name[:-1]} `{name}` was removed.")
+                continue
+            if _fingerprint(current_items[name]) != _fingerprint(baseline_item):
+                issues.append(f"Existing {collection_name[:-1]} `{name}` was modified.")
+    return issues
+
+
+def _core_model(core_doc: Dict[str, Any]) -> Dict[str, Any]:
+    models = core_doc.get("semantic_model") or []
+    if len(models) != 1 or not isinstance(models[0], dict):
+        raise ValueError("expected exactly one OSI semantic_model object")
+    return models[0]
+
+
+def _items_by_name(items: List[Any]) -> Dict[str, Dict[str, Any]]:
+    result: Dict[str, Dict[str, Any]] = {}
+    for item in items:
+        if isinstance(item, dict) and item.get("name"):
+            result[str(item["name"])] = item
+    return result
+
+
+def _fingerprint(value: Dict[str, Any]) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
 
 
 def ensure_valid(issues: List[str]) -> None:
