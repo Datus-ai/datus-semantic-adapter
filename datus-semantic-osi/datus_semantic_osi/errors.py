@@ -6,7 +6,7 @@
 
 Errors raised during OSI -> IR compilation are *business-semantic*: they tell a
 metric author what business input is missing (numerator, window, time dimension,
-filter scope), never a backend syntax detail like ``type_params.measures``.
+fixed row scope), never a backend syntax detail like ``type_params.measures``.
 """
 
 from __future__ import annotations

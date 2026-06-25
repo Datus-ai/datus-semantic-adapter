@@ -236,6 +236,11 @@ class DatusOSIAdapter(BaseSemanticAdapter):
         if metric.measures:
             metadata["measure"] = metric.measures[0].name
 
+        reserved = sorted(set(metadata) & set(metric.metadata))
+        if reserved:
+            raise ValueError(
+                f"Metric `{metric.name}` metadata uses reserved key(s): {reserved}"
+            )
         metadata.update(metric.metadata)
         return {key: value for key, value in metadata.items() if value is not None}
 
@@ -456,6 +461,26 @@ class DatusOSIAdapter(BaseSemanticAdapter):
         return expression.sql(dialect="starrocks")
 
     @staticmethod
+    def _profile_sql_expression(value: str, *, label: str) -> str:
+        text = str(value or "").strip()
+        if _SAFE_IDENTIFIER_RE.fullmatch(text.strip("`")):
+            return DatusOSIAdapter._sql_identifier(text, label=label)
+        parsed = sqlglot.parse(text, read="starrocks")
+        if len(parsed) != 1:
+            raise ValueError(f"{label} must contain exactly one SQL expression")
+        expression = parsed[0]
+        if isinstance(expression, _DISALLOWED_WHERE_EXPRESSIONS):
+            raise ValueError(
+                f"{label} must be a SQL expression, not a query or command"
+            )
+        if any(
+            isinstance(node, _DISALLOWED_WHERE_EXPRESSIONS)
+            for node in expression.walk()
+        ):
+            raise ValueError(f"{label} must not contain nested queries or SQL commands")
+        return expression.sql(dialect="starrocks")
+
+    @staticmethod
     def _relationship_dimension_key(
         rel_dim: tuple[RelationshipIR, DatasetIR, FieldIR, str],
     ) -> tuple[str, ...]:
@@ -576,12 +601,18 @@ class DatusOSIAdapter(BaseSemanticAdapter):
         to_identifier = self._sql_identifier(
             relationship.to_identifier, label="relationship key"
         )
-        field_expr = self._sql_identifier(field.expr, label="dimension expression")
+        field_expr = self._profile_sql_expression(
+            field.expr, label="dimension expression"
+        )
         field_name = self._sql_identifier(field.name, label="dimension alias")
         fact_sql = (
             f"SELECT {from_identifier} AS __join_key, "
             f"{', '.join(select_metrics)} "
             f"FROM {fact_source} {where_sql} GROUP BY {from_identifier}"
+        )
+        dimension_sql = (
+            f"SELECT {to_identifier} AS __join_key, {field_expr} AS {field_name} "
+            f"FROM {dimension_source}"
         )
         metric_selects = []
         for metric in typed_metrics:
@@ -617,10 +648,10 @@ class DatusOSIAdapter(BaseSemanticAdapter):
             order_sql = f" ORDER BY {field_name}"
         limit_sql = f" LIMIT {int(limit)}" if limit is not None else ""
         return (
-            f"SELECT dim.{field_expr} AS {field_name}, {', '.join(metric_selects)} "
-            f"FROM {dimension_source} dim "
+            f"SELECT dim.{field_name} AS {field_name}, {', '.join(metric_selects)} "
+            f"FROM ({dimension_sql}) dim "
             f"LEFT JOIN ({fact_sql}) fact "
-            f"ON fact.__join_key = dim.{to_identifier}"
+            "ON fact.__join_key = dim.__join_key"
             f"{order_sql}{limit_sql}"
         )
 

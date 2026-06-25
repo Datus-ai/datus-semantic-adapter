@@ -40,6 +40,29 @@ from datus_semantic_osi.profile import (
     OSIMetricInput,
 )
 
+_RESERVED_METRIC_METADATA_KEYS = {
+    "name",
+    "kind",
+    "metric_kind",
+    "metric_type",
+    "description",
+    "dataset",
+    "datasets",
+    "measures",
+    "measure",
+    "inputs",
+    "expression",
+    "expr",
+    "numerator",
+    "denominator",
+    "time_dimension",
+    "window",
+    "grain_to_date",
+    "offset_window",
+    "format",
+    "unit",
+}
+
 # sqlglot aggregate node -> our Aggregation
 _AGG_NODES = {
     exp.Sum: Aggregation.SUM,
@@ -286,6 +309,17 @@ def _build_metric_inputs(metric: OSIMetric) -> list[MetricInputIR]:
     return []
 
 
+def _validate_metric_metadata(metric: OSIMetric) -> dict[str, object]:
+    reserved = sorted(set(metric.metadata) & _RESERVED_METRIC_METADATA_KEYS)
+    if reserved:
+        raise OSIValidationError(
+            f"metadata uses reserved metric key(s) {reserved}.",
+            metric=metric.name,
+            hint="Move structural metric semantics to OSI metric fields or DATUS execution hints.",
+        )
+    return dict(metric.metadata)
+
+
 def _compile_metric(metric: OSIMetric) -> MetricIR:
     kind = (metric.kind or "").lower()
 
@@ -341,7 +375,7 @@ def _compile_metric(metric: OSIMetric) -> MetricIR:
     metric_ir.offset_window = metric.offset_window
     metric_ir.format = metric.format
     metric_ir.unit = metric.unit
-    metric_ir.metadata.update(metric.metadata)
+    metric_ir.metadata.update(_validate_metric_metadata(metric))
     if metric.subject_path:
         metric_ir.metadata["subject_path"] = metric.subject_path
     # semi-additive: attach the non-additive dimension to the backing measure

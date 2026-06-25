@@ -345,6 +345,53 @@ metrics:
     assert result.metadata["join_policy"] == "dimension_preserving"
 
 
+async def test_query_metrics_dimension_preserving_accepts_dimension_expression(
+    tmp_path,
+):
+    (tmp_path / "model.yaml").write_text(
+        _core_yaml(
+            """
+semantic_model:
+  name: shop
+datasets:
+  - name: orders
+    source: {table: orders}
+    primary_key: order_id
+    time_dimension: {name: order_date, granularity: day}
+  - name: customers
+    source: {table: customers}
+    primary_key: customer_id
+    dimensions:
+      - name: signup_month
+        expr: "DATE_TRUNC('month', created_at)"
+relationships:
+  - {name: o2c, from: orders, to: customers, from_columns: [customer_id], to_columns: [customer_id]}
+metrics:
+  - name: order_count
+    expression: "COUNT(DISTINCT order_id)"
+    dataset: orders
+"""
+        )
+    )
+    adapter = DatusOSIAdapter(
+        DatusOSIConfig(semantic_models_path=str(tmp_path), datasource="duckdb")
+    )
+
+    result = await adapter.query_metrics(
+        ["order_count"],
+        dimensions=["customer_id__signup_month"],
+        join_policy="dimension_preserving",
+        zero_fill=True,
+        dry_run=True,
+    )
+
+    sql = result.metadata["sql"]
+    assert "DATE_TRUNC" in sql
+    assert "AS signup_month" in sql
+    assert "SELECT dim.signup_month AS signup_month" in sql
+    assert "LEFT JOIN" in sql
+
+
 async def test_query_metrics_match_only_drops_unmatched_joined_dimension(tmp_path):
     (tmp_path / "model.yaml").write_text(
         _core_yaml(

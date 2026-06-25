@@ -73,3 +73,23 @@ metrics:
 """
     with pytest.raises(OSIValidationError, match="must declare `dataset`"):
         compile_document(parse_osi(osi))
+
+
+def test_compile_document_rejects_reserved_metric_metadata_keys():
+    osi = """
+semantic_model:
+  name: order_model
+datasets:
+  - name: orders
+    source:
+      table: orders
+    primary_key: order_id
+metrics:
+  - name: order_count
+    expression: "COUNT(DISTINCT order_id)"
+    dataset: orders
+    metadata:
+      dataset: other_orders
+"""
+    with pytest.raises(OSIValidationError, match="reserved metric key"):
+        compile_document(parse_osi(osi))
