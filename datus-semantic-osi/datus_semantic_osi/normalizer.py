@@ -6,7 +6,7 @@
 
 The normalizer treats datasets as logical datasets. It only collapses duplicate
 physical-table aliases when they have no logical distinction: same source table,
-no source query, and no dataset-level filters.
+and no source query.
 """
 
 from __future__ import annotations
@@ -135,7 +135,7 @@ def _eligible_table_groups(doc: OSIDocument) -> Dict[str, List[int]]:
         table_key = _norm_table(ds.source.table)
         if not table_key:
             continue
-        if ds.source.query or ds.filters:
+        if ds.source.query:
             continue
         groups.setdefault(table_key, []).append(idx)
     return {table: indexes for table, indexes in groups.items() if len(indexes) > 1}
@@ -250,8 +250,8 @@ def _rewrite_metrics(doc: OSIDocument, aliases: Dict[str, str], actions: List[st
 def normalize_document(doc: OSIDocument) -> NormalizationResult:
     """Return a conservatively normalized copy of *doc*.
 
-    Only duplicate physical-table aliases with no filters or source query are
-    collapsed. Ambiguous duplicates are reported as errors and left unchanged.
+    Only duplicate physical-table aliases with no source query are collapsed.
+    Ambiguous duplicates are reported as errors and left unchanged.
     """
 
     normalized = doc.model_copy(deep=True)

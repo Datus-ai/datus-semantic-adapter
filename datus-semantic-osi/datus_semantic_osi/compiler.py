@@ -24,8 +24,6 @@ from datus_semantic_osi.ir import (
     Aggregation,
     DatasetIR,
     FieldIR,
-    FilterIR,
-    FilterScope,
     IdentifierIR,
     MeasureIR,
     MetricInputIR,
@@ -41,6 +39,29 @@ from datus_semantic_osi.profile import (
     OSIMetric,
     OSIMetricInput,
 )
+
+_RESERVED_METRIC_METADATA_KEYS = {
+    "name",
+    "kind",
+    "metric_kind",
+    "metric_type",
+    "description",
+    "dataset",
+    "datasets",
+    "measures",
+    "measure",
+    "inputs",
+    "expression",
+    "expr",
+    "numerator",
+    "denominator",
+    "time_dimension",
+    "window",
+    "grain_to_date",
+    "offset_window",
+    "format",
+    "unit",
+}
 
 # sqlglot aggregate node -> our Aggregation
 _AGG_NODES = {
@@ -253,18 +274,12 @@ def _compile_dataset(ds: OSIDataset) -> DatasetIR:
         for key in keys:
             identifiers.append(IdentifierIR(name=key, type="primary", expr=key))
 
-    filters = [
-        FilterIR(expression=f.expression, scope=FilterScope(f.scope))
-        for f in ds.filters
-    ]
-
     return DatasetIR(
         name=ds.name,
         sql_table=ds.source.table,
         sql_query=ds.source.query,
         fields=fields,
         identifiers=identifiers,
-        filters=filters,
         primary_time_dimension=primary_time,
     )
 
@@ -294,6 +309,17 @@ def _build_metric_inputs(metric: OSIMetric) -> list[MetricInputIR]:
     return []
 
 
+def _validate_metric_metadata(metric: OSIMetric) -> dict[str, object]:
+    reserved = sorted(set(metric.metadata) & _RESERVED_METRIC_METADATA_KEYS)
+    if reserved:
+        raise OSIValidationError(
+            f"metadata uses reserved metric key(s) {reserved}.",
+            metric=metric.name,
+            hint="Move structural metric semantics to OSI metric fields or DATUS execution hints.",
+        )
+    return dict(metric.metadata)
+
+
 def _compile_metric(metric: OSIMetric) -> MetricIR:
     kind = (metric.kind or "").lower()
 
@@ -316,7 +342,7 @@ def _compile_metric(metric: OSIMetric) -> MetricIR:
             raise OSIValidationError(
                 "uses a SQL window function in a derived expression.",
                 metric=metric.name,
-                hint="Express period-over-period (同比/环比) as a derived metric whose "
+                hint="Express period-over-period changes as a derived metric whose "
                 "input declares `offset_window` (e.g. '1 month'), not LAG/OVER.",
             )
         metric_ir = MetricIR(
@@ -349,12 +375,9 @@ def _compile_metric(metric: OSIMetric) -> MetricIR:
     metric_ir.offset_window = metric.offset_window
     metric_ir.format = metric.format
     metric_ir.unit = metric.unit
+    metric_ir.metadata.update(_validate_metric_metadata(metric))
     if metric.subject_path:
         metric_ir.metadata["subject_path"] = metric.subject_path
-    metric_ir.filters = [
-        FilterIR(expression=f.expression, scope=FilterScope(f.scope))
-        for f in metric.filters
-    ]
     # semi-additive: attach the non-additive dimension to the backing measure
     if metric.non_additive_dimension and metric_ir.measures:
         nad = metric.non_additive_dimension

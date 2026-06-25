@@ -629,7 +629,7 @@ metric:
   locked_metadata:
     tags:
       - revenue/reporting
-      - "subject_tree: ac_manage/campaign/activity"
+      - "subject_tree: commerce/revenue/orders"
   type_params:
     metrics:
       - name: revenue
@@ -646,7 +646,7 @@ metric:
         )
 
         assert MetricFlowAdapter._metric_path_metadata_from_yaml_file(str(metric_file)) == {
-            "revenue_mom": ["ac_manage", "campaign", "activity"]
+            "revenue_mom": ["commerce", "revenue", "orders"]
         }
 
     @pytest.mark.asyncio
@@ -677,13 +677,13 @@ metric:
         with patch.object(
             adapter,
             "_metric_path_metadata_by_name",
-            return_value={"revenue_mom": ["ac_manage", "campaign", "activity"]},
+            return_value={"revenue_mom": ["commerce", "revenue", "orders"]},
         ):
-            metrics = await adapter.list_metrics(path=["ac_manage", "campaign", "activity"])
+            metrics = await adapter.list_metrics(path=["commerce", "revenue", "orders"])
 
         assert len(metrics) == 1
         assert metrics[0].name == "revenue_mom"
-        assert metrics[0].path == ["ac_manage", "campaign", "activity"]
+        assert metrics[0].path == ["commerce", "revenue", "orders"]
 
     def test_metricflow_metadata_value_preserves_nested_containers(self):
         value = {

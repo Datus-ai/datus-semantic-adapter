@@ -9,7 +9,6 @@ from datus_semantic_osi.ir import (
     Aggregation,
     DatasetIR,
     FieldIR,
-    FilterIR,
     IdentifierIR,
     MeasureIR,
     MetricIR,
@@ -20,17 +19,17 @@ from datus_semantic_osi.ir import (
 
 def test_aggregate_metric_carries_backing_measure():
     metric = MetricIR(
-        name="activity_count",
+        name="order_count",
         kind=MetricKind.AGGREGATE,
         measures=[
             MeasureIR(
-                name="activity_count", agg=Aggregation.COUNT_DISTINCT, expr="ac_code"
+                name="order_count", agg=Aggregation.COUNT_DISTINCT, expr="order_id"
             )
         ],
     )
     assert metric.kind is MetricKind.AGGREGATE
     assert metric.measures[0].agg is Aggregation.COUNT_DISTINCT
-    assert metric.measures[0].expr == "ac_code"
+    assert metric.measures[0].expr == "order_id"
 
 
 def test_ratio_metric_records_numerator_and_denominator():
@@ -44,17 +43,16 @@ def test_ratio_metric_records_numerator_and_denominator():
     assert metric.denominator == "order_count"
 
 
-def test_dataset_holds_fields_identifiers_and_filters():
+def test_dataset_holds_fields_and_identifiers():
     ds = DatasetIR(
-        name="paid_orders",
+        name="orders",
         sql_table="db.orders",
         fields=[FieldIR(name="amount", expr="amount", type="numeric")],
         identifiers=[IdentifierIR(name="order", type="primary", expr="order_id")],
-        filters=[FilterIR(expression="status = 'paid'", scope="dataset")],
     )
     assert ds.sql_table == "db.orders"
     assert ds.identifiers[0].type == "primary"
-    assert ds.filters[0].scope == "dataset"
+    assert ds.fields[0].name == "amount"
 
 
 def test_semantic_model_aggregates_datasets_and_metrics():

@@ -1,7 +1,7 @@
 # Copyright 2025-present DatusAI, Inc.
 # Licensed under the Apache License, Version 2.0.
 
-"""Advanced modeling: multi-hop join, semi-additive measures, metric constraint.
+"""Advanced modeling: multi-hop join and semi-additive measures.
 
 All validated against real MetricFlow (parse + semantic) and DuckDB explain.
 """
@@ -75,23 +75,6 @@ metrics:
     non_additive_dimension: {name: ds, window_choice: max}
 """
 
-METRIC_CONSTRAINT = """
-semantic_model: {name: shop}
-datasets:
-  - name: orders
-    source: {table: orders}
-    primary_key: order_id
-    time_dimension: {name: order_date, granularity: day}
-    dimensions: [{name: is_vip, expr: is_vip}]
-metrics:
-  - name: vip_order_count
-    description: "orders from VIP customers only"
-    expression: "COUNT(DISTINCT order_id)"
-    dataset: orders
-    filters: [{expression: "is_vip", scope: metric}]
-"""
-
-
 def test_multi_hop_join_resolves_two_joins():
     _model, build, parse_errors, sem_errors = _build_and_validate(MULTI_HOP)
     assert parse_errors == [], parse_errors
@@ -108,13 +91,3 @@ def test_semi_additive_measure_lowers_and_validates():
     measure = art.data_source_docs[0]["data_source"]["measures"][0]
     assert measure["non_additive_dimension"]["name"] == "ds"
     assert measure["non_additive_dimension"]["window_choice"] == "max"
-
-
-def test_metric_constraint_lowers_and_appears_in_sql():
-    model, build, parse_errors, sem_errors = _build_and_validate(METRIC_CONSTRAINT)
-    assert parse_errors == [], parse_errors
-    assert sem_errors == [], sem_errors
-    metric = lower_to_metricflow(model).metric_docs[0]["metric"]
-    assert "is_vip" in metric["constraint"]
-    sql = _explain(build, ["vip_order_count"])
-    assert "is_vip" in sql.lower()

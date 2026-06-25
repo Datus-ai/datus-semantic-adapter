@@ -13,27 +13,24 @@ from datus_semantic_osi.profile import parse_osi_profile as parse_osi
 
 OSI_YAML = """
 semantic_model:
-  name: baisheng_activities
+  name: order_model
 datasets:
-  - name: new_product_activities
+  - name: completed_orders
     source:
-      table: v_udata_ac_info
-    filters:
-      - expression: "FIND_IN_SET('1', ac_tags)"
-        scope: dataset
-    primary_key: ac_code
+      query: "SELECT * FROM orders WHERE status = 'completed'"
+    primary_key: order_id
     time_dimension:
-      name: start_date
+      name: order_date
       granularity: day
     dimensions:
-      - name: ac_tags
-        expr: ac_tags
+      - name: status
+        expr: status
 metrics:
-  - name: new_product_activity_count
-    description: "5月包含新产品的活动数量"
-    expression: "COUNT(DISTINCT ac_code)"
-    dataset: new_product_activities
-    time_dimension: start_date
+  - name: completed_order_count
+    description: "Completed order count"
+    expression: "COUNT(DISTINCT order_id)"
+    dataset: completed_orders
+    time_dimension: order_date
 """
 
 
@@ -41,30 +38,28 @@ def _lower():
     return lower_to_metricflow(compile_document(parse_osi(OSI_YAML)))
 
 
-def test_dataset_filter_becomes_sql_query_with_where():
+def test_query_backed_dataset_keeps_authored_where_clause():
     art = _lower()
     ds = art.data_source_docs[0]["data_source"]
-    assert ds["name"] == "new_product_activities"
+    assert ds["name"] == "completed_orders"
     assert "sql_query" in ds
-    assert "v_udata_ac_info" in ds["sql_query"]
-    assert "FIND_IN_SET('1', ac_tags)" in ds["sql_query"]
+    assert "orders" in ds["sql_query"]
+    assert "status = 'completed'" in ds["sql_query"]
     assert ds["owners"]
 
 
-def test_query_backed_dataset_filter_wraps_authored_query():
+def test_query_backed_dataset_keeps_authored_query():
     osi = """
 semantic_model:
-  name: filtered_query_model
+  name: query_model
 datasets:
   - name: regional_orders
     source:
       query: |
         SELECT region, SUM(amount) AS amount
         FROM orders
+        WHERE region = 'east'
         GROUP BY region
-    filters:
-      - expression: "region = 'east'"
-        scope: dataset
     dimensions:
       - name: region
         expr: region
@@ -75,8 +70,8 @@ metrics:
 """
     art = lower_to_metricflow(compile_document(parse_osi(osi)))
     sql_query = art.data_source_docs[0]["data_source"]["sql_query"]
-    assert sql_query.startswith("SELECT * FROM (")
-    assert ") AS _filtered WHERE (region = 'east')" in sql_query
+    assert sql_query.startswith("SELECT region, SUM(amount) AS amount")
+    assert "WHERE region = 'east'" in sql_query
     assert "GROUP BY region" in sql_query
 
 
@@ -85,17 +80,17 @@ def test_data_source_has_primary_time_dimension_and_measure():
     time_dims = [d for d in ds["dimensions"] if d["type"] == "time"]
     assert time_dims and time_dims[0]["type_params"]["is_primary"] is True
     measures = {m["name"]: m for m in ds["measures"]}
-    name = "new_product_activities_ac_code_count_distinct"
+    name = "completed_orders_order_id_count_distinct"
     assert measures[name]["agg"] == "count_distinct"
-    assert measures[name]["expr"] == "ac_code"
+    assert measures[name]["expr"] == "order_id"
 
 
 def test_aggregate_metric_lowers_to_measure_proxy():
     metric = _lower().metric_docs[0]["metric"]
-    assert metric["name"] == "new_product_activity_count"
+    assert metric["name"] == "completed_order_count"
     assert metric["type"] == "measure_proxy"
     assert metric["type_params"]["measures"] == [
-        "new_product_activities_ac_code_count_distinct"
+        "completed_orders_order_id_count_distinct"
     ]
 
 

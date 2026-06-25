@@ -117,6 +117,96 @@ semantic_model:
     assert model.relationships[0].from_identifier == "customer_id"
 
 
+def test_parse_osi_preserves_dataset_ai_context():
+    doc = parse_osi(
+        """
+version: 0.2.0.dev0
+semantic_model:
+  - name: shop
+    datasets:
+      - name: orders
+        source: orders
+        description: "Orders dataset"
+        ai_context:
+          instructions: "Use this dataset for order-level analytics."
+          synonyms: ["purchases"]
+        primary_key: [order_id]
+"""
+    )
+
+    assert doc.datasets[0].description == "Orders dataset"
+    assert doc.datasets[0].ai_context == {
+        "instructions": "Use this dataset for order-level analytics.",
+        "synonyms": ["purchases"],
+    }
+    core = to_core_schema_document(doc)
+    dataset = core["semantic_model"][0]["datasets"][0]
+    assert (
+        dataset["ai_context"]["instructions"]
+        == "Use this dataset for order-level analytics."
+    )
+
+
+def test_parse_osi_preserves_metric_ai_context():
+    doc = parse_osi(
+        """
+version: 0.2.0.dev0
+semantic_model:
+  - name: shop
+    datasets:
+      - name: orders
+        source: orders
+        primary_key: [order_id]
+    metrics:
+      - name: order_count
+        description: "Number of orders"
+        ai_context:
+          instructions: "Use for order volume questions."
+          synonyms: ["orders"]
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: "COUNT(DISTINCT order_id)"
+        custom_extensions:
+          - vendor_name: DATUS
+            data: '{"dataset":"orders"}'
+"""
+    )
+
+    assert doc.metrics[0].ai_context == {
+        "instructions": "Use for order volume questions.",
+        "synonyms": ["orders"],
+    }
+    core = to_core_schema_document(doc)
+    metric = core["semantic_model"][0]["metrics"][0]
+    assert metric["ai_context"]["instructions"] == "Use for order volume questions."
+
+
+def test_parse_osi_rejects_datus_filter_hint():
+    with pytest.raises(Exception, match="not an OSI authoring field"):
+        parse_osi(
+            """
+version: 0.2.0.dev0
+semantic_model:
+  - name: shop
+    datasets:
+      - name: orders
+        source: orders
+        primary_key: [order_id]
+    metrics:
+      - name: paid_order_count
+        description: "Paid order count"
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: "COUNT(DISTINCT order_id)"
+        custom_extensions:
+          - vendor_name: DATUS
+            data: '{"dataset":"orders","filters":[{"expression":"status = ''paid''"}]}'
+"""
+        )
+
+
 def test_primary_time_dimension_preserves_expression():
     doc = parse_osi(
         """

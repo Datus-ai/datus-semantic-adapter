@@ -21,11 +21,40 @@ import yaml
 from pydantic import BaseModel, Field, model_validator
 
 from datus_semantic_osi.errors import OSIValidationError
+from datus_semantic_osi.window_semantics import WINDOW_AGGREGATION_METADATA_KEYS
 
 DATUS_VENDOR = "DATUS"
 CORE_SCHEMA_VERSION = "0.2.0.dev0"
 CORE_SCHEMA_RESOURCE = "osi-core-0.2.0.dev0.schema.json"
 DEFAULT_DIALECT = "ANSI_SQL"
+_DISALLOWED_DATUS_HINT_KEYS = {"filter", "filters"}
+_DATASET_DATUS_HINT_KEYS = {"source", "source_type", "time_dimension"}
+_FIELD_DATUS_HINT_KEYS = {"type", "time_granularity", "granularity"}
+_RELATIONSHIP_DATUS_HINT_KEYS = {"type"}
+_METRIC_METADATA_HINT_KEYS = set(WINDOW_AGGREGATION_METADATA_KEYS) | {
+    "base_metric_name",
+    "time_grain",
+    "time_granularity",
+    "window_order_by",
+    "window_frame",
+}
+_METRIC_DATUS_HINT_KEYS = {
+    "metric_kind",
+    "metric_type",
+    "numerator",
+    "denominator",
+    "inputs",
+    "dataset",
+    "time_dimension",
+    "window",
+    "grain_to_date",
+    "offset_window",
+    "subject_path",
+    "format",
+    "unit",
+    "non_additive_dimension",
+    "metadata",
+} | _METRIC_METADATA_HINT_KEYS
 
 
 class OSISource(BaseModel):
@@ -41,24 +70,21 @@ class OSIDimension(BaseModel):
     type: str = "categorical"  # categorical | time | numeric
     granularity: Optional[str] = None
     description: Optional[str] = None
+    ai_context: Optional[Union[str, Dict[str, Any]]] = None
 
 
 class OSITimeDimension(BaseModel):
     name: str
     expr: Optional[str] = None
     granularity: str = "day"
-
-
-class OSIFilter(BaseModel):
-    expression: str
-    scope: str = "dataset"  # dataset | measure | metric
+    ai_context: Optional[Union[str, Dict[str, Any]]] = None
 
 
 class OSIDataset(BaseModel):
     name: str
     source: OSISource
     description: Optional[str] = None
-    filters: List[OSIFilter] = Field(default_factory=list)
+    ai_context: Optional[Union[str, Dict[str, Any]]] = None
     primary_key: Optional[Union[str, List[str]]] = None
     time_dimension: Optional[OSITimeDimension] = None
     dimensions: List[OSIDimension] = Field(default_factory=list)
@@ -92,6 +118,7 @@ class OSINonAdditiveDimension(BaseModel):
 class OSIMetric(BaseModel):
     name: str
     description: str = ""
+    ai_context: Optional[Union[str, Dict[str, Any]]] = None
     expression: Optional[str] = None
     metric_kind: Optional[str] = None
     metric_type: Optional[str] = None  # compatibility alias for metric_kind
@@ -100,7 +127,6 @@ class OSIMetric(BaseModel):
     inputs: List[Union[str, OSIMetricInput]] = Field(default_factory=list)
     dataset: Optional[str] = None
     time_dimension: Optional[str] = None
-    filters: List[OSIFilter] = Field(default_factory=list)
     window: Optional[str] = None
     grain_to_date: Optional[str] = None
     offset_window: Optional[str] = None
@@ -108,6 +134,7 @@ class OSIMetric(BaseModel):
     format: Optional[str] = None
     unit: Optional[str] = None
     non_additive_dimension: Optional[OSINonAdditiveDimension] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
     @property
     def kind(self) -> Optional[str]:
@@ -130,6 +157,7 @@ class OSIRelationship(BaseModel):
     from_identifier: str
     to_dataset: str
     to_identifier: str
+    ai_context: Optional[Union[str, Dict[str, Any]]] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -140,9 +168,7 @@ class OSIRelationship(BaseModel):
         rel_name = normalized.get("name")
 
         forbidden = [
-            key
-            for key in ("join_on", "from_column", "to_column")
-            if key in normalized
+            key for key in ("join_on", "from_column", "to_column") if key in normalized
         ]
         if forbidden:
             name = f" `{rel_name}`" if rel_name else ""
@@ -246,6 +272,7 @@ def _datus_hints(obj: Dict[str, Any]) -> Dict[str, Any]:
             continue
         raw = ext.get("data")
         if isinstance(raw, dict):
+            _reject_filter_hints(raw)
             hints.update(raw)
         elif isinstance(raw, str) and raw.strip():
             try:
@@ -258,8 +285,66 @@ def _datus_hints(obj: Dict[str, Any]) -> Dict[str, Any]:
                 raise OSIValidationError(
                     "DATUS custom extension data must decode to a JSON object."
                 )
+            _reject_filter_hints(parsed)
             hints.update(parsed)
     return hints
+
+
+def _reject_filter_hints(value: Any, path: str = "DATUS custom extension") -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            next_path = f"{path}.{key}"
+            if str(key).lower() in _DISALLOWED_DATUS_HINT_KEYS:
+                raise OSIValidationError(
+                    f"{next_path} is not an OSI authoring field. Encode fixed "
+                    "dataset scope in the dataset source/description/ai_context, "
+                    "and encode metric-specific conditional semantics inside the "
+                    "metric expression."
+                )
+            _reject_filter_hints(item, next_path)
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _reject_filter_hints(item, f"{path}[{index}]")
+
+
+def _validate_datus_hint_keys(
+    hints: Dict[str, Any],
+    allowed: set[str],
+    object_type: str,
+    object_name: Optional[str],
+) -> None:
+    unknown = sorted(str(key) for key in hints if key not in allowed)
+    if not unknown:
+        return
+    name = f" `{object_name}`" if object_name else ""
+    raise OSIValidationError(
+        f"{object_type}{name} declares unsupported DATUS custom extension key(s) "
+        f"{unknown}. Use only OSI core fields plus supported DATUS execution hints."
+    )
+
+
+def _metric_metadata_from_hints(
+    hints: Dict[str, Any], metric_name: Optional[str]
+) -> Dict[str, Any]:
+    metadata: Dict[str, Any] = {}
+    raw_metadata = hints.get("metadata")
+    if raw_metadata is not None:
+        if not isinstance(raw_metadata, dict):
+            name = f" `{metric_name}`" if metric_name else ""
+            raise OSIValidationError(
+                f"Metric{name} DATUS `metadata` hint must be a JSON object."
+            )
+        _validate_datus_hint_keys(
+            raw_metadata,
+            _METRIC_METADATA_HINT_KEYS,
+            "Metric metadata",
+            metric_name,
+        )
+        metadata.update(raw_metadata)
+    for key in _METRIC_METADATA_HINT_KEYS:
+        if key in hints:
+            metadata[key] = hints[key]
+    return metadata
 
 
 def _merge_datus_extensions(obj: Dict[str, Any]) -> Dict[str, Any]:
@@ -273,6 +358,19 @@ def _merge_datus_extensions(obj: Dict[str, Any]) -> Dict[str, Any]:
     merged = {k: v for k, v in obj.items() if k != "custom_extensions"}
     for key, value in hints.items():
         merged.setdefault(key, value)
+    if "name" in merged and (
+        "expression" in merged or "metric_kind" in merged or "metric_type" in merged
+    ):
+        metric_fields = set(OSIMetric.model_fields)
+        metadata = dict(merged.get("metadata") or {})
+        for key in list(merged):
+            if key in metric_fields:
+                continue
+            if key in {"name", "description", "expression"}:
+                continue
+            metadata[key] = merged.pop(key)
+        if metadata:
+            merged["metadata"] = metadata
     return merged
 
 
@@ -345,21 +443,15 @@ def _source_from_core(dataset: Dict[str, Any], hints: Dict[str, Any]) -> Dict[st
     return {"table": source}
 
 
-def _filter_list(value: Any) -> List[Dict[str, Any]]:
-    if isinstance(value, dict):
-        return [value]
-    if isinstance(value, list):
-        return [item for item in value if isinstance(item, dict)]
-    return []
-
-
 def _time_dimension_from_hint(value: Any) -> Optional[Dict[str, Any]]:
     if isinstance(value, str) and value:
         return {"name": value, "granularity": "day"}
     if isinstance(value, dict) and value.get("name"):
         result = {
             "name": value["name"],
-            "granularity": value.get("granularity") or value.get("time_granularity") or "day",
+            "granularity": value.get("granularity")
+            or value.get("time_granularity")
+            or "day",
         }
         if value.get("expr"):
             result["expr"] = value["expr"]
@@ -369,6 +461,9 @@ def _time_dimension_from_hint(value: Any) -> Optional[Dict[str, Any]]:
 
 def _core_dataset_to_profile(dataset: Dict[str, Any]) -> Dict[str, Any]:
     hints = _datus_hints(dataset)
+    _validate_datus_hint_keys(
+        hints, _DATASET_DATUS_HINT_KEYS, "Dataset", dataset.get("name")
+    )
     fields = [field for field in dataset.get("fields") or [] if isinstance(field, dict)]
     profile: Dict[str, Any] = {
         "name": dataset["name"],
@@ -376,12 +471,11 @@ def _core_dataset_to_profile(dataset: Dict[str, Any]) -> Dict[str, Any]:
     }
     if dataset.get("description"):
         profile["description"] = dataset["description"]
+    if dataset.get("ai_context"):
+        profile["ai_context"] = dataset["ai_context"]
     if dataset.get("primary_key"):
         keys = list(dataset["primary_key"])
         profile["primary_key"] = keys[0] if len(keys) == 1 else keys
-    filters = _filter_list(hints.get("filters")) or _filter_list(hints.get("filter"))
-    if filters:
-        profile["filters"] = filters
 
     explicit_time_dimension = _time_dimension_from_hint(hints.get("time_dimension"))
     primary_time_field = None
@@ -393,11 +487,16 @@ def _core_dataset_to_profile(dataset: Dict[str, Any]) -> Dict[str, Any]:
     for field in fields:
         field_hints = _datus_hints(field)
         name = field.get("name")
+        _validate_datus_hint_keys(
+            field_hints, _FIELD_DATUS_HINT_KEYS, "Field", str(name) if name else None
+        )
         if not name:
             continue
         is_time = bool((field.get("dimension") or {}).get("is_time"))
         expr = _first_core_expression(field) or str(name)
-        granularity = field_hints.get("time_granularity") or field_hints.get("granularity")
+        granularity = field_hints.get("time_granularity") or field_hints.get(
+            "granularity"
+        )
 
         if is_time and primary_time_field is None:
             primary_time_field = str(name)
@@ -406,6 +505,8 @@ def _core_dataset_to_profile(dataset: Dict[str, Any]) -> Dict[str, Any]:
                 "expr": expr,
                 "granularity": granularity or "day",
             }
+            if field.get("ai_context"):
+                profile["time_dimension"]["ai_context"] = field["ai_context"]
             continue
         if str(name) == primary_time_field:
             time_dimension = profile.get("time_dimension")
@@ -413,6 +514,8 @@ def _core_dataset_to_profile(dataset: Dict[str, Any]) -> Dict[str, Any]:
                 time_dimension.setdefault("expr", expr)
                 if granularity:
                     time_dimension.setdefault("granularity", granularity)
+                if field.get("ai_context"):
+                    time_dimension.setdefault("ai_context", field["ai_context"])
             continue
 
         dim_type = field_hints.get("type") or ("time" if is_time else "categorical")
@@ -423,6 +526,8 @@ def _core_dataset_to_profile(dataset: Dict[str, Any]) -> Dict[str, Any]:
         }
         if field.get("description"):
             dim["description"] = field["description"]
+        if field.get("ai_context"):
+            dim["ai_context"] = field["ai_context"]
         if granularity:
             dim["granularity"] = granularity
         dimensions.append(dim)
@@ -436,11 +541,16 @@ def _core_metric_to_profile(
     metric: Dict[str, Any], default_dataset: Optional[str]
 ) -> Dict[str, Any]:
     hints = _datus_hints(metric)
+    _validate_datus_hint_keys(
+        hints, _METRIC_DATUS_HINT_KEYS, "Metric", metric.get("name")
+    )
     profile = {
         "name": metric["name"],
         "description": metric.get("description") or "",
         "expression": _first_core_expression(metric),
     }
+    if metric.get("ai_context") not in (None, "", [], {}):
+        profile["ai_context"] = metric["ai_context"]
     for key in (
         "metric_kind",
         "metric_type",
@@ -449,7 +559,6 @@ def _core_metric_to_profile(
         "inputs",
         "dataset",
         "time_dimension",
-        "filters",
         "window",
         "grain_to_date",
         "offset_window",
@@ -460,8 +569,9 @@ def _core_metric_to_profile(
     ):
         if key in hints:
             profile[key] = hints[key]
-    if "filter" in hints and "filters" not in profile:
-        profile["filters"] = _filter_list(hints["filter"])
+    metadata = _metric_metadata_from_hints(hints, metric.get("name"))
+    if metadata:
+        profile["metadata"] = metadata
     kind = str(profile.get("metric_kind") or profile.get("metric_type") or "").lower()
     if not profile.get("dataset") and default_dataset and kind != "derived":
         profile["dataset"] = default_dataset
@@ -470,6 +580,9 @@ def _core_metric_to_profile(
 
 def _core_relationship_to_profile(relationship: Dict[str, Any]) -> Dict[str, Any]:
     hints = _datus_hints(relationship)
+    _validate_datus_hint_keys(
+        hints, _RELATIONSHIP_DATUS_HINT_KEYS, "Relationship", relationship.get("name")
+    )
     profile = {
         "name": relationship["name"],
         "from": relationship["from"],
@@ -588,9 +701,7 @@ def _dedupe_exact(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     fingerprints = set()
     result: List[Dict[str, Any]] = []
     for item in items:
-        fingerprint = json.dumps(
-            item, sort_keys=True, ensure_ascii=False, default=str
-        )
+        fingerprint = json.dumps(item, sort_keys=True, ensure_ascii=False, default=str)
         if fingerprint in fingerprints:
             continue
         fingerprints.add(fingerprint)
@@ -726,8 +837,6 @@ def to_core_schema_document(doc: OSIDocument) -> Dict[str, Any]:
         dataset_hints: Dict[str, Any] = {}
         if dataset.source.query and not dataset.source.table:
             dataset_hints["source_type"] = "query"
-        if dataset.filters:
-            dataset_hints["filters"] = dataset.filters
         if dataset.time_dimension:
             dataset_hints["time_dimension"] = dataset.time_dimension
 
@@ -737,6 +846,8 @@ def to_core_schema_document(doc: OSIDocument) -> Dict[str, Any]:
         }
         if dataset.description:
             core_dataset["description"] = dataset.description
+        if dataset.ai_context:
+            core_dataset["ai_context"] = dataset.ai_context
         if dataset.primary_key:
             keys = (
                 [dataset.primary_key]
@@ -759,6 +870,11 @@ def to_core_schema_document(doc: OSIDocument) -> Dict[str, Any]:
                     ),
                     "dimension": {"is_time": True},
                     "custom_extensions": _datus_extension(time_hints),
+                    **(
+                        {"ai_context": dataset.time_dimension.ai_context}
+                        if dataset.time_dimension.ai_context
+                        else {}
+                    ),
                 }
             )
         for dim in dataset.dimensions:
@@ -769,6 +885,8 @@ def to_core_schema_document(doc: OSIDocument) -> Dict[str, Any]:
             }
             if dim.description:
                 field["description"] = dim.description
+            if dim.ai_context:
+                field["ai_context"] = dim.ai_context
             hints = {"type": dim.type, "time_granularity": dim.granularity}
             ext = _datus_extension(hints)
             if ext:
@@ -789,7 +907,11 @@ def to_core_schema_document(doc: OSIDocument) -> Dict[str, Any]:
             "from_columns": [rel.from_identifier],
             "to_columns": [rel.to_identifier],
         }
-        ext = _datus_extension({"type": rel.type if rel.type != "many_to_one" else None})
+        if rel.ai_context:
+            core_rel["ai_context"] = rel.ai_context
+        ext = _datus_extension(
+            {"type": rel.type if rel.type != "many_to_one" else None}
+        )
         if ext:
             core_rel["custom_extensions"] = ext
         model.setdefault("relationships", []).append(core_rel)
@@ -803,7 +925,6 @@ def to_core_schema_document(doc: OSIDocument) -> Dict[str, Any]:
             "inputs": metric.inputs,
             "dataset": metric.dataset,
             "time_dimension": metric.time_dimension,
-            "filters": metric.filters,
             "window": metric.window,
             "grain_to_date": metric.grain_to_date,
             "offset_window": metric.offset_window,
@@ -812,6 +933,8 @@ def to_core_schema_document(doc: OSIDocument) -> Dict[str, Any]:
             "unit": metric.unit,
             "non_additive_dimension": metric.non_additive_dimension,
         }
+        for key, value in metric.metadata.items():
+            metric_hints.setdefault(key, value)
         expression = metric.expression
         if not expression and metric.numerator and metric.denominator:
             expression = f"{metric.numerator} / {metric.denominator}"
@@ -826,6 +949,8 @@ def to_core_schema_document(doc: OSIDocument) -> Dict[str, Any]:
         }
         if metric.description:
             core_metric["description"] = metric.description
+        if metric.ai_context:
+            core_metric["ai_context"] = metric.ai_context
         ext = _datus_extension(metric_hints)
         if ext:
             core_metric["custom_extensions"] = ext

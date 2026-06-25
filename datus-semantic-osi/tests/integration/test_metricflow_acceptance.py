@@ -15,51 +15,48 @@ from datus_semantic_osi.profile import parse_osi_profile as parse_osi
 
 pytest.importorskip("metricflow")
 
-# A multi-metric model over the baisheng activity table, exercising
+# A multi-metric model over the orders table, exercising
 # aggregate / count-distinct / average / ratio metric kinds.
 OSI_YAML = """
 semantic_model:
-  name: baisheng_activities
+  name: order_model
 datasets:
-  - name: activities
+  - name: orders
     source:
-      table: v_udata_ac_info
-    primary_key: ac_code
+      table: orders
+    primary_key: order_id
     time_dimension:
-      name: start_date
+      name: order_date
       granularity: day
     dimensions:
-      - name: ac_tags
-        expr: ac_tags
-      - name: sr_value
-        expr: sr_value
-  - name: new_product_activities
+      - name: status
+        expr: status
+      - name: amount
+        expr: amount
+  - name: completed_orders
     source:
-      table: v_udata_ac_info
-    filters:
-      - expression: "FIND_IN_SET('1', ac_tags)"
-        scope: dataset
-    primary_key: ac_code
+      query: "SELECT * FROM orders WHERE status = 'completed'"
+    primary_key: order_id
     time_dimension:
-      name: start_date
+      name: order_date
       granularity: day
 metrics:
-  - name: activity_count
-    description: "活动数量"
-    expression: "COUNT(DISTINCT ac_code)"
-    dataset: activities
-  - name: new_product_activity_count
-    description: "包含新产品的活动数量"
-    expression: "COUNT(DISTINCT ac_code)"
-    dataset: new_product_activities
-  - name: avg_sr_value
-    description: "平均 SR"
-    expression: "AVG(sr_value)"
-    dataset: activities
-  - name: total_sr_value
-    description: "SR 合计"
-    expression: "SUM(sr_value)"
-    dataset: activities
+  - name: order_count
+    description: "Order count"
+    expression: "COUNT(DISTINCT order_id)"
+    dataset: orders
+  - name: completed_order_count
+    description: "Completed order count"
+    expression: "COUNT(DISTINCT order_id)"
+    dataset: completed_orders
+  - name: avg_order_amount
+    description: "Average order amount"
+    expression: "AVG(amount)"
+    dataset: orders
+  - name: total_order_amount
+    description: "Total order amount"
+    expression: "SUM(amount)"
+    dataset: orders
 """
 
 
@@ -87,10 +84,10 @@ def test_generated_yaml_passes_metricflow_validation(tmp_path):
     # all four metrics made it into the model
     metric_names = {m.name for m in build.model.metrics}
     assert {
-        "activity_count",
-        "new_product_activity_count",
-        "avg_sr_value",
-        "total_sr_value",
+        "order_count",
+        "completed_order_count",
+        "avg_order_amount",
+        "total_order_amount",
     } <= metric_names
 
 
@@ -110,19 +107,19 @@ def test_dry_run_renders_sql_for_each_metric(tmp_path):
         system_schema="main",
     )
     for metric in [
-        "activity_count",
-        "new_product_activity_count",
-        "avg_sr_value",
-        "total_sr_value",
+        "order_count",
+        "completed_order_count",
+        "avg_order_amount",
+        "total_order_amount",
     ]:
         sql = client.explain(
             metrics=[metric]
         ).rendered_sql_without_descriptions.sql_query
-        assert "v_udata_ac_info" in sql
+        assert "orders" in sql
         assert "SELECT" in sql.upper()
 
-    # the filtered dataset metric keeps its business filter in the rendered SQL
+    # the query-backed dataset keeps its authored WHERE clause in rendered SQL
     filtered_sql = client.explain(
-        metrics=["new_product_activity_count"]
+        metrics=["completed_order_count"]
     ).rendered_sql_without_descriptions.sql_query
-    assert "FIND_IN_SET" in filtered_sql
+    assert "status" in filtered_sql
