@@ -24,8 +24,6 @@ from datus_semantic_osi.ir import (
     Aggregation,
     DatasetIR,
     FieldIR,
-    FilterIR,
-    FilterScope,
     IdentifierIR,
     MeasureIR,
     MetricInputIR,
@@ -253,18 +251,12 @@ def _compile_dataset(ds: OSIDataset) -> DatasetIR:
         for key in keys:
             identifiers.append(IdentifierIR(name=key, type="primary", expr=key))
 
-    filters = [
-        FilterIR(expression=f.expression, scope=FilterScope(f.scope))
-        for f in ds.filters
-    ]
-
     return DatasetIR(
         name=ds.name,
         sql_table=ds.source.table,
         sql_query=ds.source.query,
         fields=fields,
         identifiers=identifiers,
-        filters=filters,
         primary_time_dimension=primary_time,
     )
 
@@ -352,10 +344,6 @@ def _compile_metric(metric: OSIMetric) -> MetricIR:
     metric_ir.metadata.update(metric.metadata)
     if metric.subject_path:
         metric_ir.metadata["subject_path"] = metric.subject_path
-    metric_ir.filters = [
-        FilterIR(expression=f.expression, scope=FilterScope(f.scope))
-        for f in metric.filters
-    ]
     # semi-additive: attach the non-additive dimension to the backing measure
     if metric.non_additive_dimension and metric_ir.measures:
         nad = metric.non_additive_dimension

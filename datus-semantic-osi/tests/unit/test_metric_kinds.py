@@ -111,12 +111,12 @@ datasets:
     primary_key: order_id
     time_dimension: {name: order_date, granularity: month}
 metrics:
-  - name: activity_count
+  - name: order_count
     expression: "COUNT(DISTINCT order_id)"
     dataset: monthly
-  - name: activity_count_mom
+  - name: order_count_mom
     metric_kind: derived
-    expression: "activity_count - LAG(activity_count) OVER (ORDER BY order_date)"
+    expression: "order_count - LAG(order_count) OVER (ORDER BY order_date)"
     dataset: monthly
 """
     with pytest.raises(OSIValidationError) as exc:

@@ -7,7 +7,7 @@ from datus_semantic_osi.compiler import compile_document
 from datus_semantic_osi.ir import MetricKind
 from datus_semantic_osi.profile import parse_osi_profile as parse_osi
 
-# OSI-core-flavored doc: business hints live in custom_extensions, not inline.
+# OSI-core-flavored doc: Datus execution hints live in custom_extensions, not inline.
 OSI_YAML = """
 semantic_model:
   name: shop
@@ -19,9 +19,6 @@ datasets:
     time_dimension:
       name: order_date
       granularity: day
-    custom_extensions:
-      - vendor_name: DATUS
-        data: '{"filters": [{"expression": "status = ''paid''", "scope": "dataset"}]}'
 metrics:
   - name: paid_rate
     description: "paid conversion"
@@ -33,13 +30,6 @@ metrics:
            "denominator": "order_count", "time_dimension": "order_date",
            "format": "0.00%", "window_aggregation": "avg"}
 """
-
-
-def test_custom_extensions_datus_hints_are_merged_into_dataset():
-    doc = parse_osi(OSI_YAML)
-    ds = doc.datasets[0]
-    assert ds.filters[0].expression == "status = 'paid'"
-    assert ds.filters[0].scope == "dataset"
 
 
 def test_custom_extensions_datus_hints_are_merged_into_metric():

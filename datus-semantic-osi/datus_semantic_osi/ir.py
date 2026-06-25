@@ -38,21 +38,6 @@ class Aggregation(str, Enum):
     MAX = "max"
 
 
-class FilterScope(str, Enum):
-    """Where a filter applies in the aggregation pipeline."""
-
-    DATASET = "dataset"
-    MEASURE = "measure"
-    METRIC = "metric"
-
-
-class FilterIR(BaseModel):
-    """A composable, backend-agnostic filter with an explicit scope."""
-
-    expression: str
-    scope: FilterScope = FilterScope.MEASURE
-
-
 class NonAdditiveDimensionIR(BaseModel):
     """Semi-additive semantics: a measure that does not sum over this dimension.
 
@@ -103,7 +88,6 @@ class DatasetIR(BaseModel):
     sql_query: Optional[str] = None
     fields: List[FieldIR] = Field(default_factory=list)
     identifiers: List[IdentifierIR] = Field(default_factory=list)
-    filters: List[FilterIR] = Field(default_factory=list)
     primary_time_dimension: Optional[str] = None
 
 
@@ -127,7 +111,6 @@ class MetricIR(BaseModel):
     expression: Optional[str] = None
     numerator: Optional[str] = None
     denominator: Optional[str] = None
-    filters: List[FilterIR] = Field(default_factory=list)
     time_dimension: Optional[str] = None
     window: Optional[str] = None
     grain_to_date: Optional[str] = None

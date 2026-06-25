@@ -51,17 +51,11 @@ class OSITimeDimension(BaseModel):
     ai_context: Optional[Union[str, Dict[str, Any]]] = None
 
 
-class OSIFilter(BaseModel):
-    expression: str
-    scope: str = "dataset"  # dataset | measure | metric
-
-
 class OSIDataset(BaseModel):
     name: str
     source: OSISource
     description: Optional[str] = None
     ai_context: Optional[Union[str, Dict[str, Any]]] = None
-    filters: List[OSIFilter] = Field(default_factory=list)
     primary_key: Optional[Union[str, List[str]]] = None
     time_dimension: Optional[OSITimeDimension] = None
     dimensions: List[OSIDimension] = Field(default_factory=list)
@@ -104,7 +98,6 @@ class OSIMetric(BaseModel):
     inputs: List[Union[str, OSIMetricInput]] = Field(default_factory=list)
     dataset: Optional[str] = None
     time_dimension: Optional[str] = None
-    filters: List[OSIFilter] = Field(default_factory=list)
     window: Optional[str] = None
     grain_to_date: Optional[str] = None
     offset_window: Optional[str] = None
@@ -362,14 +355,6 @@ def _source_from_core(dataset: Dict[str, Any], hints: Dict[str, Any]) -> Dict[st
     return {"table": source}
 
 
-def _filter_list(value: Any) -> List[Dict[str, Any]]:
-    if isinstance(value, dict):
-        return [value]
-    if isinstance(value, list):
-        return [item for item in value if isinstance(item, dict)]
-    return []
-
-
 def _time_dimension_from_hint(value: Any) -> Optional[Dict[str, Any]]:
     if isinstance(value, str) and value:
         return {"name": value, "granularity": "day"}
@@ -400,9 +385,6 @@ def _core_dataset_to_profile(dataset: Dict[str, Any]) -> Dict[str, Any]:
     if dataset.get("primary_key"):
         keys = list(dataset["primary_key"])
         profile["primary_key"] = keys[0] if len(keys) == 1 else keys
-    filters = _filter_list(hints.get("filters")) or _filter_list(hints.get("filter"))
-    if filters:
-        profile["filters"] = filters
 
     explicit_time_dimension = _time_dimension_from_hint(hints.get("time_dimension"))
     primary_time_field = None
@@ -480,7 +462,6 @@ def _core_metric_to_profile(
         "inputs",
         "dataset",
         "time_dimension",
-        "filters",
         "window",
         "grain_to_date",
         "offset_window",
@@ -488,7 +469,6 @@ def _core_metric_to_profile(
         "format",
         "unit",
         "non_additive_dimension",
-        "filter",
         "metadata",
     }
     for key in (
@@ -499,7 +479,6 @@ def _core_metric_to_profile(
         "inputs",
         "dataset",
         "time_dimension",
-        "filters",
         "window",
         "grain_to_date",
         "offset_window",
@@ -510,8 +489,6 @@ def _core_metric_to_profile(
     ):
         if key in hints:
             profile[key] = hints[key]
-    if "filter" in hints and "filters" not in profile:
-        profile["filters"] = _filter_list(hints["filter"])
     metadata = hints.get("metadata") if isinstance(hints.get("metadata"), dict) else {}
     metadata = dict(metadata)
     for key, value in hints.items():
@@ -781,8 +758,6 @@ def to_core_schema_document(doc: OSIDocument) -> Dict[str, Any]:
         dataset_hints: Dict[str, Any] = {}
         if dataset.source.query and not dataset.source.table:
             dataset_hints["source_type"] = "query"
-        if dataset.filters:
-            dataset_hints["filters"] = dataset.filters
         if dataset.time_dimension:
             dataset_hints["time_dimension"] = dataset.time_dimension
 
@@ -871,7 +846,6 @@ def to_core_schema_document(doc: OSIDocument) -> Dict[str, Any]:
             "inputs": metric.inputs,
             "dataset": metric.dataset,
             "time_dimension": metric.time_dimension,
-            "filters": metric.filters,
             "window": metric.window,
             "grain_to_date": metric.grain_to_date,
             "offset_window": metric.offset_window,

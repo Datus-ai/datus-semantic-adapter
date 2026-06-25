@@ -442,11 +442,6 @@ class DatusOSIAdapter(BaseSemanticAdapter):
         )
 
     @staticmethod
-    def _filter_expression(metric: MetricIR) -> Optional[str]:
-        filters = [item.expression for item in metric.filters if item.expression]
-        return " AND ".join(f"({item})" for item in filters) if filters else None
-
-    @staticmethod
     def _can_dimension_preserve_metric(metric: MetricIR) -> bool:
         return metric.kind is MetricKind.AGGREGATE and len(metric.measures) == 1
 
@@ -457,14 +452,6 @@ class DatusOSIAdapter(BaseSemanticAdapter):
             )
         measure = metric.measures[0]
         expr = measure.expr
-        filter_expr = self._filter_expression(metric)
-        if filter_expr:
-            if measure.agg is Aggregation.COUNT_DISTINCT:
-                expr = f"CASE WHEN {filter_expr} THEN {expr} END"
-            elif measure.agg is Aggregation.COUNT:
-                expr = f"CASE WHEN {filter_expr} THEN 1 END"
-            else:
-                expr = f"CASE WHEN {filter_expr} THEN {expr} END"
 
         if measure.agg is Aggregation.SUM:
             return f"SUM({expr})"

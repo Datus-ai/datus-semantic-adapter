@@ -8,10 +8,6 @@ Targets the dialect of the ``Datus-ai/metricflow`` fork: ``data_source:``
 documents (with identifiers / dimensions / measures) plus separate ``metric:``
 documents. The generated YAML is an artifact; users never edit it and the LLM
 never produces it.
-
-Dataset-scoped filters are rendered into the data source ``sql_query`` (the
-design doc's "filtered logical dataset" approach), which keeps business filters
-out of MetricFlow constraint syntax.
 """
 
 from __future__ import annotations
@@ -25,7 +21,6 @@ import yaml
 from datus_semantic_osi.errors import OSIValidationError
 from datus_semantic_osi.ir import (
     DatasetIR,
-    FilterScope,
     MeasureIR,
     MetricIR,
     MetricKind,
@@ -73,26 +68,7 @@ def _dump_multidoc(docs: List[dict]) -> str:
 
 
 def _dataset_sql(ds: DatasetIR) -> dict:
-    """Render a dataset's source, folding dataset-scoped filters into a sql_query."""
-    dataset_filters = [
-        f.expression for f in ds.filters if f.scope is FilterScope.DATASET
-    ]
-    if dataset_filters:
-        base_is_query = bool(ds.sql_query)
-        base = ds.sql_query or (
-            f"SELECT * FROM {ds.sql_table}" if ds.sql_table else None
-        )
-        if base is None:
-            raise OSIValidationError(
-                f"dataset `{ds.name}` has filters but no table or query source.",
-                hint="Declare a source table or query for the dataset.",
-            )
-        where = " AND ".join(f"({expr})" for expr in dataset_filters)
-        # Query-backed datasets may contain GROUP BY / ORDER BY / LIMIT, so
-        # dataset filters must be applied outside the authored query.
-        if base_is_query or " where " in base.lower():
-            return {"sql_query": f"SELECT * FROM ({base}) AS _filtered WHERE {where}"}
-        return {"sql_query": f"{base} WHERE {where}"}
+    """Render a dataset's authored table or query source."""
     if ds.sql_query:
         return {"sql_query": ds.sql_query}
     if ds.sql_table:
@@ -225,13 +201,6 @@ def _lower_metric(metric: MetricIR) -> dict:
             metric=metric.name,
         )
 
-    # metric-scoped filters lower to a MetricFlow metric constraint (a WHERE on
-    # dimensions applied to this metric). Combined with AND.
-    constraints = [
-        f.expression for f in metric.filters if f.scope is FilterScope.METRIC
-    ]
-    if constraints:
-        body["constraint"] = " AND ".join(f"({c})" for c in constraints)
     return {"metric": body}
 
 

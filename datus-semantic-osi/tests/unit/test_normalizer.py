@@ -10,58 +10,58 @@ from datus_semantic_osi.profile import load_osi_path, parse_osi_profile as parse
 from datus_semantic_osi.validator import validate_ir, validate_profile
 
 
-def test_normalizer_collapses_unfiltered_duplicate_table_alias():
+def test_normalizer_collapses_duplicate_table_alias():
     doc = parse_osi(
         """
-semantic_model: {name: activity_management}
+semantic_model: {name: order_model}
 datasets:
-  - name: ac_info
-    source: {table: v_udata_ac_info}
-    primary_key: ac_code
+  - name: order_alias
+    source: {table: orders}
+    primary_key: order_id
     dimensions:
-      - {name: start_date, type: time}
-      - {name: ac_name, type: string}
-  - name: v_udata_ac_info
-    source: {table: v_udata_ac_info}
-    primary_key: ac_code
-    time_dimension: {name: start_date, granularity: day}
+      - {name: order_date, type: time}
+      - {name: customer_id, type: string}
+  - name: orders
+    source: {table: orders}
+    primary_key: order_id
+    time_dimension: {name: order_date, granularity: day}
     dimensions:
-      - {name: ac_name, type: categorical}
-      - {name: sr_value, type: numeric}
-  - name: dim_product_type
-    source: {table: dim_product_type}
-    primary_key: product_type
+      - {name: customer_id, type: categorical}
+      - {name: amount, type: numeric}
+  - name: customers
+    source: {table: customers}
+    primary_key: customer_id
     dimensions:
-      - {name: type_name, type: categorical}
+      - {name: customer_name, type: categorical}
 relationships:
-  - {name: ac_to_dim, from: ac_info, to: dim_product_type, from_columns: [product_type], to_columns: [product_type]}
-  - {name: self_alias, from: ac_info, to: v_udata_ac_info, from_columns: [ac_code], to_columns: [ac_code]}
+  - {name: order_to_customer, from: order_alias, to: customers, from_columns: [customer_id], to_columns: [customer_id]}
+  - {name: self_alias, from: order_alias, to: orders, from_columns: [order_id], to_columns: [order_id]}
 metrics:
-  - name: max_sr
-    expression: "MAX(sr_value)"
-    dataset: ac_info
-    time_dimension: start_date
+  - name: max_order_amount
+    expression: "MAX(amount)"
+    dataset: order_alias
+    time_dimension: order_date
 """
     )
 
     result = normalize_document(doc)
 
     assert result.errors == []
-    assert result.dataset_aliases == {"ac_info": "v_udata_ac_info"}
+    assert result.dataset_aliases == {"order_alias": "orders"}
     assert [d.name for d in result.document.datasets] == [
-        "v_udata_ac_info",
-        "dim_product_type",
+        "orders",
+        "customers",
     ]
-    assert result.document.metrics[0].dataset == "v_udata_ac_info"
-    assert result.document.relationships[0].from_dataset == "v_udata_ac_info"
+    assert result.document.metrics[0].dataset == "orders"
+    assert result.document.relationships[0].from_dataset == "orders"
     assert all(r.name != "self_alias" for r in result.document.relationships)
 
     model = compile_document(result.document)
     assert validate_ir(model) == []
     artifact = lower_to_metricflow(model)
-    assert artifact.data_source_docs[0]["data_source"]["name"] == "v_udata_ac_info"
+    assert artifact.data_source_docs[0]["data_source"]["name"] == "orders"
     assert artifact.metric_docs[0]["metric"]["type_params"]["measures"] == [
-        "v_udata_ac_info_sr_value_max"
+        "orders_amount_max"
     ]
 
 
@@ -92,13 +92,12 @@ metrics:
     assert result.document.metrics[0].dataset == "orders"
 
 
-def test_normalizer_keeps_filtered_dataset_as_logical_dataset():
+def test_normalizer_keeps_query_dataset_alias_as_logical_dataset():
     doc = parse_osi(
         """
 datasets:
   - name: paid_orders
-    source: {table: orders}
-    filters: [{expression: "status = 'paid'", scope: dataset}]
+    source: {query: "SELECT * FROM orders WHERE status = 'paid'"}
     primary_key: order_id
   - name: orders
     source: {table: orders}

@@ -205,7 +205,7 @@ async def test_list_metrics_exposes_osi_structured_metadata(adapter):
     assert "order_channel" in mom.dimensions
 
 
-async def test_list_metrics_filters_subject_path(adapter):
+async def test_list_metrics_selects_subject_path(adapter):
     metrics = await adapter.list_metrics(path=["commerce"])
     assert {m.name for m in metrics} == {
         "order_count",
@@ -303,7 +303,7 @@ async def test_query_metrics_dry_run_renders_sql(adapter):
     assert "fact_orders" in sql
 
 
-async def test_query_metrics_match_only_filters_unmatched_joined_dimension(tmp_path):
+async def test_query_metrics_match_only_drops_unmatched_joined_dimension(tmp_path):
     (tmp_path / "model.yaml").write_text(
         _core_yaml(
             """
