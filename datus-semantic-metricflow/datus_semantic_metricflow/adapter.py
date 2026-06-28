@@ -141,8 +141,8 @@ class MetricFlowAdapter(BaseSemanticAdapter):
             "port": str(db_config.get("port", "")),
             "username": db_config.get("username", ""),
             "password": db_config.get("password", ""),
-            "database": db_config.get("database", ""),
-            "schema": db_config.get("schema", ""),
+            "database": db_config.get("database") or db_config.get("database_name", ""),
+            "schema": db_config.get("schema") or db_config.get("db_schema") or db_config.get("schema_name", ""),
             "uri": db_config.get("uri", ""),
             "warehouse": db_config.get("warehouse", ""),
             "account": db_config.get("account", ""),
@@ -152,6 +152,9 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         sslmode = db_config.get("sslmode")
         if sslmode and MetricFlowAdapter._build_config_supports_kwarg("sslmode"):
             kwargs["sslmode"] = sslmode
+        catalog = db_config.get("catalog") or db_config.get("catalog_name")
+        if catalog and MetricFlowAdapter._build_config_supports_kwarg("catalog"):
+            kwargs["catalog"] = str(catalog)
         unsupported_keys = []
         for optional_key in ("role", "private_key", "private_key_file", "private_key_file_pwd"):
             value = db_config.get(optional_key)
