@@ -245,6 +245,38 @@ class TestMetricFlowAdapter:
             "sslmode": "require",
         }
 
+    def test_build_metricflow_config_dict_legacy_forwards_runtime_context_aliases(self):
+        captured_kwargs = {}
+
+        def fake_build_config_dict_from_db_params(**kwargs):
+            captured_kwargs.update(kwargs)
+            return {"config": "ok"}
+
+        with (
+            patch(
+                "datus_semantic_metricflow.adapter.build_config_dict_from_db_params",
+                fake_build_config_dict_from_db_params,
+            ),
+            patch(
+                "datus_semantic_metricflow.adapter.build_config_dict_from_datus_datasource", None
+            ),
+        ):
+            result = MetricFlowAdapter._build_metricflow_config_dict(
+                {
+                    "type": "trino",
+                    "host": "trino-host",
+                    "database_name": "college_exam",
+                    "db_schema": "college_exam_schema",
+                    "catalog_name": "hive",
+                },
+                "/tmp/models",
+            )
+
+        assert result == {"config": "ok"}
+        assert captured_kwargs["database"] == "college_exam"
+        assert captured_kwargs["schema"] == "college_exam_schema"
+        assert captured_kwargs["catalog"] == "hive"
+
     def test_build_metricflow_config_dict_legacy_forwards_snowflake_key_pair_fields(self):
         captured_kwargs = {}
 

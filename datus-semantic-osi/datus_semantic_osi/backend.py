@@ -28,6 +28,16 @@ from datus_semantic_osi.metricflow_backend import (
 )
 
 
+def _db_config_value(db_config: Optional[dict], *keys: str) -> str:
+    if not db_config:
+        return ""
+    for key in keys:
+        value = db_config.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
 class SemanticExecutionBackend(ABC):
     """Contract every execution backend implements."""
 
@@ -107,8 +117,18 @@ class MetricFlowBackend(SemanticExecutionBackend):
         except ImportError as e:
             raise self._missing_metricflow_error() from e
 
+        datasource = self._datasource or _db_config_value(
+            self._db_config,
+            "database",
+            "database_name",
+            "schema",
+            "db_schema",
+            "schema_name",
+            "catalog",
+            "catalog_name",
+        )
         config = MetricFlowConfig(
-            datasource=self._datasource or self._db_config.get("database", ""),
+            datasource=datasource,
             db_config=self._db_config,
             semantic_models_path=str(directory),
             timeout=self._timeout,
