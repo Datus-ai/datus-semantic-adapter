@@ -1332,3 +1332,80 @@ async def test_query_metrics_time_grouping_is_idempotent(adapter):
 
     # caller's explicit metric_time grain is respected, not overridden or doubled
     assert _injected_dimensions(executor) == ["metric_time__day"]
+
+
+class InvalidQueryException(Exception):
+    """Stand-in matching MetricFlow's InvalidQueryException by class name."""
+
+
+class _RaisingExecutor:
+    def __init__(self, exc):
+        self._exc = exc
+        self.calls = []
+
+    async def query_metrics(self, metrics, **kwargs):
+        self.calls.append({"metrics": list(metrics), **kwargs})
+        raise self._exc
+
+
+async def test_query_metrics_maps_cumulative_rejection_to_structured(adapter):
+    from datus_semantic_osi.errors import SemanticValidationException
+
+    exc = InvalidQueryException(
+        "The query includes a cumulative metric 'running_order_count' that does not "
+        "accumulate over all-time, but the group-by items do not include 'metric_time'."
+    )
+    adapter._backend = _FakeBackend(_RaisingExecutor(exc))
+
+    with pytest.raises(SemanticValidationException) as excinfo:
+        await adapter.query_metrics(["order_count"])
+
+    payload = excinfo.value.payload
+    assert payload.error_type == "semantic_validation_error"
+    assert payload.code == "cumulative_requires_metric_time"
+    assert "metric_time" in payload.required_dimensions
+    assert payload.metrics == ["order_count"]
+
+
+async def test_query_metrics_maps_time_grain_required(adapter):
+    from datus_semantic_osi.errors import SemanticValidationException
+
+    exc = InvalidQueryException(
+        "For querying cumulative metric 'moving_3_month_avg', the granularity of "
+        "'metric_time__month' must be DAY"
+    )
+    adapter._backend = _FakeBackend(_RaisingExecutor(exc))
+
+    with pytest.raises(SemanticValidationException) as excinfo:
+        await adapter.query_metrics(["order_count"])
+
+    payload = excinfo.value.payload
+    assert payload.code == "time_grain_required"
+    assert payload.required_time_granularity == "day"
+    assert payload.required_dimensions == ["metric_time__day"]
+    assert payload.suggested_retry == {
+        "dimensions": ["metric_time__day"],
+        "time_granularity": "day",
+    }
+
+
+async def test_query_metrics_unknown_validation_error_stays_structured(adapter):
+    from datus_semantic_osi.errors import SemanticValidationException
+
+    exc = InvalidQueryException("some brand new validation rule not yet mapped")
+    adapter._backend = _FakeBackend(_RaisingExecutor(exc))
+
+    with pytest.raises(SemanticValidationException) as excinfo:
+        await adapter.query_metrics(["order_count"])
+
+    payload = excinfo.value.payload
+    assert payload.code == "validation_error"
+    assert "brand new validation rule" in payload.message
+
+
+async def test_query_metrics_infra_error_propagates_unwrapped(adapter):
+    adapter._backend = _FakeBackend(_RaisingExecutor(RuntimeError("connection lost")))
+
+    # non-validation failures must not be masked as validation errors
+    with pytest.raises(RuntimeError):
+        await adapter.query_metrics(["order_count"])

@@ -25,6 +25,7 @@ from datus_semantic_core.models import (
     DimensionInfo,
     MetricDefinition,
     QueryResult,
+    SemanticValidationError,
     ValidationIssue,
     ValidationResult,
 )
@@ -32,7 +33,11 @@ from datus_semantic_core.models import (
 from datus_semantic_osi.backend import make_backend
 from datus_semantic_osi.compiler import compile_document
 from datus_semantic_osi.config import DatusOSIConfig
-from datus_semantic_osi.errors import OSIError, OSIValidationError
+from datus_semantic_osi.errors import (
+    OSIError,
+    OSIValidationError,
+    SemanticValidationException,
+)
 from datus_semantic_osi.ir import (
     Aggregation,
     DatasetIR,
@@ -567,6 +572,63 @@ class DatusOSIAdapter(BaseSemanticAdapter):
             dims.append(metric_time_dimension_for_granularity(grain) or "metric_time")
             return dims, time_granularity or grain
         return dims, time_granularity
+
+    @staticmethod
+    def _is_query_validation_error(exc: BaseException) -> bool:
+        """True for backend query-validation rejections, not infra/SQL errors.
+
+        Detected by class name so the OSI layer stays decoupled from MetricFlow
+        (which the OSI compiler/IR layers do not import).
+        """
+        return any("InvalidQuery" in klass.__name__ for klass in type(exc).__mro__)
+
+    def _semantic_validation_error_from(
+        self, exc: BaseException, metrics: List[str]
+    ) -> Optional[SemanticValidationError]:
+        """Map a backend query rejection to a structured, backend-neutral payload.
+
+        Returns ``None`` when ``exc`` is not a validation rejection, so the
+        caller re-raises it unchanged instead of masking an infra/SQL failure.
+        Known rejections get a specific ``code``; anything else still surfaces
+        structured with ``code='validation_error'`` and the original message.
+        """
+        if not self._is_query_validation_error(exc):
+            return None
+        text = str(exc)
+        lowered = text.lower()
+        code = "validation_error"
+        required_dimensions: List[str] = []
+        required_grain: Optional[str] = None
+        # Check the specific "wrong grain" rejection before the "missing
+        # metric_time" ones: its message also mentions the cumulative metric and
+        # metric_time, so it must win to avoid being mis-coded.
+        if "granularity" in lowered and "must be" in lowered:
+            code = "time_grain_required"
+            required_grain = self._time_grain_from_text(lowered.split("must be", 1)[1])
+            if required_grain:
+                required_dimensions = [f"metric_time__{required_grain}"]
+        elif "metric_time" in lowered and ("offset" in lowered or "derived" in lowered):
+            code = "offset_requires_metric_time"
+            required_dimensions = ["metric_time"]
+        elif "metric_time" in lowered and (
+            "cumulative" in lowered or "accumulat" in lowered
+        ):
+            code = "cumulative_requires_metric_time"
+            required_dimensions = ["metric_time"]
+        suggested = None
+        if required_dimensions or required_grain:
+            suggested = {
+                "dimensions": required_dimensions,
+                "time_granularity": required_grain,
+            }
+        return SemanticValidationError(
+            code=code,
+            metrics=list(metrics),
+            required_dimensions=required_dimensions,
+            required_time_granularity=required_grain,
+            suggested_retry=suggested,
+            message=text,
+        )
 
     def _offset_anchor_metric_names(
         self, metric: MetricIR, seen_metrics: Optional[set[str]] = None
@@ -1253,33 +1315,39 @@ class DatusOSIAdapter(BaseSemanticAdapter):
                 "join_policy='dimension_preserving' cannot plan this query."
             )
 
-        if not dry_run and can_postprocess_window_metrics(model, query_metrics):
-            result = await query_window_metrics(
-                executor,
-                model,
-                metrics=query_metrics,
-                dimensions=dimensions,
-                path=path,
-                time_start=time_start,
-                time_end=time_end,
-                time_granularity=time_granularity,
-                where=where,
-                limit=limit,
-                order_by=order_by,
-            )
-        else:
-            result = await executor.query_metrics(
-                query_metrics,
-                dimensions=dimensions,
-                path=path,
-                time_start=time_start,
-                time_end=time_end,
-                time_granularity=time_granularity,
-                where=where,
-                limit=limit,
-                order_by=order_by,
-                dry_run=dry_run,
-            )
+        try:
+            if not dry_run and can_postprocess_window_metrics(model, query_metrics):
+                result = await query_window_metrics(
+                    executor,
+                    model,
+                    metrics=query_metrics,
+                    dimensions=dimensions,
+                    path=path,
+                    time_start=time_start,
+                    time_end=time_end,
+                    time_granularity=time_granularity,
+                    where=where,
+                    limit=limit,
+                    order_by=order_by,
+                )
+            else:
+                result = await executor.query_metrics(
+                    query_metrics,
+                    dimensions=dimensions,
+                    path=path,
+                    time_start=time_start,
+                    time_end=time_end,
+                    time_granularity=time_granularity,
+                    where=where,
+                    limit=limit,
+                    order_by=order_by,
+                    dry_run=dry_run,
+                )
+        except Exception as exc:
+            payload = self._semantic_validation_error_from(exc, metrics)
+            if payload is None:
+                raise
+            raise SemanticValidationException(payload) from exc
         if dry_run:
             if period_over_period_metrics:
                 result.metadata["period_over_period"] = (
