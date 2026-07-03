@@ -1273,3 +1273,62 @@ metrics:
 
     metrics = await adapter.list_metrics()
     assert "customer_id__region_id__region_name" in metrics[0].dimensions
+
+
+def _injected_dimensions(executor):
+    """metric_time dimensions the adapter passed to the backend executor."""
+    assert executor.calls, "expected the executor to be invoked"
+    return [
+        d for d in executor.calls[0]["dimensions"] if str(d).startswith("metric_time")
+    ]
+
+
+async def test_query_metrics_injects_metric_time_for_cumulative(adapter):
+    executor = _FakeExecutor()
+    adapter._backend = _FakeBackend(executor)
+
+    await adapter.query_metrics(["running_order_count"])
+
+    # grain_to_date: month -> group by metric_time__month, caller supplied none
+    assert _injected_dimensions(executor) == ["metric_time__month"]
+
+
+async def test_query_metrics_injects_metric_time_for_offset_derived(adapter):
+    executor = _FakeExecutor()
+    adapter._backend = _FakeBackend(executor)
+
+    await adapter.query_metrics(["previous_month_order_count"])
+
+    # derived metric with an offset_window "1 month" input requires metric_time
+    assert "metric_time__month" in executor.calls[0]["dimensions"]
+
+
+async def test_query_metrics_injects_metric_time_for_window(adapter):
+    executor = _FakeExecutor()
+    adapter._backend = _FakeBackend(executor)
+
+    await adapter.query_metrics(["moving_3_month_order_count_avg"])
+
+    # window "3 months" is post-processed over the monthly base metric
+    assert _injected_dimensions(executor) == ["metric_time__month"]
+
+
+async def test_query_metrics_no_time_injection_for_plain_aggregate(adapter):
+    executor = _FakeExecutor()
+    adapter._backend = _FakeBackend(executor)
+
+    await adapter.query_metrics(["order_count"])
+
+    assert _injected_dimensions(executor) == []
+
+
+async def test_query_metrics_time_grouping_is_idempotent(adapter):
+    executor = _FakeExecutor()
+    adapter._backend = _FakeBackend(executor)
+
+    await adapter.query_metrics(
+        ["running_order_count"], dimensions=["metric_time__day"]
+    )
+
+    # caller's explicit metric_time grain is respected, not overridden or doubled
+    assert _injected_dimensions(executor) == ["metric_time__day"]

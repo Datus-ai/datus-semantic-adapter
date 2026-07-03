@@ -53,6 +53,7 @@ from datus_semantic_osi.query_utils import (
     dimension_output_column,
     is_metric_time_dimension,
     is_null_metric_value,
+    metric_time_dimension_for_granularity,
 )
 from datus_semantic_osi.query_window import (
     can_postprocess_window_metrics,
@@ -495,6 +496,77 @@ class DatusOSIAdapter(BaseSemanticAdapter):
             if self._metric_has_offset_dependency(referenced, seen_metrics):
                 return True
         return False
+
+    _TIME_GRAINS = ("day", "week", "month", "quarter", "year")
+
+    @classmethod
+    def _time_grain_from_text(cls, value: Optional[str]) -> Optional[str]:
+        """Extract a known time grain word from a definition string."""
+        text = str(value or "").lower()
+        for grain in cls._TIME_GRAINS:
+            if grain in text:
+                return grain
+        return None
+
+    def _requires_time_dimension(self, metric: MetricIR) -> bool:
+        """Metrics whose definition mandates a metric_time group-by.
+
+        A cumulative metric (window / grain_to_date) or any metric with an
+        offset dependency is invalid in MetricFlow unless queried with
+        metric_time. This is fully determined by the metric definition, so the
+        adapter is responsible for satisfying it instead of the caller.
+        """
+        return (
+            metric.kind is MetricKind.CUMULATIVE
+            or self._metric_has_offset_dependency(metric)
+        )
+
+    def _static_required_grain(self, metric: MetricIR) -> Optional[str]:
+        """Required time grain derivable from the metric definition.
+
+        Window / cumulative metrics are post-processed over their base metric at
+        the window's own grain (a ``3 months`` moving average rolls over monthly
+        rows), so the window/grain_to_date unit is the correct grouping grain
+        here, matching how the metric is executed. Returns ``None`` only when no
+        grain can be read, in which case a bare metric_time grouping is injected
+        and the backend picks the grain.
+        """
+        for source in (metric.grain_to_date, metric.window, metric.offset_window):
+            grain = self._time_grain_from_text(source)
+            if grain:
+                return grain
+        offset_windows = {
+            input_metric.offset_window
+            for input_metric in metric.inputs
+            if input_metric.offset_window
+        }
+        if len(offset_windows) == 1:
+            return self._time_grain_from_text(next(iter(offset_windows)))
+        return None
+
+    def _ensure_time_grouping(
+        self,
+        metrics: List[str],
+        dimensions: List[str],
+        time_granularity: Optional[str],
+    ) -> tuple[List[str], Optional[str]]:
+        """Inject metric_time for metrics that require it when the caller omitted it.
+
+        Only fires when no metric_time dimension was supplied, so an explicit
+        caller grouping is always respected (idempotent). Turns an otherwise
+        deterministic MetricFlow rejection into a valid, overridable query.
+        """
+        dims = list(dimensions or [])
+        if any(is_metric_time_dimension(dimension) for dimension in dims):
+            return dims, time_granularity
+        for name in metrics:
+            metric = self._find_metric(name)
+            if metric is None or not self._requires_time_dimension(metric):
+                continue
+            grain = self._static_required_grain(metric) or time_granularity
+            dims.append(metric_time_dimension_for_granularity(grain) or "metric_time")
+            return dims, time_granularity or grain
+        return dims, time_granularity
 
     def _offset_anchor_metric_names(
         self, metric: MetricIR, seen_metrics: Optional[set[str]] = None
@@ -1077,6 +1149,9 @@ class DatusOSIAdapter(BaseSemanticAdapter):
         period_over_period_metrics = self._period_over_period_metrics(model, metrics)
         live = getattr(self._backend, "has_live_connection", False)
         dimensions = dimensions or []
+        dimensions, time_granularity = self._ensure_time_grouping(
+            metrics, dimensions, time_granularity
+        )
         policy = normalize_join_policy(join_policy)
 
         if zero_fill and policy != "dimension_preserving":
