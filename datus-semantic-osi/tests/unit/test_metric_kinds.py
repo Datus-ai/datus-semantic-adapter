@@ -10,6 +10,7 @@ from datus_semantic_osi.errors import OSIValidationError
 from datus_semantic_osi.ir import MetricKind
 from datus_semantic_osi.metricflow_backend import lower_to_metricflow
 from datus_semantic_osi.profile import parse_osi_profile as parse_osi
+from datus_semantic_osi.validator import validate_profile
 
 CUMULATIVE = """
 semantic_model:
@@ -228,9 +229,9 @@ def test_period_over_period_delta_and_ratio_lower_to_expected_expressions():
     ]
 
     for metric_name, calculation, expected_expr in cases:
-        osi = PERIOD_OVER_PERIOD.replace(
-            "order_count_month_yoy", metric_name
-        ).replace("calculation: percent_change", f"calculation: {calculation}")
+        osi = PERIOD_OVER_PERIOD.replace("order_count_month_yoy", metric_name).replace(
+            "calculation: percent_change", f"calculation: {calculation}"
+        )
         art = lower_to_metricflow(compile_document(parse_osi(osi)))
         metrics = {d["metric"]["name"]: d["metric"] for d in art.metric_docs}
         hidden_name = f"datus_pop_base_{metric_name}"
@@ -272,3 +273,31 @@ metrics:
         compile_document(parse_osi(osi))
     assert "period_over_period" in str(exc.value)
     assert "inputs" in str(exc.value)
+
+
+@pytest.mark.parametrize("metric_kind", ["derived", "ratio"])
+def test_validate_profile_rejects_period_over_period_metric_kind_conflict(metric_kind):
+    doc = parse_osi(
+        f"""
+semantic_model: {{name: shop}}
+datasets:
+  - name: orders
+    source: {{table: orders}}
+    primary_key: order_id
+    time_dimension: {{name: order_date, granularity: day}}
+metrics:
+  - name: order_count_month_yoy
+    metric_kind: {metric_kind}
+    expression: "COUNT(DISTINCT order_id)"
+    dataset: orders
+    time_dimension: order_date
+    period_over_period:
+      time_grain: month
+      offset_window: "1 year"
+      calculation: percent_change
+"""
+    )
+
+    issues = validate_profile(doc)
+
+    assert any("incompatible metric_kind" in issue for issue in issues)

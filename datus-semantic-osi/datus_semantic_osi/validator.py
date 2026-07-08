@@ -57,6 +57,10 @@ def validate_profile(doc: OSIDocument) -> List[str]:
                 f"Metric `{metric.name}` needs an `expression` or explicit ratio numerator/denominator."
             )
         if metric.period_over_period is not None:
+            if (metric.kind or "").lower() in {"derived", "ratio"}:
+                issues.append(
+                    f"Metric `{metric.name}` declares period_over_period with an incompatible metric_kind."
+                )
             if not metric.dataset:
                 issues.append(
                     f"Metric `{metric.name}` declares period_over_period but has no dataset."

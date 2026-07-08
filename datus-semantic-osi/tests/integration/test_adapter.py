@@ -449,6 +449,117 @@ async def test_query_metrics_period_over_period_rejects_conflicting_grain(adapte
         )
 
 
+async def test_query_metrics_period_over_period_rejects_conflicting_metric_time_dimension(
+    adapter,
+):
+    executor = _FakeExecutor()
+    adapter._backend = _FakeBackend(executor)
+
+    with pytest.raises(ValueError, match="metric_time__day"):
+        await adapter.query_metrics(
+            ["order_count_month_yoy"],
+            dimensions=["metric_time__day"],
+        )
+
+    assert executor.calls == []
+
+
+async def test_query_metrics_period_over_period_rejects_invalid_date_boundaries(
+    adapter,
+):
+    executor = _FakeExecutor()
+    adapter._backend = _FakeBackend(executor)
+
+    with pytest.raises(ValueError, match="time_start"):
+        await adapter.query_metrics(
+            ["order_count_month_yoy"],
+            time_start="2026-01-01'; DROP TABLE orders; --",
+        )
+
+    with pytest.raises(ValueError, match="time_end"):
+        await adapter.query_metrics(
+            ["order_count_month_yoy"],
+            time_start="2026-01-01",
+            time_end="not-a-date",
+        )
+
+    assert executor.calls == []
+
+
+async def test_query_metrics_period_over_period_accepts_plural_multi_count_offset(
+    tmp_path,
+):
+    (tmp_path / "model.yaml").write_text(
+        _core_yaml(
+            """
+semantic_model:
+  name: shop
+datasets:
+  - name: orders
+    source: {table: orders}
+    primary_key: order_id
+    time_dimension: {name: order_date, granularity: day}
+metrics:
+  - name: order_count_two_month_delta
+    expression: "COUNT(DISTINCT order_id)"
+    dataset: orders
+    time_dimension: order_date
+    period_over_period:
+      time_grain: month
+      offset_window: "2 months"
+      calculation: delta
+"""
+        )
+    )
+    adapter = DatusOSIAdapter(
+        DatusOSIConfig(semantic_models_path=str(tmp_path), datasource="duckdb")
+    )
+    executor = _FakeExecutor(
+        result=QueryResult(
+            columns=[
+                "metric_time__month",
+                "order_count_two_month_delta",
+                "datus_pop_base_order_count_two_month_delta",
+            ],
+            data=[
+                {
+                    "metric_time__month": "2025-11-01",
+                    "order_count_two_month_delta": None,
+                    "datus_pop_base_order_count_two_month_delta": 10,
+                },
+                {
+                    "metric_time__month": "2026-01-01",
+                    "order_count_two_month_delta": 3,
+                    "datus_pop_base_order_count_two_month_delta": 13,
+                },
+            ],
+        )
+    )
+    adapter._backend = _FakeBackend(executor)
+
+    result = await adapter.query_metrics(
+        ["order_count_two_month_delta"],
+        time_start="2026-01-01",
+        time_end="2026-01-31",
+    )
+
+    assert executor.calls[0]["time_start"] == "2025-11-01"
+    assert executor.calls[0]["dimensions"] == ["metric_time__month"]
+    assert result.data == [
+        {
+            "metric_time__month": "2026-01-01",
+            "order_count_two_month_delta": 3,
+        }
+    ]
+    assert result.metadata["period_over_period"] == {
+        "order_count_two_month_delta": {
+            "time_grain": "month",
+            "offset_window": "2 months",
+            "calculation": "delta",
+        }
+    }
+
+
 async def test_query_metrics_period_over_period_uses_week_grain_contract(adapter):
     executor = _FakeExecutor(
         result=QueryResult(
@@ -491,7 +602,11 @@ async def test_query_metrics_period_over_period_uses_week_grain_contract(adapter
     assert call["dimensions"] == ["order_channel", "metric_time__week"]
     assert call["time_granularity"] == "week"
     assert call["time_start"] == "2026-01-05"
-    assert result.columns == ["metric_time__week", "order_channel", "order_count_week_wow_delta"]
+    assert result.columns == [
+        "metric_time__week",
+        "order_channel",
+        "order_count_week_wow_delta",
+    ]
     assert result.data == [
         {
             "metric_time__week": "2026-01-12",
