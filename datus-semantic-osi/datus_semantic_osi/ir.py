@@ -99,6 +99,14 @@ class MetricInputIR(BaseModel):
     offset_window: Optional[str] = None
 
 
+class PeriodOverPeriodIR(BaseModel):
+    """Fixed period-over-period execution semantics for a metric."""
+
+    time_grain: str
+    offset_window: str
+    calculation: str
+
+
 class MetricIR(BaseModel):
     """A metric expressed over backing measures or other metrics."""
 
@@ -115,6 +123,7 @@ class MetricIR(BaseModel):
     window: Optional[str] = None
     grain_to_date: Optional[str] = None
     offset_window: Optional[str] = None
+    period_over_period: Optional[PeriodOverPeriodIR] = None
     format: Optional[str] = None
     unit: Optional[str] = None
     metadata: Dict[str, object] = Field(default_factory=dict)

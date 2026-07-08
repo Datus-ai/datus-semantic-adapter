@@ -16,7 +16,11 @@ from datus_semantic_core.models import (
     ValidationIssue,
     ValidationResult,
 )
-from datus_semantic_core.registry import AdapterMetadata, SemanticAdapterRegistry, semantic_adapter_registry
+from datus_semantic_core.registry import (
+    AdapterMetadata,
+    SemanticAdapterRegistry,
+    semantic_adapter_registry,
+)
 
 __all__ = [
     "BaseSemanticAdapter",

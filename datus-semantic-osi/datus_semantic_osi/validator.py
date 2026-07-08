@@ -56,6 +56,32 @@ def validate_profile(doc: OSIDocument) -> List[str]:
             issues.append(
                 f"Metric `{metric.name}` needs an `expression` or explicit ratio numerator/denominator."
             )
+        if metric.period_over_period is not None:
+            if (metric.kind or "").lower() in {"derived", "ratio"}:
+                issues.append(
+                    f"Metric `{metric.name}` declares period_over_period with an incompatible metric_kind."
+                )
+            if not metric.dataset:
+                issues.append(
+                    f"Metric `{metric.name}` declares period_over_period but has no dataset."
+                )
+            if not metric.time_dimension:
+                issues.append(
+                    f"Metric `{metric.name}` declares period_over_period but has no time_dimension."
+                )
+            if metric.inputs:
+                issues.append(
+                    f"Metric `{metric.name}` declares period_over_period and inputs; "
+                    "fixed period-over-period metrics must be self-contained."
+                )
+            if metric.numerator or metric.denominator:
+                issues.append(
+                    f"Metric `{metric.name}` declares period_over_period with numerator/denominator."
+                )
+            if metric.window or metric.grain_to_date:
+                issues.append(
+                    f"Metric `{metric.name}` declares period_over_period with window/grain_to_date."
+                )
         # time_dimension must be declared on the metric's dataset
         if metric.time_dimension and metric.dataset in dataset_names:
             ds = datasets_by_name[metric.dataset]
@@ -128,6 +154,23 @@ def validate_ir(model: SemanticModelIR) -> List[str]:
             issues.append(
                 f"Cumulative metric `{metric.name}` must declare a window or grain_to_date."
             )
+        if metric.period_over_period is not None:
+            if not metric.dataset:
+                issues.append(
+                    f"Period-over-period metric `{metric.name}` must declare a dataset."
+                )
+            if not metric.time_dimension:
+                issues.append(
+                    f"Period-over-period metric `{metric.name}` must declare a time_dimension."
+                )
+            if metric.inputs:
+                issues.append(
+                    f"Period-over-period metric `{metric.name}` must not declare derived inputs."
+                )
+            if metric.window or metric.grain_to_date:
+                issues.append(
+                    f"Period-over-period metric `{metric.name}` must not declare window/grain_to_date."
+                )
         if metric.window or metric.grain_to_date:
             explicit_window_aggregation = metadata_str(
                 metric,

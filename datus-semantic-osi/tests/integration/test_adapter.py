@@ -127,6 +127,26 @@ metrics:
         alias: previous_month_order_count
         offset_window: "1 month"
     subject_path: [commerce, orders]
+  - name: order_count_month_yoy
+    description: "Monthly year-over-year order count growth rate"
+    expression: "COUNT(DISTINCT order_id)"
+    dataset: orders
+    time_dimension: order_date
+    period_over_period:
+      time_grain: month
+      offset_window: "1 year"
+      calculation: percent_change
+    subject_path: [commerce, orders]
+  - name: order_count_week_wow_delta
+    description: "Weekly week-over-week order count delta"
+    expression: "COUNT(DISTINCT order_id)"
+    dataset: orders
+    time_dimension: order_date
+    period_over_period:
+      time_grain: week
+      offset_window: "1 week"
+      calculation: delta
+    subject_path: [commerce, orders]
 """
 
 
@@ -159,8 +179,10 @@ class _FakeBackend:
 
     def __init__(self, executor):
         self.executor = executor
+        self.models = []
 
     def make_executor(self, model):
+        self.models.append(model)
         return self.executor
 
 
@@ -204,6 +226,24 @@ async def test_list_metrics_exposes_osi_structured_metadata(adapter):
     assert mom.metadata["dataset"] == "orders"
     assert "order_channel" in mom.dimensions
 
+    yoy = metrics["order_count_month_yoy"]
+    assert yoy.type == "aggregate"
+    assert yoy.metadata["period_over_period"] == {
+        "time_grain": "month",
+        "offset_window": "1 year",
+        "calculation": "percent_change",
+    }
+    assert yoy.metadata["time_dimension"] == "order_date"
+    assert "order_channel" in yoy.dimensions
+
+    wow = metrics["order_count_week_wow_delta"]
+    assert wow.metadata["period_over_period"] == {
+        "time_grain": "week",
+        "offset_window": "1 week",
+        "calculation": "delta",
+    }
+    assert wow.metadata["time_dimension"] == "order_date"
+
 
 async def test_list_metrics_selects_subject_path(adapter):
     metrics = await adapter.list_metrics(path=["commerce"])
@@ -218,6 +258,8 @@ async def test_list_metrics_selects_subject_path(adapter):
         "running_max_average_order_amount",
         "order_count_mom",
         "previous_month_order_count",
+        "order_count_month_yoy",
+        "order_count_week_wow_delta",
     }
 
 
@@ -239,6 +281,32 @@ def test_offset_only_metrics_use_referenced_metric_as_anchor(adapter):
     assert query_metrics == ["previous_month_order_count", "order_count"]
     assert hidden_anchor_metrics == ["order_count"]
     assert filter_anchor_metrics == ["order_count"]
+
+
+def test_period_over_period_metrics_use_generated_base_as_anchor(adapter):
+    query_metrics, hidden_anchor_metrics, filter_anchor_metrics = (
+        adapter._query_metrics_plan(["order_count_month_yoy"])
+    )
+
+    assert query_metrics == [
+        "order_count_month_yoy",
+        "datus_pop_base_order_count_month_yoy",
+    ]
+    assert hidden_anchor_metrics == ["datus_pop_base_order_count_month_yoy"]
+    assert filter_anchor_metrics == ["datus_pop_base_order_count_month_yoy"]
+
+
+def test_week_period_over_period_metrics_use_generated_base_as_anchor(adapter):
+    query_metrics, hidden_anchor_metrics, filter_anchor_metrics = (
+        adapter._query_metrics_plan(["order_count_week_wow_delta"])
+    )
+
+    assert query_metrics == [
+        "order_count_week_wow_delta",
+        "datus_pop_base_order_count_week_wow_delta",
+    ]
+    assert hidden_anchor_metrics == ["datus_pop_base_order_count_week_wow_delta"]
+    assert filter_anchor_metrics == ["datus_pop_base_order_count_week_wow_delta"]
 
 
 def test_offset_anchor_filter_removes_offset_only_rows(adapter):
@@ -301,6 +369,261 @@ async def test_query_metrics_dry_run_renders_sql(adapter):
     )
     assert "COUNT(DISTINCT order_id)" in sql
     assert "fact_orders" in sql
+
+
+async def test_query_metrics_period_over_period_uses_fixed_metric_contract(adapter):
+    executor = _FakeExecutor(
+        result=QueryResult(
+            columns=[
+                "metric_time__month",
+                "order_channel",
+                "order_count_month_yoy",
+                "datus_pop_base_order_count_month_yoy",
+            ],
+            data=[
+                {
+                    "metric_time__month": "2025-12-01",
+                    "order_channel": "online",
+                    "order_count_month_yoy": 0.08,
+                    "datus_pop_base_order_count_month_yoy": 100,
+                },
+                {
+                    "metric_time__month": "2026-01-01",
+                    "order_channel": "online",
+                    "order_count_month_yoy": 0.12,
+                    "datus_pop_base_order_count_month_yoy": 120,
+                },
+            ],
+        )
+    )
+    adapter._backend = _FakeBackend(executor)
+
+    result = await adapter.query_metrics(
+        ["order_count_month_yoy"],
+        dimensions=["order_channel"],
+        time_start="2026-01-01",
+        time_end="2026-12-31",
+    )
+
+    call = executor.calls[0]
+    assert call["metrics"] == [
+        "order_count_month_yoy",
+        "datus_pop_base_order_count_month_yoy",
+    ]
+    assert call["dimensions"] == ["order_channel", "metric_time__month"]
+    assert call["time_granularity"] == "month"
+    assert call["time_start"] == "2025-01-01"
+    assert result.data == [
+        {
+            "metric_time__month": "2026-01-01",
+            "order_channel": "online",
+            "order_count_month_yoy": 0.12,
+        }
+    ]
+    assert result.columns == [
+        "metric_time__month",
+        "order_channel",
+        "order_count_month_yoy",
+    ]
+    assert result.metadata["period_over_period"] == {
+        "order_count_month_yoy": {
+            "time_grain": "month",
+            "offset_window": "1 year",
+            "calculation": "percent_change",
+        }
+    }
+    assert result.metadata["period_over_period_expanded_time_start"] == "2025-01-01"
+    assert result.metadata["period_over_period_filtered_rows"] == 1
+    assert result.metadata["hidden_offset_anchor_metrics"] == [
+        "datus_pop_base_order_count_month_yoy"
+    ]
+
+
+async def test_query_metrics_period_over_period_rejects_conflicting_grain(adapter):
+    adapter._backend = _FakeBackend(_FakeExecutor())
+
+    with pytest.raises(ValueError, match="time_grain"):
+        await adapter.query_metrics(
+            ["order_count_month_yoy"],
+            time_granularity="week",
+        )
+
+
+async def test_query_metrics_period_over_period_rejects_conflicting_metric_time_dimension(
+    adapter,
+):
+    executor = _FakeExecutor()
+    adapter._backend = _FakeBackend(executor)
+
+    with pytest.raises(ValueError, match="metric_time__day"):
+        await adapter.query_metrics(
+            ["order_count_month_yoy"],
+            dimensions=["metric_time__day"],
+        )
+
+    assert executor.calls == []
+
+
+async def test_query_metrics_period_over_period_rejects_invalid_date_boundaries(
+    adapter,
+):
+    executor = _FakeExecutor()
+    adapter._backend = _FakeBackend(executor)
+
+    with pytest.raises(ValueError, match="time_start"):
+        await adapter.query_metrics(
+            ["order_count_month_yoy"],
+            time_start="2026-01-01'; DROP TABLE orders; --",
+        )
+
+    with pytest.raises(ValueError, match="time_end"):
+        await adapter.query_metrics(
+            ["order_count_month_yoy"],
+            time_start="2026-01-01",
+            time_end="not-a-date",
+        )
+
+    assert executor.calls == []
+
+
+async def test_query_metrics_period_over_period_accepts_plural_multi_count_offset(
+    tmp_path,
+):
+    (tmp_path / "model.yaml").write_text(
+        _core_yaml(
+            """
+semantic_model:
+  name: shop
+datasets:
+  - name: orders
+    source: {table: orders}
+    primary_key: order_id
+    time_dimension: {name: order_date, granularity: day}
+metrics:
+  - name: order_count_two_month_delta
+    expression: "COUNT(DISTINCT order_id)"
+    dataset: orders
+    time_dimension: order_date
+    period_over_period:
+      time_grain: month
+      offset_window: "2 months"
+      calculation: delta
+"""
+        )
+    )
+    adapter = DatusOSIAdapter(
+        DatusOSIConfig(semantic_models_path=str(tmp_path), datasource="duckdb")
+    )
+    executor = _FakeExecutor(
+        result=QueryResult(
+            columns=[
+                "metric_time__month",
+                "order_count_two_month_delta",
+                "datus_pop_base_order_count_two_month_delta",
+            ],
+            data=[
+                {
+                    "metric_time__month": "2025-11-01",
+                    "order_count_two_month_delta": None,
+                    "datus_pop_base_order_count_two_month_delta": 10,
+                },
+                {
+                    "metric_time__month": "2026-01-01",
+                    "order_count_two_month_delta": 3,
+                    "datus_pop_base_order_count_two_month_delta": 13,
+                },
+            ],
+        )
+    )
+    adapter._backend = _FakeBackend(executor)
+
+    result = await adapter.query_metrics(
+        ["order_count_two_month_delta"],
+        time_start="2026-01-01",
+        time_end="2026-01-31",
+    )
+
+    assert executor.calls[0]["time_start"] == "2025-11-01"
+    assert executor.calls[0]["dimensions"] == ["metric_time__month"]
+    assert result.data == [
+        {
+            "metric_time__month": "2026-01-01",
+            "order_count_two_month_delta": 3,
+        }
+    ]
+    assert result.metadata["period_over_period"] == {
+        "order_count_two_month_delta": {
+            "time_grain": "month",
+            "offset_window": "2 months",
+            "calculation": "delta",
+        }
+    }
+
+
+async def test_query_metrics_period_over_period_uses_week_grain_contract(adapter):
+    executor = _FakeExecutor(
+        result=QueryResult(
+            columns=[
+                "metric_time__week",
+                "order_channel",
+                "order_count_week_wow_delta",
+                "datus_pop_base_order_count_week_wow_delta",
+            ],
+            data=[
+                {
+                    "metric_time__week": "2026-01-05",
+                    "order_channel": "online",
+                    "order_count_week_wow_delta": 4,
+                    "datus_pop_base_order_count_week_wow_delta": 20,
+                },
+                {
+                    "metric_time__week": "2026-01-12",
+                    "order_channel": "online",
+                    "order_count_week_wow_delta": -2,
+                    "datus_pop_base_order_count_week_wow_delta": 18,
+                },
+            ],
+        )
+    )
+    adapter._backend = _FakeBackend(executor)
+
+    result = await adapter.query_metrics(
+        ["order_count_week_wow_delta"],
+        dimensions=["order_channel"],
+        time_start="2026-01-12",
+        time_end="2026-01-31",
+    )
+
+    call = executor.calls[0]
+    assert call["metrics"] == [
+        "order_count_week_wow_delta",
+        "datus_pop_base_order_count_week_wow_delta",
+    ]
+    assert call["dimensions"] == ["order_channel", "metric_time__week"]
+    assert call["time_granularity"] == "week"
+    assert call["time_start"] == "2026-01-05"
+    assert result.columns == [
+        "metric_time__week",
+        "order_channel",
+        "order_count_week_wow_delta",
+    ]
+    assert result.data == [
+        {
+            "metric_time__week": "2026-01-12",
+            "order_channel": "online",
+            "order_count_week_wow_delta": -2,
+        }
+    ]
+    assert result.metadata["period_over_period_filtered_rows"] == 1
+
+
+async def test_query_metrics_period_over_period_rejects_mixed_fixed_grains(adapter):
+    adapter._backend = _FakeBackend(_FakeExecutor())
+
+    with pytest.raises(ValueError, match="different time_grain"):
+        await adapter.query_metrics(
+            ["order_count_month_yoy", "order_count_week_wow_delta"],
+        )
 
 
 async def test_query_metrics_dimension_preserving_dry_run_uses_policy_sql(tmp_path):

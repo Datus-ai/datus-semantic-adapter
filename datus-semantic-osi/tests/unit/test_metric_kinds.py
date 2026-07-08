@@ -10,6 +10,7 @@ from datus_semantic_osi.errors import OSIValidationError
 from datus_semantic_osi.ir import MetricKind
 from datus_semantic_osi.metricflow_backend import lower_to_metricflow
 from datus_semantic_osi.profile import parse_osi_profile as parse_osi
+from datus_semantic_osi.validator import validate_profile
 
 CUMULATIVE = """
 semantic_model:
@@ -65,6 +66,29 @@ metrics:
       - name: revenue
         alias: revenue_prev
         offset_window: "1 month"
+"""
+
+PERIOD_OVER_PERIOD = """
+semantic_model:
+  name: shop
+datasets:
+  - name: orders
+    source:
+      table: orders
+    primary_key: order_id
+    time_dimension:
+      name: order_date
+      granularity: day
+metrics:
+  - name: order_count_month_yoy
+    description: "monthly year-over-year order count"
+    expression: "COUNT(DISTINCT order_id)"
+    dataset: orders
+    time_dimension: order_date
+    period_over_period:
+      time_grain: month
+      offset_window: "1 year"
+      calculation: percent_change
 """
 
 
@@ -133,3 +157,147 @@ def test_derived_offset_window_is_carried_to_input_metric():
     offset_inputs = [m for m in mom["type_params"]["metrics"] if m.get("offset_window")]
     assert offset_inputs and offset_inputs[0]["offset_window"] == "1 month"
     assert offset_inputs[0]["alias"] == "revenue_prev"
+
+
+def test_period_over_period_compiles_as_fixed_metric_semantics():
+    model = compile_document(parse_osi(PERIOD_OVER_PERIOD))
+    metric = model.metrics[0]
+    assert metric.kind is MetricKind.AGGREGATE
+    assert metric.period_over_period is not None
+    assert metric.period_over_period.time_grain == "month"
+    assert metric.period_over_period.offset_window == "1 year"
+    assert metric.period_over_period.calculation == "percent_change"
+
+
+def test_period_over_period_lowers_to_hidden_base_and_public_metric():
+    art = lower_to_metricflow(compile_document(parse_osi(PERIOD_OVER_PERIOD)))
+    metrics = {d["metric"]["name"]: d["metric"] for d in art.metric_docs}
+    hidden_name = "datus_pop_base_order_count_month_yoy"
+
+    assert hidden_name in metrics
+    assert metrics[hidden_name]["type"] == "measure_proxy"
+
+    public = metrics["order_count_month_yoy"]
+    assert public["type"] == "derived"
+    assert public["type_params"]["metrics"] == [
+        {"name": hidden_name},
+        {
+            "name": hidden_name,
+            "alias": f"{hidden_name}_previous",
+            "offset_window": "1 year",
+        },
+    ]
+    assert public["type_params"]["expr"] == (
+        f"({hidden_name} - {hidden_name}_previous) / NULLIF({hidden_name}_previous, 0)"
+    )
+
+
+def test_period_over_period_previous_value_lowers_to_offset_only_input():
+    osi = PERIOD_OVER_PERIOD.replace(
+        "order_count_month_yoy", "previous_month_order_count"
+    ).replace("calculation: percent_change", "calculation: previous_value")
+    art = lower_to_metricflow(compile_document(parse_osi(osi)))
+    metrics = {d["metric"]["name"]: d["metric"] for d in art.metric_docs}
+    hidden_name = "datus_pop_base_previous_month_order_count"
+
+    public = metrics["previous_month_order_count"]
+    assert public["type"] == "derived"
+    assert public["type_params"]["metrics"] == [
+        {
+            "name": hidden_name,
+            "alias": f"{hidden_name}_previous",
+            "offset_window": "1 year",
+        }
+    ]
+    assert public["type_params"]["expr"] == f"{hidden_name}_previous"
+
+
+def test_period_over_period_delta_and_ratio_lower_to_expected_expressions():
+    cases = [
+        (
+            "order_count_month_delta",
+            "delta",
+            "datus_pop_base_order_count_month_delta - "
+            "datus_pop_base_order_count_month_delta_previous",
+        ),
+        (
+            "order_count_month_ratio",
+            "ratio",
+            "datus_pop_base_order_count_month_ratio / "
+            "NULLIF(datus_pop_base_order_count_month_ratio_previous, 0)",
+        ),
+    ]
+
+    for metric_name, calculation, expected_expr in cases:
+        osi = PERIOD_OVER_PERIOD.replace("order_count_month_yoy", metric_name).replace(
+            "calculation: percent_change", f"calculation: {calculation}"
+        )
+        art = lower_to_metricflow(compile_document(parse_osi(osi)))
+        metrics = {d["metric"]["name"]: d["metric"] for d in art.metric_docs}
+        hidden_name = f"datus_pop_base_{metric_name}"
+
+        public = metrics[metric_name]
+        assert public["type"] == "derived"
+        assert public["type_params"]["metrics"] == [
+            {"name": hidden_name},
+            {
+                "name": hidden_name,
+                "alias": f"{hidden_name}_previous",
+                "offset_window": "1 year",
+            },
+        ]
+        assert public["type_params"]["expr"] == expected_expr
+
+
+def test_period_over_period_rejects_derived_inputs():
+    osi = """
+semantic_model: {name: shop}
+datasets:
+  - name: orders
+    source: {table: orders}
+    primary_key: order_id
+    time_dimension: {name: order_date, granularity: day}
+metrics:
+  - name: order_count_month_yoy
+    expression: "COUNT(DISTINCT order_id)"
+    dataset: orders
+    time_dimension: order_date
+    inputs:
+      - order_count
+    period_over_period:
+      time_grain: month
+      offset_window: "1 year"
+      calculation: percent_change
+"""
+    with pytest.raises(OSIValidationError) as exc:
+        compile_document(parse_osi(osi))
+    assert "period_over_period" in str(exc.value)
+    assert "inputs" in str(exc.value)
+
+
+@pytest.mark.parametrize("metric_kind", ["derived", "ratio"])
+def test_validate_profile_rejects_period_over_period_metric_kind_conflict(metric_kind):
+    doc = parse_osi(
+        f"""
+semantic_model: {{name: shop}}
+datasets:
+  - name: orders
+    source: {{table: orders}}
+    primary_key: order_id
+    time_dimension: {{name: order_date, granularity: day}}
+metrics:
+  - name: order_count_month_yoy
+    metric_kind: {metric_kind}
+    expression: "COUNT(DISTINCT order_id)"
+    dataset: orders
+    time_dimension: order_date
+    period_over_period:
+      time_grain: month
+      offset_window: "1 year"
+      calculation: percent_change
+"""
+    )
+
+    issues = validate_profile(doc)
+
+    assert any("incompatible metric_kind" in issue for issue in issues)

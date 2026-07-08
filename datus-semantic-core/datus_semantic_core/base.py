@@ -3,9 +3,15 @@
 # See http://www.apache.org/licenses/LICENSE-2.0 for details.
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
-from .models import DimensionInfo, MetricDefinition, QueryResult, SemanticModelInfo, ValidationResult
+from .models import (
+    DimensionInfo,
+    MetricDefinition,
+    QueryResult,
+    SemanticModelInfo,
+    ValidationResult,
+)
 
 
 class BaseSemanticAdapter(ABC):
