@@ -617,14 +617,26 @@ class DatusOSIAdapter(BaseSemanticAdapter):
         dims.append(metric_time_dimension_for_granularity(grain) or "metric_time")
         return dims, time_granularity or grain
 
-    @staticmethod
-    def _is_query_validation_error(exc: BaseException) -> bool:
-        """True for backend query-validation rejections, not infra/SQL errors.
+    # Class-name fragments of MetricFlow's deterministic query-validation
+    # exception families. Matched against the exception MRO so the OSI layer
+    # stays decoupled from MetricFlow (which the OSI compiler/IR layers do not
+    # import). Deliberately excludes infra/runtime families such as
+    # ExecutionException so transient failures propagate unwrapped.
+    _QUERY_VALIDATION_EXC_FRAGMENTS = (
+        "InvalidQuery",  # query parse/resolution rejections
+        "RequestTimeGranularity",  # cumulative-metric grain rejections
+        "UnableToSatisfyQuery",  # unsatisfiable metric/dimension combinations
+        "CustomerFacingSemantic",  # base of user-facing semantic rejections
+    )
 
-        Detected by class name so the OSI layer stays decoupled from MetricFlow
-        (which the OSI compiler/IR layers do not import).
-        """
-        return any("InvalidQuery" in klass.__name__ for klass in type(exc).__mro__)
+    @classmethod
+    def _is_query_validation_error(cls, exc: BaseException) -> bool:
+        """True for backend query-validation rejections, not infra/SQL errors."""
+        return any(
+            fragment in klass.__name__
+            for klass in type(exc).__mro__
+            for fragment in cls._QUERY_VALIDATION_EXC_FRAGMENTS
+        )
 
     def _semantic_validation_error_from(
         self, exc: BaseException, metrics: List[str]
