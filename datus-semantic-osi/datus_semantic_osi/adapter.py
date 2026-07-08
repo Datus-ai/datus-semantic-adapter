@@ -25,6 +25,7 @@ from datus_semantic_core.models import (
     DimensionInfo,
     MetricDefinition,
     QueryResult,
+    SemanticValidationError,
     ValidationIssue,
     ValidationResult,
 )
@@ -32,7 +33,11 @@ from datus_semantic_core.models import (
 from datus_semantic_osi.backend import make_backend
 from datus_semantic_osi.compiler import compile_document
 from datus_semantic_osi.config import DatusOSIConfig
-from datus_semantic_osi.errors import OSIError, OSIValidationError
+from datus_semantic_osi.errors import (
+    OSIError,
+    OSIValidationError,
+    SemanticValidationException,
+)
 from datus_semantic_osi.ir import (
     Aggregation,
     DatasetIR,
@@ -53,6 +58,7 @@ from datus_semantic_osi.query_utils import (
     dimension_output_column,
     is_metric_time_dimension,
     is_null_metric_value,
+    metric_time_dimension_for_granularity,
 )
 from datus_semantic_osi.query_window import (
     can_postprocess_window_metrics,
@@ -495,6 +501,178 @@ class DatusOSIAdapter(BaseSemanticAdapter):
             if self._metric_has_offset_dependency(referenced, seen_metrics):
                 return True
         return False
+
+    _TIME_GRAINS = ("day", "week", "month", "quarter", "year")
+
+    @classmethod
+    def _time_grain_from_text(cls, value: Optional[str]) -> Optional[str]:
+        """Extract a known time grain word from a definition string."""
+        text = str(value or "").lower()
+        for grain in cls._TIME_GRAINS:
+            if grain in text:
+                return grain
+        return None
+
+    def _requires_time_dimension(self, metric: MetricIR) -> bool:
+        """Metrics whose definition mandates a metric_time group-by.
+
+        A cumulative metric (window / grain_to_date), period-over-period
+        metric, or any metric with an offset dependency is invalid in
+        MetricFlow unless queried with metric_time. This is fully determined by
+        the metric definition, so the adapter is responsible for satisfying it
+        instead of the caller.
+        """
+        return (
+            metric.kind is MetricKind.CUMULATIVE
+            or self._metric_has_offset_dependency(metric)
+        )
+
+    def _static_required_grains(
+        self, metric: MetricIR, seen_metrics: Optional[set[str]] = None
+    ) -> set[str]:
+        """Required time grains derivable from the metric definition.
+
+        Window / cumulative metrics are post-processed over their base metric at
+        the window's own grain (a ``3 months`` moving average rolls over monthly
+        rows), so the window/grain_to_date unit is the correct grouping grain
+        here, matching how the metric is executed.
+        """
+        grains: set[str] = set()
+        if metric.period_over_period is not None:
+            grain = metric.period_over_period.time_grain
+            if grain:
+                grains.add(grain)
+
+        for source in (metric.grain_to_date, metric.window, metric.offset_window):
+            grain = self._time_grain_from_text(source)
+            if grain:
+                grains.add(grain)
+
+        seen_metrics = seen_metrics or set()
+        if metric.name in seen_metrics:
+            return grains
+        seen_metrics.add(metric.name)
+
+        for input_metric in metric.inputs:
+            for source in (
+                input_metric.offset_window,
+                getattr(input_metric, "offset_to_grain", None),
+            ):
+                grain = self._time_grain_from_text(source)
+                if grain:
+                    grains.add(grain)
+
+            referenced = self._find_metric(input_metric.name)
+            if referenced is not None:
+                grains.update(self._static_required_grains(referenced, seen_metrics))
+        return grains
+
+    def _ensure_time_grouping(
+        self,
+        metrics: List[str],
+        dimensions: List[str],
+        time_granularity: Optional[str],
+    ) -> tuple[List[str], Optional[str]]:
+        """Inject metric_time for metrics that require it when the caller omitted it.
+
+        Only fires when no metric_time dimension was supplied, so an explicit
+        caller grouping is always respected (idempotent). Turns an otherwise
+        deterministic MetricFlow rejection into a valid, overridable query.
+        """
+        dims = list(dimensions or [])
+        if any(is_metric_time_dimension(dimension) for dimension in dims):
+            return dims, time_granularity
+
+        required_metrics: List[str] = []
+        required_grains: Dict[str, List[str]] = {}
+        for name in metrics:
+            metric = self._find_metric(name)
+            if metric is not None and metric.period_over_period is not None:
+                continue
+            if metric is None or not self._requires_time_dimension(metric):
+                continue
+            required_metrics.append(name)
+            for grain in self._static_required_grains(metric):
+                required_grains.setdefault(grain, []).append(name)
+
+        if not required_metrics:
+            return dims, time_granularity
+        if len(required_grains) > 1:
+            details = ", ".join(
+                f"{grain}: {', '.join(names)}"
+                for grain, names in sorted(required_grains.items())
+            )
+            raise SemanticValidationException(
+                SemanticValidationError(
+                    code="metric_time_grain_conflict",
+                    metrics=required_metrics,
+                    message=(
+                        "Requested metrics require incompatible metric_time grains "
+                        f"({details}). Query compatible metric groups separately."
+                    ),
+                )
+            )
+
+        grain = next(iter(required_grains), None) or time_granularity
+        dims.append(metric_time_dimension_for_granularity(grain) or "metric_time")
+        return dims, time_granularity or grain
+
+    @staticmethod
+    def _is_query_validation_error(exc: BaseException) -> bool:
+        """True for backend query-validation rejections, not infra/SQL errors.
+
+        Detected by class name so the OSI layer stays decoupled from MetricFlow
+        (which the OSI compiler/IR layers do not import).
+        """
+        return any("InvalidQuery" in klass.__name__ for klass in type(exc).__mro__)
+
+    def _semantic_validation_error_from(
+        self, exc: BaseException, metrics: List[str]
+    ) -> Optional[SemanticValidationError]:
+        """Map a backend query rejection to a structured, backend-neutral payload.
+
+        Returns ``None`` when ``exc`` is not a validation rejection, so the
+        caller re-raises it unchanged instead of masking an infra/SQL failure.
+        Known rejections get a specific ``code``; anything else still surfaces
+        structured with ``code='validation_error'`` and the original message.
+        """
+        if not self._is_query_validation_error(exc):
+            return None
+        text = str(exc)
+        lowered = text.lower()
+        code = "validation_error"
+        required_dimensions: List[str] = []
+        required_grain: Optional[str] = None
+        # Check the specific "wrong grain" rejection before the "missing
+        # metric_time" ones: its message also mentions the cumulative metric and
+        # metric_time, so it must win to avoid being mis-coded.
+        if "granularity" in lowered and "must be" in lowered:
+            code = "time_grain_required"
+            required_grain = self._time_grain_from_text(lowered.split("must be", 1)[1])
+            if required_grain:
+                required_dimensions = [f"metric_time__{required_grain}"]
+        elif "metric_time" in lowered and ("offset" in lowered or "derived" in lowered):
+            code = "offset_requires_metric_time"
+            required_dimensions = ["metric_time"]
+        elif "metric_time" in lowered and (
+            "cumulative" in lowered or "accumulat" in lowered
+        ):
+            code = "cumulative_requires_metric_time"
+            required_dimensions = ["metric_time"]
+        suggested = None
+        if required_dimensions or required_grain:
+            suggested = {
+                "dimensions": required_dimensions,
+                "time_granularity": required_grain,
+            }
+        return SemanticValidationError(
+            code=code,
+            metrics=list(metrics),
+            required_dimensions=required_dimensions,
+            required_time_granularity=required_grain,
+            suggested_retry=suggested,
+            message=text,
+        )
 
     def _offset_anchor_metric_names(
         self, metric: MetricIR, seen_metrics: Optional[set[str]] = None
@@ -1077,6 +1255,9 @@ class DatusOSIAdapter(BaseSemanticAdapter):
         period_over_period_metrics = self._period_over_period_metrics(model, metrics)
         live = getattr(self._backend, "has_live_connection", False)
         dimensions = dimensions or []
+        dimensions, time_granularity = self._ensure_time_grouping(
+            metrics, dimensions, time_granularity
+        )
         policy = normalize_join_policy(join_policy)
 
         if zero_fill and policy != "dimension_preserving":
@@ -1178,33 +1359,39 @@ class DatusOSIAdapter(BaseSemanticAdapter):
                 "join_policy='dimension_preserving' cannot plan this query."
             )
 
-        if not dry_run and can_postprocess_window_metrics(model, query_metrics):
-            result = await query_window_metrics(
-                executor,
-                model,
-                metrics=query_metrics,
-                dimensions=dimensions,
-                path=path,
-                time_start=time_start,
-                time_end=time_end,
-                time_granularity=time_granularity,
-                where=where,
-                limit=limit,
-                order_by=order_by,
-            )
-        else:
-            result = await executor.query_metrics(
-                query_metrics,
-                dimensions=dimensions,
-                path=path,
-                time_start=time_start,
-                time_end=time_end,
-                time_granularity=time_granularity,
-                where=where,
-                limit=limit,
-                order_by=order_by,
-                dry_run=dry_run,
-            )
+        try:
+            if not dry_run and can_postprocess_window_metrics(model, query_metrics):
+                result = await query_window_metrics(
+                    executor,
+                    model,
+                    metrics=query_metrics,
+                    dimensions=dimensions,
+                    path=path,
+                    time_start=time_start,
+                    time_end=time_end,
+                    time_granularity=time_granularity,
+                    where=where,
+                    limit=limit,
+                    order_by=order_by,
+                )
+            else:
+                result = await executor.query_metrics(
+                    query_metrics,
+                    dimensions=dimensions,
+                    path=path,
+                    time_start=time_start,
+                    time_end=time_end,
+                    time_granularity=time_granularity,
+                    where=where,
+                    limit=limit,
+                    order_by=order_by,
+                    dry_run=dry_run,
+                )
+        except Exception as exc:
+            payload = self._semantic_validation_error_from(exc, metrics)
+            if payload is None:
+                raise
+            raise SemanticValidationException(payload) from exc
         if dry_run:
             if period_over_period_metrics:
                 result.metadata["period_over_period"] = (

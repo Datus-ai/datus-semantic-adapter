@@ -2,8 +2,10 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from metricflow.time.time_granularity import TimeGranularity
 
 from datus_semantic_metricflow import MetricFlowAdapter, MetricFlowConfig
+from datus_semantic_metricflow.adapter import MetricFlowSemanticValidationException
 from datus_semantic_metricflow.models import (
     DimensionInfo,
     MetricDefinition,
@@ -121,6 +123,36 @@ def _validation_results(*, errors=None, warnings=None, has_blocking_issues=False
         errors=list(errors or []),
         warnings=list(warnings or []),
         has_blocking_issues=has_blocking_issues,
+    )
+
+
+class UnableToSatisfyQueryError(Exception):
+    """Stand-in matching MetricFlow's query validation exception by class name."""
+
+
+def _metricflow_metric(
+    name,
+    metric_type,
+    *,
+    window=None,
+    grain_to_date=None,
+    input_metrics=None,
+):
+    return SimpleNamespace(
+        name=name,
+        description=name,
+        type=metric_type,
+        input_measures=[],
+        input_metrics=input_metrics or [],
+        type_params=SimpleNamespace(
+            expr=None,
+            metrics=input_metrics or [],
+            window=window,
+            grain_to_date=grain_to_date,
+            measure=None,
+            numerator=None,
+            denominator=None,
+        ),
     )
 
 
@@ -802,6 +834,217 @@ metric:
             limit=None,
             order=["-revenue"],
         )
+
+    @pytest.mark.asyncio
+    async def test_query_metrics_infers_metric_time_for_cumulative(self, adapter):
+        adapter.client.engine._query_parser._time_granularity_solver.local_dimension_granularity_range.return_value = (
+            TimeGranularity.DAY,
+            TimeGranularity.DAY,
+        )
+        adapter.client.semantic_model.metric_semantics.get_metrics.return_value = [
+            _metricflow_metric(
+                "running_revenue",
+                "cumulative",
+                window=SimpleNamespace(to_string=lambda: "1 month"),
+            )
+        ]
+        adapter.client.query.return_value = SimpleNamespace(
+            result_df=_FakeDataFrame([]), dataflow_plan=None
+        )
+
+        await adapter.query_metrics(metrics=["running_revenue"], dimensions=["region"])
+
+        adapter.client.query.assert_called_once_with(
+            metrics=["running_revenue"],
+            dimensions=["region", "metric_time__day"],
+            start_time=None,
+            end_time=None,
+            where=None,
+            limit=None,
+            order=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_query_metrics_rejects_cumulative_when_time_grain_resolver_missing(
+        self, adapter
+    ):
+        adapter.client.engine = SimpleNamespace()
+        adapter.client.semantic_model.metric_semantics.get_metrics.return_value = [
+            _metricflow_metric(
+                "running_revenue",
+                "cumulative",
+                window=SimpleNamespace(to_string=lambda: "1 month"),
+            )
+        ]
+
+        with pytest.raises(MetricFlowSemanticValidationException) as excinfo:
+            await adapter.query_metrics(metrics=["running_revenue"], dimensions=["region"])
+
+        payload = excinfo.value.payload
+        assert payload.code == "metricflow_time_grain_resolver_unavailable"
+        assert payload.metrics == ["running_revenue"]
+        adapter.client.query.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_query_metrics_infers_metric_time_for_offset_derived(self, adapter):
+        adapter.client.semantic_model.metric_semantics.get_metrics.return_value = [
+            _metricflow_metric(
+                "revenue_mom",
+                "derived",
+                input_metrics=[
+                    SimpleNamespace(name="revenue"),
+                    SimpleNamespace(
+                        name="revenue",
+                        alias="revenue_prev",
+                        offset_window=SimpleNamespace(to_string=lambda: "1 month"),
+                    ),
+                ],
+            )
+        ]
+        adapter.client.query.return_value = SimpleNamespace(
+            result_df=_FakeDataFrame([]), dataflow_plan=None
+        )
+
+        await adapter.query_metrics(metrics=["revenue_mom"], dimensions=["region"])
+
+        adapter.client.query.assert_called_once_with(
+            metrics=["revenue_mom"],
+            dimensions=["region", "metric_time__month"],
+            start_time=None,
+            end_time=None,
+            where=None,
+            limit=None,
+            order=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_query_metrics_uses_one_time_group_for_compatible_metrics(
+        self, adapter
+    ):
+        adapter.client.engine._query_parser._time_granularity_solver.local_dimension_granularity_range.return_value = (
+            TimeGranularity.DAY,
+            TimeGranularity.DAY,
+        )
+        adapter.client.semantic_model.metric_semantics.get_metrics.return_value = [
+            _metricflow_metric(
+                "running_revenue",
+                "cumulative",
+                window=SimpleNamespace(to_string=lambda: "1 month"),
+            ),
+            _metricflow_metric(
+                "revenue_mom",
+                "derived",
+                input_metrics=[
+                    SimpleNamespace(name="revenue"),
+                    SimpleNamespace(
+                        name="revenue",
+                        alias="revenue_prev",
+                        offset_window=SimpleNamespace(to_string=lambda: "1 day"),
+                    ),
+                ],
+            ),
+        ]
+        adapter.client.query.return_value = SimpleNamespace(
+            result_df=_FakeDataFrame([]), dataflow_plan=None
+        )
+
+        await adapter.query_metrics(
+            metrics=["revenue_mom", "running_revenue"], dimensions=["region"]
+        )
+
+        adapter.client.query.assert_called_once_with(
+            metrics=["revenue_mom", "running_revenue"],
+            dimensions=["region", "metric_time__day"],
+            start_time=None,
+            end_time=None,
+            where=None,
+            limit=None,
+            order=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_query_metrics_rejects_conflicting_required_time_grains(
+        self, adapter
+    ):
+        adapter.client.engine._query_parser._time_granularity_solver.local_dimension_granularity_range.return_value = (
+            TimeGranularity.DAY,
+            TimeGranularity.DAY,
+        )
+        adapter.client.semantic_model.metric_semantics.get_metrics.return_value = [
+            _metricflow_metric(
+                "running_revenue",
+                "cumulative",
+                window=SimpleNamespace(to_string=lambda: "1 month"),
+            ),
+            _metricflow_metric(
+                "revenue_mom",
+                "derived",
+                input_metrics=[
+                    SimpleNamespace(name="revenue"),
+                    SimpleNamespace(
+                        name="revenue",
+                        alias="revenue_prev",
+                        offset_window=SimpleNamespace(to_string=lambda: "1 month"),
+                    ),
+                ],
+            ),
+        ]
+
+        with pytest.raises(MetricFlowSemanticValidationException) as excinfo:
+            await adapter.query_metrics(
+                metrics=["running_revenue", "revenue_mom"],
+                dimensions=["region"],
+            )
+
+        payload = excinfo.value.payload
+        assert payload.code == "metric_time_grain_conflict"
+        assert payload.metrics == ["running_revenue", "revenue_mom"]
+        adapter.client.query.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_query_metrics_respects_explicit_metric_time_dimension(self, adapter):
+        adapter.client.semantic_model.metric_semantics.get_metrics.return_value = [
+            _metricflow_metric(
+                "running_revenue",
+                "cumulative",
+                grain_to_date=SimpleNamespace(to_string=lambda: "month"),
+            )
+        ]
+        adapter.client.query.return_value = SimpleNamespace(
+            result_df=_FakeDataFrame([]), dataflow_plan=None
+        )
+
+        await adapter.query_metrics(
+            metrics=["running_revenue"], dimensions=["metric_time__day"]
+        )
+
+        adapter.client.query.assert_called_once_with(
+            metrics=["running_revenue"],
+            dimensions=["metric_time__day"],
+            start_time=None,
+            end_time=None,
+            where=None,
+            limit=None,
+            order=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_query_metrics_maps_metricflow_validation_error(self, adapter):
+        adapter.client.semantic_model.metric_semantics.get_metrics.return_value = []
+        adapter.client.query.side_effect = UnableToSatisfyQueryError(
+            "Metric running_revenue is a cumulative metric specified with a "
+            "window/grain_to_date which must be queried with the dimension "
+            "'metric_time'."
+        )
+
+        with pytest.raises(MetricFlowSemanticValidationException) as excinfo:
+            await adapter.query_metrics(metrics=["running_revenue"], dimensions=[])
+
+        payload = excinfo.value.payload
+        assert payload.error_type == "semantic_validation_error"
+        assert payload.code == "cumulative_requires_metric_time"
+        assert payload.required_dimensions == ["metric_time"]
+        assert payload.metrics == ["running_revenue"]
 
     @pytest.mark.asyncio
     async def test_query_metrics_replaces_time_dimension_with_metric_time_granularity(

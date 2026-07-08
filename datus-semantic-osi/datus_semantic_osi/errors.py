@@ -42,3 +42,17 @@ class OSIValidationError(OSIError):
 
 class OSICompileError(OSIError):
     """An internal compilation failure not attributable to author input."""
+
+
+class SemanticValidationException(OSIError):
+    """A deterministic query validation rejection carrying a structured payload.
+
+    Raised by ``query_metrics`` when the backend rejects a query for validation
+    reasons (e.g. a metric that must be grouped by metric_time). The ``payload``
+    is a ``datus_semantic_core.models.SemanticValidationError`` so callers can
+    revise arguments from stable fields instead of parsing exception text.
+    """
+
+    def __init__(self, payload):
+        self.payload = payload
+        super().__init__(getattr(payload, "message", "") or "semantic validation error")

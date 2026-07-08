@@ -147,6 +147,16 @@ metrics:
       offset_window: "1 week"
       calculation: delta
     subject_path: [commerce, orders]
+  - name: running_week_order_count
+    description: "Running weekly order count"
+    expression: "COUNT(DISTINCT order_id)"
+    dataset: orders
+    grain_to_date: week
+    custom_extensions:
+      - vendor_name: DATUS
+        data:
+          window_aggregation: sum
+    subject_path: [commerce, orders]
 """
 
 
@@ -260,6 +270,7 @@ async def test_list_metrics_selects_subject_path(adapter):
         "previous_month_order_count",
         "order_count_month_yoy",
         "order_count_week_wow_delta",
+        "running_week_order_count",
     }
 
 
@@ -1273,3 +1284,163 @@ metrics:
 
     metrics = await adapter.list_metrics()
     assert "customer_id__region_id__region_name" in metrics[0].dimensions
+
+
+def _injected_dimensions(executor):
+    """metric_time dimensions the adapter passed to the backend executor."""
+    assert executor.calls, "expected the executor to be invoked"
+    return [
+        d for d in executor.calls[0]["dimensions"] if str(d).startswith("metric_time")
+    ]
+
+
+async def test_query_metrics_injects_metric_time_for_cumulative(adapter):
+    executor = _FakeExecutor()
+    adapter._backend = _FakeBackend(executor)
+
+    await adapter.query_metrics(["running_order_count"])
+
+    # grain_to_date: month -> group by metric_time__month, caller supplied none
+    assert _injected_dimensions(executor) == ["metric_time__month"]
+
+
+async def test_query_metrics_injects_metric_time_for_offset_derived(adapter):
+    executor = _FakeExecutor()
+    adapter._backend = _FakeBackend(executor)
+
+    await adapter.query_metrics(["previous_month_order_count"])
+
+    # derived metric with an offset_window "1 month" input requires metric_time
+    assert "metric_time__month" in executor.calls[0]["dimensions"]
+
+
+async def test_query_metrics_injects_metric_time_for_window(adapter):
+    executor = _FakeExecutor()
+    adapter._backend = _FakeBackend(executor)
+
+    await adapter.query_metrics(["moving_3_month_order_count_avg"])
+
+    # window "3 months" is post-processed over the monthly base metric
+    assert _injected_dimensions(executor) == ["metric_time__month"]
+
+
+async def test_query_metrics_no_time_injection_for_plain_aggregate(adapter):
+    executor = _FakeExecutor()
+    adapter._backend = _FakeBackend(executor)
+
+    await adapter.query_metrics(["order_count"])
+
+    assert _injected_dimensions(executor) == []
+
+
+async def test_query_metrics_time_grouping_is_idempotent(adapter):
+    executor = _FakeExecutor()
+    adapter._backend = _FakeBackend(executor)
+
+    await adapter.query_metrics(
+        ["running_order_count"], dimensions=["metric_time__day"]
+    )
+
+    # caller's explicit metric_time grain is respected, not overridden or doubled
+    assert _injected_dimensions(executor) == ["metric_time__day"]
+
+
+async def test_query_metrics_uses_single_time_group_for_compatible_metrics(adapter):
+    executor = _FakeExecutor()
+    adapter._backend = _FakeBackend(executor)
+
+    await adapter.query_metrics(["previous_month_order_count", "running_order_count"])
+
+    assert _injected_dimensions(executor) == ["metric_time__month"]
+
+
+async def test_query_metrics_rejects_conflicting_required_time_grains(adapter):
+    from datus_semantic_osi.errors import SemanticValidationException
+
+    executor = _FakeExecutor()
+    adapter._backend = _FakeBackend(executor)
+
+    with pytest.raises(SemanticValidationException) as excinfo:
+        await adapter.query_metrics(["running_order_count", "running_week_order_count"])
+
+    payload = excinfo.value.payload
+    assert payload.code == "metric_time_grain_conflict"
+    assert payload.metrics == ["running_order_count", "running_week_order_count"]
+    assert not executor.calls
+
+
+class InvalidQueryException(Exception):
+    """Stand-in matching MetricFlow's InvalidQueryException by class name."""
+
+
+class _RaisingExecutor:
+    def __init__(self, exc):
+        self._exc = exc
+        self.calls = []
+
+    async def query_metrics(self, metrics, **kwargs):
+        self.calls.append({"metrics": list(metrics), **kwargs})
+        raise self._exc
+
+
+async def test_query_metrics_maps_cumulative_rejection_to_structured(adapter):
+    from datus_semantic_osi.errors import SemanticValidationException
+
+    exc = InvalidQueryException(
+        "The query includes a cumulative metric 'running_order_count' that does not "
+        "accumulate over all-time, but the group-by items do not include 'metric_time'."
+    )
+    adapter._backend = _FakeBackend(_RaisingExecutor(exc))
+
+    with pytest.raises(SemanticValidationException) as excinfo:
+        await adapter.query_metrics(["order_count"])
+
+    payload = excinfo.value.payload
+    assert payload.error_type == "semantic_validation_error"
+    assert payload.code == "cumulative_requires_metric_time"
+    assert "metric_time" in payload.required_dimensions
+    assert payload.metrics == ["order_count"]
+
+
+async def test_query_metrics_maps_time_grain_required(adapter):
+    from datus_semantic_osi.errors import SemanticValidationException
+
+    exc = InvalidQueryException(
+        "For querying cumulative metric 'moving_3_month_avg', the granularity of "
+        "'metric_time__month' must be DAY"
+    )
+    adapter._backend = _FakeBackend(_RaisingExecutor(exc))
+
+    with pytest.raises(SemanticValidationException) as excinfo:
+        await adapter.query_metrics(["order_count"])
+
+    payload = excinfo.value.payload
+    assert payload.code == "time_grain_required"
+    assert payload.required_time_granularity == "day"
+    assert payload.required_dimensions == ["metric_time__day"]
+    assert payload.suggested_retry == {
+        "dimensions": ["metric_time__day"],
+        "time_granularity": "day",
+    }
+
+
+async def test_query_metrics_unknown_validation_error_stays_structured(adapter):
+    from datus_semantic_osi.errors import SemanticValidationException
+
+    exc = InvalidQueryException("some brand new validation rule not yet mapped")
+    adapter._backend = _FakeBackend(_RaisingExecutor(exc))
+
+    with pytest.raises(SemanticValidationException) as excinfo:
+        await adapter.query_metrics(["order_count"])
+
+    payload = excinfo.value.payload
+    assert payload.code == "validation_error"
+    assert "brand new validation rule" in payload.message
+
+
+async def test_query_metrics_infra_error_propagates_unwrapped(adapter):
+    adapter._backend = _FakeBackend(_RaisingExecutor(RuntimeError("connection lost")))
+
+    # non-validation failures must not be masked as validation errors
+    with pytest.raises(RuntimeError):
+        await adapter.query_metrics(["order_count"])
