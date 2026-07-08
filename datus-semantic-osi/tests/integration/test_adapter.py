@@ -1444,3 +1444,56 @@ async def test_query_metrics_infra_error_propagates_unwrapped(adapter):
     # non-validation failures must not be masked as validation errors
     with pytest.raises(RuntimeError):
         await adapter.query_metrics(["order_count"])
+
+
+class RequestTimeGranularityException(Exception):
+    """Stand-in matching MetricFlow's RequestTimeGranularityException by class name."""
+
+
+class UnableToSatisfyQueryError(Exception):
+    """Stand-in matching MetricFlow's UnableToSatisfyQueryError by class name."""
+
+
+class ExecutionException(Exception):
+    """Stand-in matching MetricFlow's runtime ExecutionException by class name."""
+
+
+async def test_query_metrics_classifies_granularity_exception(adapter):
+    from datus_semantic_osi.errors import SemanticValidationException
+
+    # MetricFlow raises RequestTimeGranularityException (not InvalidQuery*) for
+    # cumulative-metric grain rejections; it must still map to structured guidance.
+    exc = RequestTimeGranularityException(
+        "For querying cumulative metric 'running_activity_count', the granularity of "
+        "'metric_time__month' must be DAY"
+    )
+    adapter._backend = _FakeBackend(_RaisingExecutor(exc))
+
+    with pytest.raises(SemanticValidationException) as excinfo:
+        await adapter.query_metrics(["order_count"])
+
+    payload = excinfo.value.payload
+    assert payload.code == "time_grain_required"
+    assert payload.required_time_granularity == "day"
+    assert payload.required_dimensions == ["metric_time__day"]
+
+
+async def test_query_metrics_classifies_unsatisfiable_query_exception(adapter):
+    from datus_semantic_osi.errors import SemanticValidationException
+
+    exc = UnableToSatisfyQueryError("Recipe not found for linkable specs")
+    adapter._backend = _FakeBackend(_RaisingExecutor(exc))
+
+    with pytest.raises(SemanticValidationException) as excinfo:
+        await adapter.query_metrics(["order_count"])
+
+    assert excinfo.value.payload.code == "validation_error"
+    assert "Recipe not found" in excinfo.value.payload.message
+
+
+async def test_query_metrics_execution_exception_propagates_unwrapped(adapter):
+    # ExecutionException is a runtime/infra family, not a validation rejection.
+    adapter._backend = _FakeBackend(_RaisingExecutor(ExecutionException("SQL timeout")))
+
+    with pytest.raises(ExecutionException):
+        await adapter.query_metrics(["order_count"])
