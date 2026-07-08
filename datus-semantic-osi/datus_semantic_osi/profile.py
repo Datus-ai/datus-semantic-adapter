@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 from functools import lru_cache
 from importlib import resources
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
@@ -53,6 +53,7 @@ _METRIC_DATUS_HINT_KEYS = {
     "format",
     "unit",
     "non_additive_dimension",
+    "period_over_period",
     "metadata",
 } | _METRIC_METADATA_HINT_KEYS
 
@@ -115,6 +116,12 @@ class OSINonAdditiveDimension(BaseModel):
     window_groupings: List[str] = Field(default_factory=list)
 
 
+class OSIPeriodOverPeriod(BaseModel):
+    time_grain: Literal["day", "week", "month", "quarter", "year"]
+    offset_window: str
+    calculation: Literal["previous_value", "delta", "percent_change", "ratio"]
+
+
 class OSIMetric(BaseModel):
     name: str
     description: str = ""
@@ -134,6 +141,7 @@ class OSIMetric(BaseModel):
     format: Optional[str] = None
     unit: Optional[str] = None
     non_additive_dimension: Optional[OSINonAdditiveDimension] = None
+    period_over_period: Optional[OSIPeriodOverPeriod] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
     @property
@@ -566,6 +574,7 @@ def _core_metric_to_profile(
         "format",
         "unit",
         "non_additive_dimension",
+        "period_over_period",
     ):
         if key in hints:
             profile[key] = hints[key]
@@ -932,6 +941,7 @@ def to_core_schema_document(doc: OSIDocument) -> Dict[str, Any]:
             "format": metric.format,
             "unit": metric.unit,
             "non_additive_dimension": metric.non_additive_dimension,
+            "period_over_period": metric.period_over_period,
         }
         for key, value in metric.metadata.items():
             metric_hints.setdefault(key, value)

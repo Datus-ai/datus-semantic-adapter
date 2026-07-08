@@ -28,6 +28,7 @@ from datus_semantic_osi.ir import (
 )
 
 DEFAULT_OWNER = "datus@datus.ai"
+_PERIOD_OVER_PERIOD_BASE_PREFIX = "datus_pop_base"
 
 
 @dataclass
@@ -157,6 +158,9 @@ def _lower_data_source(
 
 
 def _lower_metric(metric: MetricIR) -> dict:
+    if metric.period_over_period is not None:
+        return _lower_period_over_period_metric(metric)
+
     body: dict = {"name": metric.name, "owners": [DEFAULT_OWNER]}
     if metric.description:
         body["description"] = metric.description
@@ -201,6 +205,58 @@ def _lower_metric(metric: MetricIR) -> dict:
             metric=metric.name,
         )
 
+    return {"metric": body}
+
+
+def period_over_period_base_metric_name(metric: MetricIR) -> str:
+    return f"{_PERIOD_OVER_PERIOD_BASE_PREFIX}_{metric.name}"
+
+
+def is_period_over_period_base_metric_name(metric_name: str) -> bool:
+    return str(metric_name).startswith(f"{_PERIOD_OVER_PERIOD_BASE_PREFIX}_")
+
+
+def _period_over_period_expression(metric_name: str, previous_alias: str, calculation: str) -> str:
+    if calculation == "previous_value":
+        return previous_alias
+    if calculation == "delta":
+        return f"{metric_name} - {previous_alias}"
+    if calculation == "percent_change":
+        return f"({metric_name} - {previous_alias}) / NULLIF({previous_alias}, 0)"
+    if calculation == "ratio":
+        return f"{metric_name} / NULLIF({previous_alias}, 0)"
+    raise OSIValidationError(
+        f"unsupported period_over_period calculation `{calculation}`.",
+        hint="Supported calculations: previous_value, delta, percent_change, ratio.",
+    )
+
+
+def _lower_period_over_period_metric(metric: MetricIR) -> dict:
+    pop = metric.period_over_period
+    if pop is None:  # pragma: no cover - caller guards this
+        raise OSIValidationError("period_over_period metric is missing semantics.", metric=metric.name)
+    base_name = period_over_period_base_metric_name(metric)
+    previous_alias = f"{base_name}_previous"
+    metric_inputs = [
+        {
+            "name": base_name,
+            "alias": previous_alias,
+            "offset_window": pop.offset_window,
+        }
+    ]
+    if pop.calculation != "previous_value":
+        metric_inputs.insert(0, {"name": base_name})
+    body: dict = {
+        "name": metric.name,
+        "owners": [DEFAULT_OWNER],
+        "type": "derived",
+        "type_params": {
+            "metrics": metric_inputs,
+            "expr": _period_over_period_expression(base_name, previous_alias, pop.calculation),
+        },
+    }
+    if metric.description:
+        body["description"] = metric.description
     return {"metric": body}
 
 
@@ -252,5 +308,14 @@ def lower_to_metricflow(model: SemanticModelIR) -> MetricFlowArtifact:
             )
         )
     for metric in model.metrics:
+        if metric.period_over_period is not None:
+            base_metric = metric.model_copy(
+                update={
+                    "name": period_over_period_base_metric_name(metric),
+                    "description": "",
+                    "period_over_period": None,
+                }
+            )
+            artifact.metric_docs.append(_lower_metric(base_metric))
         artifact.metric_docs.append(_lower_metric(metric))
     return artifact

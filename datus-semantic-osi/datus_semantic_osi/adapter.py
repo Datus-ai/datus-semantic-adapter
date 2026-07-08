@@ -11,6 +11,8 @@ thing users edit; backend artifacts are generated and disposable.
 
 from __future__ import annotations
 
+import calendar
+from datetime import date, datetime, timedelta
 import os
 import re
 from typing import Any, Dict, List, Optional, Sequence
@@ -39,6 +41,10 @@ from datus_semantic_osi.ir import (
     MetricKind,
     RelationshipIR,
     SemanticModelIR,
+)
+from datus_semantic_osi.metricflow_backend import (
+    is_period_over_period_base_metric_name,
+    period_over_period_base_metric_name,
 )
 from datus_semantic_osi.normalizer import NormalizationResult, normalize_document
 from datus_semantic_osi.profile import OSIDocument, load_osi_path
@@ -87,6 +93,8 @@ _SUPPORTED_VALIDATE_CHECKS = {
     "authoring_quality",
     "mutation_guard",
 }
+_TIME_GRAINS = {"day", "week", "month", "quarter", "year"}
+_OFFSET_WINDOW_RE = re.compile(r"^\s*(\d+)\s+([A-Za-z]+)s?\s*$")
 
 
 def _normalize_validate_checks(checks: Optional[List[str] | str]) -> List[str]:
@@ -145,6 +153,186 @@ class DatusOSIAdapter(BaseSemanticAdapter):
     def _find_metric(self, name: str) -> Optional[MetricIR]:
         return next((m for m in self._model().metrics if m.name == name), None)
 
+    @staticmethod
+    def _parse_date_boundary(value: Optional[str]) -> Optional[date]:
+        if not value:
+            return None
+        text = str(value).strip()
+        if not _SAFE_DATE_LITERAL_RE.match(text):
+            return None
+        try:
+            return datetime.fromisoformat(text.replace(" ", "T")).date()
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _format_date_boundary(value: date) -> str:
+        return value.isoformat()
+
+    @staticmethod
+    def _shift_months(value: date, months: int) -> date:
+        month_index = value.month - 1 + months
+        year = value.year + month_index // 12
+        month = month_index % 12 + 1
+        day = min(value.day, calendar.monthrange(year, month)[1])
+        return date(year, month, day)
+
+    @classmethod
+    def _shift_date_by_offset(cls, value: date, offset_window: str, *, direction: int) -> date:
+        match = _OFFSET_WINDOW_RE.match(str(offset_window or ""))
+        if not match:
+            raise ValueError(
+                f"Unsupported period_over_period offset_window `{offset_window}`. "
+                "Use '<number> day|week|month|quarter|year'."
+            )
+        count = int(match.group(1)) * direction
+        unit = match.group(2).lower()
+        if unit == "day":
+            return value + timedelta(days=count)
+        if unit == "week":
+            return value + timedelta(weeks=count)
+        if unit == "month":
+            return cls._shift_months(value, count)
+        if unit == "quarter":
+            return cls._shift_months(value, count * 3)
+        if unit == "year":
+            return cls._shift_months(value, count * 12)
+        raise ValueError(
+            f"Unsupported period_over_period offset_window `{offset_window}`. "
+            "Use '<number> day|week|month|quarter|year'."
+        )
+
+    def _period_over_period_metrics(self, model: SemanticModelIR, metrics: List[str]) -> List[MetricIR]:
+        by_name = {metric.name: metric for metric in model.metrics}
+        return [
+            metric
+            for metric_name in self._dedupe(metrics)
+            if (metric := by_name.get(metric_name)) is not None
+            and metric.period_over_period is not None
+        ]
+
+    @staticmethod
+    def _period_over_period_metadata(metrics: List[MetricIR]) -> Dict[str, Any]:
+        return {
+            metric.name: metric.period_over_period.model_dump()
+            for metric in metrics
+            if metric.period_over_period is not None
+        }
+
+    @classmethod
+    def _period_over_period_time_window(
+        cls,
+        metrics: List[MetricIR],
+        time_start: Optional[str],
+    ) -> Optional[str]:
+        start = cls._parse_date_boundary(time_start)
+        if start is None:
+            return time_start
+        shifted = [
+            cls._shift_date_by_offset(start, metric.period_over_period.offset_window, direction=-1)
+            for metric in metrics
+            if metric.period_over_period is not None
+        ]
+        return cls._format_date_boundary(min(shifted)) if shifted else time_start
+
+    @staticmethod
+    def _period_row_date(value: Any) -> Optional[date]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text.replace(" ", "T")).date()
+        except ValueError:
+            try:
+                return datetime.fromisoformat(text[:10]).date()
+            except ValueError:
+                return None
+
+    def _apply_period_over_period_query_contract(
+        self,
+        metrics: List[MetricIR],
+        dimensions: List[str],
+        time_granularity: Optional[str],
+        time_start: Optional[str],
+    ) -> tuple[List[str], Optional[str], Optional[str]]:
+        if not metrics:
+            return dimensions, time_granularity, time_start
+
+        grains = {
+            metric.period_over_period.time_grain
+            for metric in metrics
+            if metric.period_over_period is not None
+        }
+        if len(grains) != 1:
+            raise ValueError(
+                "A single query cannot mix period_over_period metrics with different time_grain values."
+            )
+        grain = next(iter(grains))
+        if grain not in _TIME_GRAINS:
+            raise ValueError(f"Unsupported period_over_period time_grain `{grain}`.")
+        normalized_requested_grain = str(time_granularity or "").strip().lower()
+        if normalized_requested_grain and normalized_requested_grain != grain:
+            raise ValueError(
+                f"Metric period_over_period time_grain is `{grain}`, but query requested "
+                f"time_granularity `{time_granularity}`."
+            )
+
+        period_dimension = f"metric_time__{grain}"
+        updated_dimensions = list(dimensions)
+        if not any(is_metric_time_dimension(dimension) for dimension in updated_dimensions):
+            updated_dimensions.append(period_dimension)
+
+        expanded_start = self._period_over_period_time_window(metrics, time_start)
+        return updated_dimensions, grain, expanded_start
+
+    def _filter_period_over_period_rows(
+        self,
+        result: QueryResult,
+        *,
+        dimensions: List[str],
+        time_start: Optional[str],
+        time_end: Optional[str],
+    ) -> QueryResult:
+        start = self._parse_date_boundary(time_start)
+        end = self._parse_date_boundary(time_end)
+        if start is None and end is None:
+            return result
+
+        time_column = next(
+            (
+                column
+                for dimension in dimensions
+                if is_metric_time_dimension(dimension)
+                and (column := dimension_output_column(dimension, result.columns))
+            ),
+            None,
+        )
+        if not time_column:
+            return result
+
+        filtered = []
+        for row in result.data:
+            row_date = self._period_row_date(row.get(time_column))
+            if row_date is None:
+                continue
+            if start is not None and row_date < start:
+                continue
+            if end is not None and row_date > end:
+                continue
+            filtered.append(row)
+
+        metadata = dict(result.metadata)
+        removed_rows = len(result.data) - len(filtered)
+        if removed_rows:
+            metadata["period_over_period_filtered_rows"] = removed_rows
+        return QueryResult(columns=list(result.columns), data=filtered, metadata=metadata)
+
     def _dataset_by_name(self) -> Dict[str, DatasetIR]:
         return {dataset.name: dataset for dataset in self._model().datasets}
 
@@ -201,6 +389,8 @@ class DatusOSIAdapter(BaseSemanticAdapter):
 
         if metric.expression:
             metadata["expr"] = metric.expression
+        if metric.period_over_period is not None:
+            metadata["period_over_period"] = metric.period_over_period.model_dump()
 
         if metric.inputs:
             inputs = []
@@ -247,6 +437,8 @@ class DatusOSIAdapter(BaseSemanticAdapter):
     def _metric_has_offset_dependency(
         self, metric: MetricIR, seen_metrics: Optional[set[str]] = None
     ) -> bool:
+        if metric.period_over_period is not None:
+            return True
         if metric.kind is not MetricKind.DERIVED:
             return bool(metric.offset_window)
 
@@ -270,6 +462,9 @@ class DatusOSIAdapter(BaseSemanticAdapter):
         self, metric: MetricIR, seen_metrics: Optional[set[str]] = None
     ) -> List[str]:
         """Return current-period metrics that bound offset-derived output rows."""
+        if metric.period_over_period is not None:
+            return [period_over_period_base_metric_name(metric)]
+
         if metric.kind is not MetricKind.DERIVED:
             return []
 
@@ -322,6 +517,7 @@ class DatusOSIAdapter(BaseSemanticAdapter):
             metric_name
             for metric_name in self._dedupe(anchor_metrics)
             if self._find_metric(metric_name) is not None
+            or is_period_over_period_base_metric_name(metric_name)
         ]
         hidden_anchor_metrics = [
             metric_name
@@ -840,12 +1036,26 @@ class DatusOSIAdapter(BaseSemanticAdapter):
         dry_run: bool = False,
     ) -> QueryResult:
         model = self._model()
+        period_over_period_metrics = self._period_over_period_metrics(model, metrics)
         live = getattr(self._backend, "has_live_connection", False)
         dimensions = dimensions or []
         policy = normalize_join_policy(join_policy)
 
         if zero_fill and policy != "dimension_preserving":
             raise ValueError("zero_fill requires join_policy='dimension_preserving'.")
+        if period_over_period_metrics and policy == "dimension_preserving":
+            raise ValueError(
+                "period_over_period metrics are not supported with join_policy='dimension_preserving'."
+            )
+
+        original_time_start = time_start
+        if period_over_period_metrics:
+            dimensions, time_granularity, time_start = self._apply_period_over_period_query_contract(
+                period_over_period_metrics,
+                dimensions,
+                time_granularity,
+                time_start,
+            )
 
         if dry_run and not live:
             if policy == "dimension_preserving":
@@ -883,10 +1093,15 @@ class DatusOSIAdapter(BaseSemanticAdapter):
                 where=where,
                 limit=limit,
             )
+            metadata = {"explain": True, "sql": sql}
+            if period_over_period_metrics:
+                metadata["period_over_period"] = self._period_over_period_metadata(period_over_period_metrics)
+                if time_start != original_time_start:
+                    metadata["period_over_period_expanded_time_start"] = time_start
             return QueryResult(
                 columns=["sql"],
                 data=[{"sql": sql}],
-                metadata={"explain": True, "sql": sql},
+                metadata=metadata,
             )
 
         if not live:
@@ -948,7 +1163,21 @@ class DatusOSIAdapter(BaseSemanticAdapter):
                 dry_run=dry_run,
             )
         if dry_run:
+            if period_over_period_metrics:
+                result.metadata["period_over_period"] = self._period_over_period_metadata(period_over_period_metrics)
+                if time_start != original_time_start:
+                    result.metadata["period_over_period_expanded_time_start"] = time_start
             return result
+        if period_over_period_metrics:
+            result.metadata["period_over_period"] = self._period_over_period_metadata(period_over_period_metrics)
+            if time_start != original_time_start:
+                result.metadata["period_over_period_expanded_time_start"] = time_start
+            result = self._filter_period_over_period_rows(
+                result,
+                dimensions=dimensions,
+                time_start=original_time_start,
+                time_end=time_end,
+            )
         result = self._filter_offset_anchor_rows(
             result,
             hidden_anchor_metrics=hidden_anchor_metrics,

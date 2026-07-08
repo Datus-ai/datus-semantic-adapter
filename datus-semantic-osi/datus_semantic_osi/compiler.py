@@ -30,6 +30,7 @@ from datus_semantic_osi.ir import (
     MetricIR,
     MetricKind,
     NonAdditiveDimensionIR,
+    PeriodOverPeriodIR,
     RelationshipIR,
     SemanticModelIR,
 )
@@ -59,6 +60,7 @@ _RESERVED_METRIC_METADATA_KEYS = {
     "window",
     "grain_to_date",
     "offset_window",
+    "period_over_period",
     "format",
     "unit",
 }
@@ -323,6 +325,36 @@ def _validate_metric_metadata(metric: OSIMetric) -> dict[str, object]:
 def _compile_metric(metric: OSIMetric) -> MetricIR:
     kind = (metric.kind or "").lower()
 
+    if metric.period_over_period is not None:
+        if kind in {"derived", "ratio"}:
+            raise OSIValidationError(
+                "declares period_over_period with an incompatible metric kind.",
+                metric=metric.name,
+                hint="Use a base aggregate expression plus DATUS period_over_period, "
+                "without metric_kind derived/ratio.",
+            )
+        if metric.inputs:
+            raise OSIValidationError(
+                "declares period_over_period and metric inputs.",
+                metric=metric.name,
+                hint="A fixed period-over-period metric must be self-contained; "
+                "remove inputs and keep only the base aggregate expression.",
+            )
+        if metric.numerator or metric.denominator:
+            raise OSIValidationError(
+                "declares period_over_period with numerator/denominator.",
+                metric=metric.name,
+                hint="Encode the base calculation in `expression`; do not combine "
+                "period_over_period with ratio input fields.",
+            )
+        if metric.window or metric.grain_to_date:
+            raise OSIValidationError(
+                "declares period_over_period with window/grain_to_date.",
+                metric=metric.name,
+                hint="Period-over-period and rolling/cumulative metrics are distinct "
+                "fixed metric types; define separate metrics.",
+            )
+
     if kind == "derived":
         if not metric.expression:
             raise OSIValidationError(
@@ -373,6 +405,12 @@ def _compile_metric(metric: OSIMetric) -> MetricIR:
     metric_ir.window = metric.window
     metric_ir.grain_to_date = metric.grain_to_date
     metric_ir.offset_window = metric.offset_window
+    if metric.period_over_period is not None:
+        metric_ir.period_over_period = PeriodOverPeriodIR(
+            time_grain=metric.period_over_period.time_grain,
+            offset_window=metric.period_over_period.offset_window,
+            calculation=metric.period_over_period.calculation,
+        )
     metric_ir.format = metric.format
     metric_ir.unit = metric.unit
     metric_ir.metadata.update(_validate_metric_metadata(metric))

@@ -142,7 +142,9 @@ class MetricFlowAdapter(BaseSemanticAdapter):
             "username": db_config.get("username", ""),
             "password": db_config.get("password", ""),
             "database": db_config.get("database") or db_config.get("database_name", ""),
-            "schema": db_config.get("schema") or db_config.get("db_schema") or db_config.get("schema_name", ""),
+            "schema": db_config.get("schema")
+            or db_config.get("db_schema")
+            or db_config.get("schema_name", ""),
             "uri": db_config.get("uri", ""),
             "warehouse": db_config.get("warehouse", ""),
             "account": db_config.get("account", ""),
@@ -616,6 +618,7 @@ class MetricFlowAdapter(BaseSemanticAdapter):
             Query result
         """
         client = self._ensure_client_ready()
+        query_metric_names = metrics
 
         # Helper to convert "null" string to None
         def _normalize_null(value):
@@ -631,7 +634,7 @@ class MetricFlowAdapter(BaseSemanticAdapter):
 
         query_dimensions, order_list = self._canonicalize_time_query_params(
             client=client,
-            metrics=metrics,
+            metrics=query_metric_names,
             dimensions=dimensions,
             order_by=order_by,
             granularity=granularity,
@@ -640,7 +643,7 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         if dry_run:
             # Use explain to get SQL without executing
             result = client.explain(
-                metrics=metrics,
+                metrics=query_metric_names,
                 dimensions=query_dimensions,
                 start_time=start_time,
                 end_time=end_time,
@@ -650,19 +653,20 @@ class MetricFlowAdapter(BaseSemanticAdapter):
             )
             # Return SQL as result
             sql = result.rendered_sql_without_descriptions.sql_query
+            metadata = {"explain": True, "sql": sql}
             return QueryResult(
                 columns=["sql"],
                 data=[{"sql": sql}],
-                metadata={"explain": True, "sql": sql},
+                metadata=metadata,
             )
         else:
             # Execute the query
             logger.debug(
-                f"Executing query: metrics={metrics}, dimensions={query_dimensions}, "
+                f"Executing query: metrics={query_metric_names}, dimensions={query_dimensions}, "
                 f"start_time={start_time}, end_time={end_time}, where={where_clause}, limit={limit}"
             )
             result = client.query(
-                metrics=metrics,
+                metrics=query_metric_names,
                 dimensions=query_dimensions,
                 start_time=start_time,
                 end_time=end_time,
@@ -679,13 +683,14 @@ class MetricFlowAdapter(BaseSemanticAdapter):
                 columns = result.result_df.columns.tolist()
                 # Convert to list of dicts (QueryResult.data expects List[Dict[str, Any]])
                 data = result.result_df.to_dict(orient="records")
+                metadata = {"dataflow_plan": result.dataflow_plan}
                 return QueryResult(
                     columns=columns,
                     data=data,
-                    metadata={"dataflow_plan": result.dataflow_plan},
+                    metadata=metadata,
                 )
             else:
-                return QueryResult(columns=[], data=[])
+                return QueryResult(columns=[], data=[], metadata={})
 
     async def validate_semantic(
         self,
