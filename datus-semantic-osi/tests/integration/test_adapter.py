@@ -147,6 +147,16 @@ metrics:
       offset_window: "1 week"
       calculation: delta
     subject_path: [commerce, orders]
+  - name: running_week_order_count
+    description: "Running weekly order count"
+    expression: "COUNT(DISTINCT order_id)"
+    dataset: orders
+    grain_to_date: week
+    custom_extensions:
+      - vendor_name: DATUS
+        data:
+          window_aggregation: sum
+    subject_path: [commerce, orders]
 """
 
 
@@ -260,6 +270,7 @@ async def test_list_metrics_selects_subject_path(adapter):
         "previous_month_order_count",
         "order_count_month_yoy",
         "order_count_week_wow_delta",
+        "running_week_order_count",
     }
 
 
@@ -1332,6 +1343,30 @@ async def test_query_metrics_time_grouping_is_idempotent(adapter):
 
     # caller's explicit metric_time grain is respected, not overridden or doubled
     assert _injected_dimensions(executor) == ["metric_time__day"]
+
+
+async def test_query_metrics_uses_single_time_group_for_compatible_metrics(adapter):
+    executor = _FakeExecutor()
+    adapter._backend = _FakeBackend(executor)
+
+    await adapter.query_metrics(["previous_month_order_count", "running_order_count"])
+
+    assert _injected_dimensions(executor) == ["metric_time__month"]
+
+
+async def test_query_metrics_rejects_conflicting_required_time_grains(adapter):
+    from datus_semantic_osi.errors import SemanticValidationException
+
+    executor = _FakeExecutor()
+    adapter._backend = _FakeBackend(executor)
+
+    with pytest.raises(SemanticValidationException) as excinfo:
+        await adapter.query_metrics(["running_order_count", "running_week_order_count"])
+
+    payload = excinfo.value.payload
+    assert payload.code == "metric_time_grain_conflict"
+    assert payload.metrics == ["running_order_count", "running_week_order_count"]
+    assert not executor.calls
 
 
 class InvalidQueryException(Exception):

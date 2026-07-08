@@ -9,6 +9,7 @@ import os
 import yaml
 
 from datus_semantic_core import BaseSemanticAdapter
+from datus_semantic_core.models import SemanticValidationError
 from datus_semantic_metricflow.config import MetricFlowConfig
 from datus_semantic_metricflow.models import (
     DimensionInfo,
@@ -26,7 +27,7 @@ from metricflow.configuration.dict_config_handler import (
     build_config_dict_from_db_params,
 )
 from metricflow.naming.linkable_spec_name import StructuredLinkableSpecName
-from metricflow.references import MetricReference
+from metricflow.references import MetricReference, TimeDimensionReference
 
 try:
     from metricflow.configuration.dict_config_handler import build_config_dict_from_datus_datasource
@@ -34,6 +35,14 @@ except ImportError:
     build_config_dict_from_datus_datasource = None
 
 logger = logging.getLogger(__name__)
+
+
+class MetricFlowSemanticValidationException(Exception):
+    """A deterministic MetricFlow query validation rejection with structured payload."""
+
+    def __init__(self, payload: SemanticValidationError):
+        self.payload = payload
+        super().__init__(payload.message or "semantic validation error")
 
 
 class MetricFlowAdapter(BaseSemanticAdapter):
@@ -485,6 +494,292 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         value = str(granularity).strip().lower()
         return value or None
 
+    _TIME_GRAINS = ("day", "week", "month", "quarter", "year")
+
+    @classmethod
+    def _time_grain_from_text(cls, value: Any) -> Optional[str]:
+        text = str(cls._metricflow_metadata_value(value) or "").lower()
+        for grain in cls._TIME_GRAINS:
+            if grain in text:
+                return grain
+        return None
+
+    @staticmethod
+    def _is_metric_time_dimension(name: str) -> bool:
+        parsed = StructuredLinkableSpecName.from_name(str(name).lower())
+        return parsed.element_name == "metric_time"
+
+    @classmethod
+    def _metric_type_name(cls, metric: Any) -> str:
+        value = cls._metricflow_metadata_value(getattr(metric, "type", None))
+        return str(value or "").lower()
+
+    @staticmethod
+    def _metric_name(metric: Any) -> str:
+        name = getattr(metric, "name", None) or getattr(metric, "element_name", None)
+        return str(name or "").strip()
+
+    @classmethod
+    def _metric_input_metrics(cls, metric: Any) -> List[Any]:
+        input_metrics = getattr(metric, "input_metrics", None)
+        if input_metrics is not None:
+            return list(input_metrics or [])
+        type_params = getattr(metric, "type_params", None)
+        return list(getattr(type_params, "metrics", None) or [])
+
+    @classmethod
+    def _cumulative_query_grain(cls, client, metric_name: str) -> Optional[str]:
+        try:
+            solver = client.engine._query_parser._time_granularity_solver
+            local_dimension_granularity_range = solver.local_dimension_granularity_range
+            if not callable(local_dimension_granularity_range):
+                raise AttributeError("local_dimension_granularity_range is not callable")
+        except AttributeError as exc:
+            raise MetricFlowSemanticValidationException(
+                SemanticValidationError(
+                    code="metricflow_time_grain_resolver_unavailable",
+                    metrics=[metric_name],
+                    message=(
+                        "Installed datus-metricflow does not expose the time-grain "
+                        "resolver required to query cumulative metrics safely. "
+                        "Install a compatible datus-metricflow build before querying "
+                        f"metric `{metric_name}`."
+                    ),
+                )
+            ) from exc
+
+        try:
+            _, query_granularity = local_dimension_granularity_range(
+                metric_references=[MetricReference(element_name=metric_name)],
+                local_time_dimension_reference=TimeDimensionReference(element_name="metric_time"),
+            )
+        except Exception as exc:
+            raise MetricFlowSemanticValidationException(
+                SemanticValidationError(
+                    code="metricflow_time_grain_resolution_failed",
+                    metrics=[metric_name],
+                    message=(
+                        "Failed to resolve the metric_time grain required to query "
+                        f"cumulative metric `{metric_name}`: {exc}"
+                    ),
+                )
+            ) from exc
+        grain = cls._time_grain_from_text(query_granularity)
+        if not grain:
+            raise MetricFlowSemanticValidationException(
+                SemanticValidationError(
+                    code="metricflow_time_grain_resolution_failed",
+                    metrics=[metric_name],
+                    message=(
+                        "MetricFlow returned an unsupported metric_time grain for "
+                        f"cumulative metric `{metric_name}`: {query_granularity}"
+                    ),
+                )
+            )
+        return grain
+
+    @classmethod
+    def _metric_catalog_for_query(cls, client, metrics: List[str]) -> Dict[str, Any]:
+        try:
+            metric_semantics = client.semantic_model.metric_semantics
+            metric_refs = getattr(metric_semantics, "metric_references", None)
+            if not isinstance(metric_refs, (list, tuple)):
+                metric_refs = [MetricReference(element_name=metric) for metric in metrics]
+            full_metrics = client.semantic_model.metric_semantics.get_metrics(metric_refs)
+        except Exception:
+            return {}
+        if not isinstance(full_metrics, (list, tuple)):
+            return {}
+        return {
+            name: metric
+            for metric in full_metrics
+            if (name := cls._metric_name(metric))
+        }
+
+    @classmethod
+    def _metric_has_offset_dependency(
+        cls,
+        metric: Any,
+        catalog: Dict[str, Any],
+        seen_metrics: Optional[Set[str]] = None,
+    ) -> bool:
+        for input_metric in cls._metric_input_metrics(metric):
+            if getattr(input_metric, "offset_window", None) or getattr(input_metric, "offset_to_grain", None):
+                return True
+
+        seen_metrics = seen_metrics or set()
+        metric_name = cls._metric_name(metric)
+        if not metric_name or metric_name in seen_metrics:
+            return False
+        seen_metrics.add(metric_name)
+
+        for input_metric in cls._metric_input_metrics(metric):
+            referenced_name = str(getattr(input_metric, "name", "") or "").strip()
+            referenced = catalog.get(referenced_name)
+            if referenced is not None and cls._metric_has_offset_dependency(
+                referenced, catalog, seen_metrics
+            ):
+                return True
+        return False
+
+    @classmethod
+    def _metric_requires_time_dimension(cls, metric: Any, catalog: Dict[str, Any]) -> bool:
+        type_params = getattr(metric, "type_params", None)
+        if cls._metric_type_name(metric) == "cumulative":
+            return bool(
+                getattr(type_params, "window", None)
+                or getattr(type_params, "grain_to_date", None)
+            )
+        return cls._metric_has_offset_dependency(metric, catalog)
+
+    @classmethod
+    def _static_required_grains(
+        cls,
+        metric: Any,
+        catalog: Optional[Dict[str, Any]] = None,
+        seen_metrics: Optional[Set[str]] = None,
+    ) -> Set[str]:
+        type_params = getattr(metric, "type_params", None)
+        grains: Set[str] = set()
+        if cls._metric_type_name(metric) != "cumulative":
+            for source in (
+                getattr(type_params, "grain_to_date", None),
+                getattr(type_params, "window", None),
+                getattr(metric, "grain_to_date", None),
+                getattr(metric, "window", None),
+            ):
+                grain = cls._time_grain_from_text(source)
+                if grain:
+                    grains.add(grain)
+
+        for input_metric in cls._metric_input_metrics(metric):
+            for source in (
+                getattr(input_metric, "offset_window", None),
+                getattr(input_metric, "offset_to_grain", None),
+            ):
+                grain = cls._time_grain_from_text(source)
+                if grain:
+                    grains.add(grain)
+
+        catalog = catalog or {}
+        seen_metrics = seen_metrics or set()
+        metric_name = cls._metric_name(metric)
+        if not metric_name or metric_name in seen_metrics:
+            return grains
+        seen_metrics.add(metric_name)
+
+        for input_metric in cls._metric_input_metrics(metric):
+            referenced_name = str(getattr(input_metric, "name", "") or "").strip()
+            referenced = catalog.get(referenced_name)
+            if referenced is not None:
+                grains.update(
+                    cls._static_required_grains(referenced, catalog, seen_metrics)
+                )
+        return grains
+
+    @classmethod
+    def _ensure_time_grouping(
+        cls,
+        client,
+        metrics: List[str],
+        dimensions: Optional[List[str]],
+        time_granularity: Optional[str],
+    ) -> Tuple[List[str], Optional[str]]:
+        dims = list(dimensions or [])
+        if any(cls._is_metric_time_dimension(dimension) for dimension in dims):
+            return dims, time_granularity
+
+        catalog = cls._metric_catalog_for_query(client, metrics)
+        if not catalog:
+            return dims, time_granularity
+
+        required_metrics: List[str] = []
+        required_grains: Dict[str, List[str]] = {}
+        for name in metrics:
+            metric = catalog.get(name)
+            if metric is None or not cls._metric_requires_time_dimension(metric, catalog):
+                continue
+            required_metrics.append(name)
+            grains = cls._static_required_grains(metric, catalog)
+            if cls._metric_type_name(metric) == "cumulative":
+                cumulative_grain = cls._cumulative_query_grain(client, name)
+                if cumulative_grain:
+                    grains.add(cumulative_grain)
+            for grain in grains:
+                required_grains.setdefault(grain, []).append(name)
+
+        if not required_metrics:
+            return dims, time_granularity
+        if len(required_grains) > 1:
+            details = ", ".join(
+                f"{grain}: {', '.join(names)}"
+                for grain, names in sorted(required_grains.items())
+            )
+            raise MetricFlowSemanticValidationException(
+                SemanticValidationError(
+                    code="metric_time_grain_conflict",
+                    metrics=required_metrics,
+                    message=(
+                        "Requested metrics require incompatible metric_time grains "
+                        f"({details}). Query compatible metric groups separately."
+                    ),
+                )
+            )
+
+        grain = next(iter(required_grains), None) or time_granularity
+        dims.append(f"metric_time__{grain}" if grain else "metric_time")
+        return dims, time_granularity or grain
+
+    @staticmethod
+    def _is_query_validation_error(exc: BaseException) -> bool:
+        return any(
+            "InvalidQuery" in klass.__name__
+            or "UnableToSatisfyQuery" in klass.__name__
+            for klass in type(exc).__mro__
+        )
+
+    @classmethod
+    def _semantic_validation_error_from(
+        cls, exc: BaseException, metrics: List[str]
+    ) -> Optional[SemanticValidationError]:
+        if not cls._is_query_validation_error(exc):
+            return None
+        text = str(exc)
+        lowered = text.lower()
+        code = "validation_error"
+        required_dimensions: List[str] = []
+        required_grain: Optional[str] = None
+        if "granularity" in lowered and "must be" in lowered:
+            code = "time_grain_required"
+            required_grain = cls._time_grain_from_text(
+                lowered.split("must be", 1)[1]
+            )
+            if required_grain:
+                required_dimensions = [f"metric_time__{required_grain}"]
+        elif "metric_time" in lowered and ("offset" in lowered or "derived" in lowered):
+            code = "offset_requires_metric_time"
+            required_dimensions = ["metric_time"]
+        elif "metric_time" in lowered and (
+            "cumulative" in lowered or "accumulat" in lowered
+        ):
+            code = "cumulative_requires_metric_time"
+            required_dimensions = ["metric_time"]
+
+        suggested = None
+        if required_dimensions or required_grain:
+            suggested = {
+                "dimensions": required_dimensions,
+                "time_granularity": required_grain,
+            }
+        return SemanticValidationError(
+            code=code,
+            metrics=list(metrics),
+            required_dimensions=required_dimensions,
+            required_time_granularity=required_grain,
+            suggested_retry=suggested,
+            message=text,
+        )
+
     @staticmethod
     def _time_dimension_names_for_metrics(client, metrics: List[str]) -> Set[str]:
         """Return queryable time dimension names for the metric set.
@@ -631,6 +926,12 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         end_time = _normalize_null(time_end)
         granularity = self._normalize_time_granularity(_normalize_null(time_granularity))
         where_clause = _normalize_null(where)
+        dimensions, granularity = self._ensure_time_grouping(
+            client=client,
+            metrics=metrics,
+            dimensions=dimensions,
+            time_granularity=granularity,
+        )
 
         query_dimensions, order_list = self._canonicalize_time_query_params(
             client=client,
@@ -642,15 +943,21 @@ class MetricFlowAdapter(BaseSemanticAdapter):
 
         if dry_run:
             # Use explain to get SQL without executing
-            result = client.explain(
-                metrics=query_metric_names,
-                dimensions=query_dimensions,
-                start_time=start_time,
-                end_time=end_time,
-                where=where_clause,
-                limit=limit,
-                order=order_list,
-            )
+            try:
+                result = client.explain(
+                    metrics=query_metric_names,
+                    dimensions=query_dimensions,
+                    start_time=start_time,
+                    end_time=end_time,
+                    where=where_clause,
+                    limit=limit,
+                    order=order_list,
+                )
+            except Exception as exc:
+                payload = self._semantic_validation_error_from(exc, query_metric_names)
+                if payload is None:
+                    raise
+                raise MetricFlowSemanticValidationException(payload) from exc
             # Return SQL as result
             sql = result.rendered_sql_without_descriptions.sql_query
             metadata = {"explain": True, "sql": sql}
@@ -665,15 +972,21 @@ class MetricFlowAdapter(BaseSemanticAdapter):
                 f"Executing query: metrics={query_metric_names}, dimensions={query_dimensions}, "
                 f"start_time={start_time}, end_time={end_time}, where={where_clause}, limit={limit}"
             )
-            result = client.query(
-                metrics=query_metric_names,
-                dimensions=query_dimensions,
-                start_time=start_time,
-                end_time=end_time,
-                where=where_clause,
-                limit=limit,
-                order=order_list,
-            )
+            try:
+                result = client.query(
+                    metrics=query_metric_names,
+                    dimensions=query_dimensions,
+                    start_time=start_time,
+                    end_time=end_time,
+                    where=where_clause,
+                    limit=limit,
+                    order=order_list,
+                )
+            except Exception as exc:
+                payload = self._semantic_validation_error_from(exc, query_metric_names)
+                if payload is None:
+                    raise
+                raise MetricFlowSemanticValidationException(payload) from exc
             logger.debug(
                 f"Query result: result_df={result.result_df is not None}, empty={result.result_df.empty if result.result_df is not None else 'N/A'}"
             )

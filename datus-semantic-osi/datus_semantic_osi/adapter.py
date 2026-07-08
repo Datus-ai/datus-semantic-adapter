@@ -516,38 +516,56 @@ class DatusOSIAdapter(BaseSemanticAdapter):
     def _requires_time_dimension(self, metric: MetricIR) -> bool:
         """Metrics whose definition mandates a metric_time group-by.
 
-        A cumulative metric (window / grain_to_date) or any metric with an
-        offset dependency is invalid in MetricFlow unless queried with
-        metric_time. This is fully determined by the metric definition, so the
-        adapter is responsible for satisfying it instead of the caller.
+        A cumulative metric (window / grain_to_date), period-over-period
+        metric, or any metric with an offset dependency is invalid in
+        MetricFlow unless queried with metric_time. This is fully determined by
+        the metric definition, so the adapter is responsible for satisfying it
+        instead of the caller.
         """
         return (
             metric.kind is MetricKind.CUMULATIVE
             or self._metric_has_offset_dependency(metric)
         )
 
-    def _static_required_grain(self, metric: MetricIR) -> Optional[str]:
-        """Required time grain derivable from the metric definition.
+    def _static_required_grains(
+        self, metric: MetricIR, seen_metrics: Optional[set[str]] = None
+    ) -> set[str]:
+        """Required time grains derivable from the metric definition.
 
         Window / cumulative metrics are post-processed over their base metric at
         the window's own grain (a ``3 months`` moving average rolls over monthly
         rows), so the window/grain_to_date unit is the correct grouping grain
-        here, matching how the metric is executed. Returns ``None`` only when no
-        grain can be read, in which case a bare metric_time grouping is injected
-        and the backend picks the grain.
+        here, matching how the metric is executed.
         """
+        grains: set[str] = set()
+        if metric.period_over_period is not None:
+            grain = metric.period_over_period.time_grain
+            if grain:
+                grains.add(grain)
+
         for source in (metric.grain_to_date, metric.window, metric.offset_window):
             grain = self._time_grain_from_text(source)
             if grain:
-                return grain
-        offset_windows = {
-            input_metric.offset_window
-            for input_metric in metric.inputs
-            if input_metric.offset_window
-        }
-        if len(offset_windows) == 1:
-            return self._time_grain_from_text(next(iter(offset_windows)))
-        return None
+                grains.add(grain)
+
+        seen_metrics = seen_metrics or set()
+        if metric.name in seen_metrics:
+            return grains
+        seen_metrics.add(metric.name)
+
+        for input_metric in metric.inputs:
+            for source in (
+                input_metric.offset_window,
+                getattr(input_metric, "offset_to_grain", None),
+            ):
+                grain = self._time_grain_from_text(source)
+                if grain:
+                    grains.add(grain)
+
+            referenced = self._find_metric(input_metric.name)
+            if referenced is not None:
+                grains.update(self._static_required_grains(referenced, seen_metrics))
+        return grains
 
     def _ensure_time_grouping(
         self,
@@ -564,14 +582,40 @@ class DatusOSIAdapter(BaseSemanticAdapter):
         dims = list(dimensions or [])
         if any(is_metric_time_dimension(dimension) for dimension in dims):
             return dims, time_granularity
+
+        required_metrics: List[str] = []
+        required_grains: Dict[str, List[str]] = {}
         for name in metrics:
             metric = self._find_metric(name)
+            if metric is not None and metric.period_over_period is not None:
+                continue
             if metric is None or not self._requires_time_dimension(metric):
                 continue
-            grain = self._static_required_grain(metric) or time_granularity
-            dims.append(metric_time_dimension_for_granularity(grain) or "metric_time")
-            return dims, time_granularity or grain
-        return dims, time_granularity
+            required_metrics.append(name)
+            for grain in self._static_required_grains(metric):
+                required_grains.setdefault(grain, []).append(name)
+
+        if not required_metrics:
+            return dims, time_granularity
+        if len(required_grains) > 1:
+            details = ", ".join(
+                f"{grain}: {', '.join(names)}"
+                for grain, names in sorted(required_grains.items())
+            )
+            raise SemanticValidationException(
+                SemanticValidationError(
+                    code="metric_time_grain_conflict",
+                    metrics=required_metrics,
+                    message=(
+                        "Requested metrics require incompatible metric_time grains "
+                        f"({details}). Query compatible metric groups separately."
+                    ),
+                )
+            )
+
+        grain = next(iter(required_grains), None) or time_granularity
+        dims.append(metric_time_dimension_for_granularity(grain) or "metric_time")
+        return dims, time_granularity or grain
 
     @staticmethod
     def _is_query_validation_error(exc: BaseException) -> bool:
