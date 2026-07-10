@@ -33,6 +33,7 @@ from datus_semantic_core.models import (
 from datus_semantic_osi.backend import make_backend
 from datus_semantic_osi.compiler import compile_document
 from datus_semantic_osi.config import DatusOSIConfig
+from datus_semantic_osi.dialects import resolve_sqlglot_dialect
 from datus_semantic_osi.errors import (
     OSIError,
     OSIValidationError,
@@ -65,6 +66,7 @@ from datus_semantic_osi.query_window import (
     query_window_metrics,
 )
 from datus_semantic_osi.validator import (
+    detect_nonportable_functions,
     validate_authoring_quality,
     validate_capabilities,
     validate_ir,
@@ -131,6 +133,7 @@ class DatusOSIAdapter(BaseSemanticAdapter):
     def __init__(self, config: DatusOSIConfig):
         super().__init__(config, service_type="osi")
         self.config = config
+        self._dialect = resolve_sqlglot_dialect(config.datasource)
         self._backend = make_backend(
             config.execution_backend,
             generated_path=config.generated_path,
@@ -156,7 +159,7 @@ class DatusOSIAdapter(BaseSemanticAdapter):
 
     def _model(self) -> SemanticModelIR:
         if self._model_cache is None:
-            self._model_cache = compile_document(self._load_document())
+            self._model_cache = compile_document(self._load_document(), dialect=self._dialect)
         return self._model_cache
 
     def _find_metric(self, name: str) -> Optional[MetricIR]:
@@ -862,14 +865,13 @@ class DatusOSIAdapter(BaseSemanticAdapter):
             raise ValueError(f"{label} must be an ISO date or timestamp literal")
         return "'" + text.replace("'", "''") + "'"
 
-    @staticmethod
-    def _runtime_where_sql(where: Optional[str]) -> Optional[str]:
+    def _runtime_where_sql(self, where: Optional[str]) -> Optional[str]:
         if not where:
             return None
         text = str(where).strip()
         if text.lower().startswith("where "):
             text = text[6:].strip()
-        parsed = sqlglot.parse(text, read="starrocks")
+        parsed = sqlglot.parse(text, read=self._dialect)
         if len(parsed) != 1:
             raise ValueError("where must contain exactly one SQL predicate expression")
         expression = parsed[0]
@@ -882,14 +884,13 @@ class DatusOSIAdapter(BaseSemanticAdapter):
             for node in expression.walk()
         ):
             raise ValueError("where must not contain nested queries or SQL commands")
-        return expression.sql(dialect="starrocks")
+        return expression.sql(dialect=self._dialect)
 
-    @staticmethod
-    def _profile_sql_expression(value: str, *, label: str) -> str:
+    def _profile_sql_expression(self, value: str, *, label: str) -> str:
         text = str(value or "").strip()
         if _SAFE_IDENTIFIER_RE.fullmatch(text.strip("`")):
             return DatusOSIAdapter._sql_identifier(text, label=label)
-        parsed = sqlglot.parse(text, read="starrocks")
+        parsed = sqlglot.parse(text, read=self._dialect)
         if len(parsed) != 1:
             raise ValueError(f"{label} must contain exactly one SQL expression")
         expression = parsed[0]
@@ -902,7 +903,7 @@ class DatusOSIAdapter(BaseSemanticAdapter):
             for node in expression.walk()
         ):
             raise ValueError(f"{label} must not contain nested queries or SQL commands")
-        return expression.sql(dialect="starrocks")
+        return expression.sql(dialect=self._dialect)
 
     @staticmethod
     def _relationship_dimension_key(
@@ -1480,6 +1481,10 @@ class DatusOSIAdapter(BaseSemanticAdapter):
                 ValidationIssue(severity="error", message=m)
                 for m in validate_profile(doc)
             )
+            issues.extend(
+                ValidationIssue(severity="warning", message=m)
+                for m in detect_nonportable_functions(doc, dialect=self._dialect)
+            )
         if "authoring_quality" in checks_list:
             issues.extend(
                 ValidationIssue(severity="error", message=m)
@@ -1500,7 +1505,7 @@ class DatusOSIAdapter(BaseSemanticAdapter):
 
         # Stage 2: compile to IR (business-semantic errors fail fast).
         try:
-            model = compile_document(doc)
+            model = compile_document(doc, dialect=self._dialect)
         except OSIValidationError as e:
             issues.append(ValidationIssue(severity="error", message=str(e)))
             return ValidationResult(valid=False, issues=issues)

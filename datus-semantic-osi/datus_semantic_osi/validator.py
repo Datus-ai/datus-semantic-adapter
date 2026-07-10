@@ -13,6 +13,10 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
+import sqlglot
+from sqlglot import expressions as exp
+
+from datus_semantic_osi.dialects import DEFAULT_SQLGLOT_DIALECT
 from datus_semantic_osi.errors import OSIValidationError
 from datus_semantic_osi.ir import MetricKind, SemanticModelIR
 from datus_semantic_osi.normalizer import normalization_errors
@@ -23,6 +27,37 @@ from datus_semantic_osi.window_semantics import (
     metadata_str,
     window_aggregation,
 )
+
+
+def detect_nonportable_functions(
+    doc: OSIDocument, *, dialect: str = DEFAULT_SQLGLOT_DIALECT
+) -> List[str]:
+    """Warn about metric expressions using functions sqlglot cannot transpile.
+
+    sqlglot parses unknown functions as ``Anonymous`` nodes and emits them
+    unchanged for every target dialect, so they break on engines that lack the
+    function (e.g. ``FIND_IN_SET`` outside the MySQL family). These are the
+    expressions that are not portable across datasources.
+    """
+    warnings: List[str] = []
+    for metric in doc.metrics:
+        expression = getattr(metric, "expression", None)
+        if not expression:
+            continue
+        try:
+            tree = sqlglot.parse_one(expression, read=dialect)
+        except Exception:  # noqa: BLE001 - parse errors surface elsewhere
+            continue
+        if tree is None:
+            continue
+        names = sorted({node.name.upper() for node in tree.find_all(exp.Anonymous) if node.name})
+        if names:
+            warnings.append(
+                f"Metric `{metric.name}` uses function(s) {names} that sqlglot cannot "
+                f"translate across dialects; the expression is bound to the `{dialect}` "
+                "engine and will not port to other datasources without a manual equivalent."
+            )
+    return warnings
 
 
 def validate_profile(doc: OSIDocument) -> List[str]:

@@ -20,6 +20,7 @@ from datus_semantic_osi.ir import (
 from datus_semantic_osi.profile import parse_osi_profile as parse_osi
 from datus_semantic_osi.profile import to_core_schema_document
 from datus_semantic_osi.validator import (
+    detect_nonportable_functions,
     ensure_valid,
     validate_authoring_quality,
     validate_capabilities,
@@ -416,3 +417,28 @@ def test_capabilities_reject_unsupported_metric_kind():
 def test_ensure_valid_raises_business_error():
     with pytest.raises(OSIValidationError):
         ensure_valid(["something is wrong"])
+
+
+class _M:
+    def __init__(self, name, expression):
+        self.name = name
+        self.expression = expression
+
+
+class _Doc:
+    def __init__(self, metrics):
+        self.metrics = metrics
+
+
+def test_detect_nonportable_functions_flags_untranslatable():
+    doc = _Doc(
+        [
+            _M("m1", "COUNT(DISTINCT CASE WHEN FIND_IN_SET('1', tags) THEN id END)"),
+            _M("m2", "AVG(DATEDIFF(a, b))"),  # non-ANSI but sqlglot-translatable
+            _M("m3", "SUM(amount)"),  # portable
+            _M("m4", None),  # ratio-style, no expression
+        ]
+    )
+    warnings = detect_nonportable_functions(doc, dialect="starrocks")
+    assert len(warnings) == 1
+    assert "m1" in warnings[0] and "FIND_IN_SET" in warnings[0]
