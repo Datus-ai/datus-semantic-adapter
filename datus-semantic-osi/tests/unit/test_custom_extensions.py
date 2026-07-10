@@ -50,3 +50,39 @@ def test_ratio_hints_compile_to_ratio_ir():
     assert metric.numerator == "paid_revenue"
     assert metric.denominator == "order_count"
     assert metric.metadata["window_aggregation"] == "avg"
+
+
+# SaaS attaches uid/owner identity hints to metrics; validation must allow them.
+SAAS_YAML = """
+semantic_model:
+  name: shop
+datasets:
+  - name: paid_orders
+    source:
+      table: orders
+    primary_key: order_id
+    time_dimension:
+      name: order_date
+      granularity: day
+metrics:
+  - name: paid_rate
+    description: "paid conversion"
+    dataset: paid_orders
+    custom_extensions:
+      - vendor_name: DATUS
+        data: >
+          {"metric_kind": "ratio", "numerator": "paid_revenue",
+           "denominator": "order_count", "uid": "m-123",
+           "owner": "alice@datus.ai"}
+"""
+
+
+def test_saas_uid_owner_hints_pass_validation_and_compile():
+    doc = parse_osi(SAAS_YAML)
+    metric = doc.metrics[0]
+    assert metric.metric_kind == "ratio"
+    # Allowed through validation; not lowered onto the metric as execution hints.
+    assert not hasattr(metric, "uid") or metric.uid is None
+    assert not hasattr(metric, "owner") or metric.owner is None
+    model = compile_document(doc)
+    assert model.metrics[0].kind is MetricKind.RATIO

@@ -55,6 +55,9 @@ _METRIC_DATUS_HINT_KEYS = {
     "non_additive_dimension",
     "period_over_period",
     "metadata",
+    # SaaS-injected identity/ownership hints; allowed through validation, not lowered to IR.
+    "uid",
+    "owner",
 } | _METRIC_METADATA_HINT_KEYS
 
 
