@@ -23,8 +23,8 @@
   "$defs": {
     "Dialect": {
       "type": "string",
-      "enum": ["ANSI_SQL", "SNOWFLAKE", "MDX", "TABLEAU", "DATABRICKS", "MAQL"],
-      "description": "Supported SQL and expression language dialects"
+      "examples": ["ANSI_SQL", "SNOWFLAKE", "MDX", "TABLEAU", "DATABRICKS", "MAQL", "STARROCKS", "MYSQL", "POSTGRESQL"],
+      "description": "SQL or expression language dialect the expression is written in. Any string is accepted (Datus extension); validity of a datasource-native dialect such as STARROCKS is checked when the expression is parsed and compiled, not by this schema."
     },
     "Vendor": {
       "type": "string",

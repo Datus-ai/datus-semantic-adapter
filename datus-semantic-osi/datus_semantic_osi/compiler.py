@@ -19,6 +19,7 @@ from typing import Optional
 import sqlglot
 from sqlglot import expressions as exp
 
+from datus_semantic_osi.dialects import DEFAULT_SQLGLOT_DIALECT
 from datus_semantic_osi.errors import OSIValidationError
 from datus_semantic_osi.ir import (
     Aggregation,
@@ -81,7 +82,7 @@ def _sanitize(name: str) -> str:
     return re.sub(r"[^0-9a-zA-Z]+", "_", name).strip("_").lower()
 
 
-def _measure_from_aggregate(node: exp.Expression) -> MeasureIR:
+def _measure_from_aggregate(node: exp.Expression, *, dialect: str) -> MeasureIR:
     """Map a single sqlglot aggregate node to a backing MeasureIR."""
     if isinstance(node, exp.Count):
         arg = node.this
@@ -95,20 +96,20 @@ def _measure_from_aggregate(node: exp.Expression) -> MeasureIR:
                     hint="Declare separate metrics for multi-column distinct logic, or "
                     "precompute a single distinct key in the dataset.",
                 )
-            col_sql = cols[0].sql(dialect="mysql") if cols else "1"
+            col_sql = cols[0].sql(dialect=dialect) if cols else "1"
             base = _sanitize(col_sql)
             return MeasureIR(
                 name=f"{base}_count_distinct",
                 agg=Aggregation.COUNT_DISTINCT,
                 expr=col_sql,
             )
-        col_sql = arg.sql(dialect="mysql")
+        col_sql = arg.sql(dialect=dialect)
         base = _sanitize(col_sql)
         return MeasureIR(name=f"{base}_count", agg=Aggregation.COUNT, expr=col_sql)
 
     for node_type, agg in _AGG_NODES.items():
         if isinstance(node, node_type):
-            col_sql = node.this.sql(dialect="mysql")
+            col_sql = node.this.sql(dialect=dialect)
             base = _sanitize(col_sql)
             return MeasureIR(name=f"{base}_{agg.value}", agg=agg, expr=col_sql)
 
@@ -135,7 +136,7 @@ def _raise_measure_name_collision(name: str) -> None:
     )
 
 
-def _collect_aggregate_measures(tree: exp.Expression):
+def _collect_aggregate_measures(tree: exp.Expression, *, dialect: str):
     """Replace each aggregate subtree with a reference to its backing measure.
 
     Returns the rewritten expression tree and the de-duplicated list of measures.
@@ -144,7 +145,7 @@ def _collect_aggregate_measures(tree: exp.Expression):
 
     def _replace(node: exp.Expression) -> exp.Expression:
         if _is_aggregate(node):
-            measure = _measure_from_aggregate(node)
+            measure = _measure_from_aggregate(node, dialect=dialect)
             existing = measures.get(measure.name)
             if existing is not None:
                 if _same_measure_signature(existing, measure):
@@ -162,7 +163,7 @@ def compile_metric_expression(
     name: str,
     expression: str,
     *,
-    dialect: str = "mysql",
+    dialect: str = DEFAULT_SQLGLOT_DIALECT,
 ) -> MetricIR:
     """Infer a MetricIR from a single OSI metric expression.
 
@@ -190,7 +191,7 @@ def compile_metric_expression(
         )
 
     if _is_aggregate(tree):
-        measure = _measure_from_aggregate(tree)
+        measure = _measure_from_aggregate(tree, dialect=dialect)
         return MetricIR(name=name, kind=MetricKind.AGGREGATE, measures=[measure])
 
     inner_aggs = list(tree.find_all(exp.AggFunc))
@@ -201,8 +202,8 @@ def compile_metric_expression(
         and _is_aggregate(tree.this)
         and _is_aggregate(tree.expression)
     ):
-        num = _measure_from_aggregate(tree.this)
-        den = _measure_from_aggregate(tree.expression)
+        num = _measure_from_aggregate(tree.this, dialect=dialect)
+        den = _measure_from_aggregate(tree.expression, dialect=dialect)
         if num.name == den.name and not _same_measure_signature(num, den):
             _raise_measure_name_collision(num.name)
         measures = [num] if num.name == den.name else [num, den]
@@ -224,7 +225,7 @@ def compile_metric_expression(
 
     # other arithmetic over aggregates -> expression over backing measures
     if inner_aggs:
-        new_tree, measures = _collect_aggregate_measures(tree)
+        new_tree, measures = _collect_aggregate_measures(tree, dialect=dialect)
         return MetricIR(
             name=name,
             kind=MetricKind.EXPRESSION,
@@ -322,7 +323,7 @@ def _validate_metric_metadata(metric: OSIMetric) -> dict[str, object]:
     return dict(metric.metadata)
 
 
-def _compile_metric(metric: OSIMetric) -> MetricIR:
+def _compile_metric(metric: OSIMetric, *, dialect: str = DEFAULT_SQLGLOT_DIALECT) -> MetricIR:
     kind = (metric.kind or "").lower()
 
     if metric.period_over_period is not None:
@@ -367,7 +368,7 @@ def _compile_metric(metric: OSIMetric) -> MetricIR:
         # not lower to a valid backend metric. Period-over-period comparisons are
         # declared via an input metric's offset_window instead.
         try:
-            derived_tree = sqlglot.parse_one(metric.expression, read="mysql")
+            derived_tree = sqlglot.parse_one(metric.expression, read=dialect)
         except Exception:  # noqa: BLE001
             derived_tree = None
         if derived_tree is not None and derived_tree.find(exp.Window):
@@ -391,7 +392,7 @@ def _compile_metric(metric: OSIMetric) -> MetricIR:
             denominator=metric.denominator,
         )
     elif metric.expression:
-        metric_ir = compile_metric_expression(metric.name, metric.expression)
+        metric_ir = compile_metric_expression(metric.name, metric.expression, dialect=dialect)
     else:
         raise OSIValidationError(
             "needs either an `expression` or explicit ratio numerator/denominator.",
@@ -455,7 +456,7 @@ def _namespace_measures(metric: MetricIR, prefix: str) -> None:
             metric.expression = re.sub(rf"\b{re.escape(old)}\b", new, metric.expression)
 
 
-def compile_document(doc: OSIDocument) -> SemanticModelIR:
+def compile_document(doc: OSIDocument, *, dialect: str = DEFAULT_SQLGLOT_DIALECT) -> SemanticModelIR:
     """Compile a parsed OSI authoring document into a SemanticModelIR."""
     datasets = [_compile_dataset(ds) for ds in doc.datasets]
     relationships = [
@@ -472,7 +473,7 @@ def compile_document(doc: OSIDocument) -> SemanticModelIR:
     default_dataset = doc.datasets[0].name if doc.datasets else None
     metrics = []
     for m in doc.metrics:
-        metric_ir = _compile_metric(m)
+        metric_ir = _compile_metric(m, dialect=dialect)
         if len(doc.datasets) > 1 and metric_ir.measures and not metric_ir.dataset:
             raise OSIValidationError(
                 "metric must declare `dataset` when the semantic model has multiple datasets.",
