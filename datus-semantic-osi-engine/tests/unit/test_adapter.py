@@ -9,13 +9,11 @@ from __future__ import annotations
 
 import os
 
-import datus_osi_engine as binding
 import pytest
 import yaml
+from _fakes import FakeEngine
 
 from datus_semantic_osi_engine.errors import SemanticValidationException
-
-FakeEngine = binding.Engine
 
 
 async def test_list_metrics_maps_rows_and_slices(make_adapter):

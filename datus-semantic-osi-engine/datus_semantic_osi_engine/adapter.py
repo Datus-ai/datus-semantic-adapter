@@ -18,6 +18,7 @@ import asyncio
 from typing import Any, Dict, List, Optional
 
 from datus_semantic_core.base import BaseSemanticAdapter
+from datus_semantic_core.exceptions import SemanticCoreException
 from datus_semantic_core.models import (
     DimensionInfo,
     MetricDefinition,
@@ -139,9 +140,11 @@ class OSIEngineAdapter(BaseSemanticAdapter):
         binding = await asyncio.to_thread(load_binding)
         engine = await asyncio.to_thread(self._engine)
         dimensions = list(dimensions or [])
+        # Fetched off the event loop; _build_query stays pure (no engine I/O).
+        dimension_rows = await asyncio.to_thread(engine.dimensions)
 
         query = self._build_query(
-            engine,
+            dimension_rows,
             metrics=metrics,
             dimensions=dimensions,
             time_start=time_start,
@@ -185,9 +188,9 @@ class OSIEngineAdapter(BaseSemanticAdapter):
                     "row_count": result["row_count"],
                 },
             )
-        except (SemanticValidationException,):
-            raise
         except Exception as exc:  # noqa: BLE001 - mapped to typed errors below
+            # A SemanticValidationException (raised only by _build_query, before
+            # this try) is not an engine error; raise_mapped re-raises it as-is.
             raise_mapped(
                 exc,
                 binding,
@@ -266,16 +269,25 @@ class OSIEngineAdapter(BaseSemanticAdapter):
 
         With a connection profile the engine already knows the dialect; an
         agreeing explicit dialect is harmless, a conflicting one is a config
-        error the engine reports.
+        error the engine reports. An explicitly configured dialect that the
+        engine doesn't know is a config error (raise) — not silently dropped,
+        which would emit DuckDB SQL for the wrong dialect. An unknown
+        db_config *type* stays lenient (returns None → engine decides).
         """
         if self.config.dialect:
-            return resolve_engine_dialect(self.config.dialect, binding.DIALECTS)
+            resolved = resolve_engine_dialect(self.config.dialect, binding.DIALECTS)
+            if resolved is None:
+                raise SemanticCoreException(
+                    f"unknown dialect {self.config.dialect!r}; "
+                    f"supported: {', '.join(binding.DIALECTS)}"
+                )
+            return resolved
         db_config = self.config.db_config or {}
         return resolve_engine_dialect(db_config.get("type"), binding.DIALECTS)
 
     def _build_query(
         self,
-        engine: Any,
+        dimension_rows: List[Dict[str, Any]],
         *,
         metrics: List[str],
         dimensions: List[str],
@@ -286,9 +298,9 @@ class OSIEngineAdapter(BaseSemanticAdapter):
         limit: Optional[int],
         order_by: Optional[List[str]],
     ) -> Dict[str, Any]:
-        """Assemble the engine's MetricQuery dict. No SQL manipulation."""
+        """Assemble the engine's MetricQuery dict. Pure: no engine I/O."""
         time_dimension_names = {
-            row["name"] for row in engine.dimensions() if row.get("is_time")
+            row["name"] for row in dimension_rows if row.get("is_time")
         }
 
         def is_time_dimension(name: str) -> bool:
@@ -336,7 +348,9 @@ class OSIEngineAdapter(BaseSemanticAdapter):
             query["time_range"] = {"start": time_start, "end": time_end}
         if order_by:
             query["order_by"] = [
-                {"key": key.lstrip("-"), "desc": key.startswith("-")}
+                {"key": key[1:], "desc": True}
+                if key.startswith("-")
+                else {"key": key, "desc": False}
                 for key in order_by
             ]
         if limit is not None:

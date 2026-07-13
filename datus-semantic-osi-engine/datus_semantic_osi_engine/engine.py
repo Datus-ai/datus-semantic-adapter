@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import tempfile
 import threading
+import weakref
 from typing import Any, Optional
 
 import yaml
@@ -22,6 +23,13 @@ _INSTALL_HINT = (
     "datus-osi-engine is not installed; "
     "pip install 'datus-semantic-osi-engine[engine]'"
 )
+
+
+def _unlink_quietly(path: str) -> None:
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
 
 
 def load_binding() -> Any:
@@ -50,16 +58,22 @@ class EngineHandle:
 
     @property
     def profile_name(self) -> Optional[str]:
-        """The connection profile to execute on, when one is configured."""
+        """The connection profile to execute on, when one is configured.
+
+        Precedence mirrors _resolve_connections: an explicit connections_path
+        is authoritative over db_config, so it is checked first — otherwise
+        the name here (from db_config) would not exist in the file actually
+        used.
+        """
         config = self._config
         if config.connection:
             return config.connection
+        if config.connections_path:
+            # A bare `datasource` name is looked up in the connections file;
+            # None lets the engine pick the file's default profile.
+            return config.datasource
         if config.db_config:
             return config.datasource or "default"
-        # A bare `datasource` name only means something with a connections
-        # file to look it up in.
-        if config.datasource and config.connections_path:
-            return config.datasource
         return None
 
     def get(self) -> Any:
@@ -124,4 +138,7 @@ class EngineHandle:
         )
         with handle:
             yaml.safe_dump(payload, handle, default_flow_style=False)
+        # Tie the temp file's lifetime to this handle so it doesn't leak for
+        # the process lifetime (relevant when adapters are created per-request).
+        weakref.finalize(self, _unlink_quietly, handle.name)
         return handle.name

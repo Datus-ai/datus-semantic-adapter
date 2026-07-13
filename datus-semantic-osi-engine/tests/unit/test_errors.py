@@ -6,8 +6,8 @@
 
 from __future__ import annotations
 
-import datus_osi_engine as binding
 import pytest
+from _fakes import ExecuteError, FakeEngine, ModelError, QueryError
 from datus_semantic_core.exceptions import SemanticCoreException
 
 from datus_semantic_osi_engine.errors import (
@@ -15,11 +15,6 @@ from datus_semantic_osi_engine.errors import (
     raise_mapped,
     validation_error_from_query_error,
 )
-
-FakeEngine = binding.Engine
-QueryError = binding.QueryError
-ExecuteError = binding.ExecuteError
-ModelError = binding.ModelError
 
 
 async def test_query_error_becomes_validation_exception(make_adapter):
@@ -84,19 +79,19 @@ def test_unknown_metric_single_candidate_retry():
     assert payload.metrics == ["revenues"]
 
 
-def test_non_retryable_query_error_is_core_exception():
+def test_non_retryable_query_error_is_core_exception(fake_binding):
     error = QueryError("planner bug", code="internal")
     with pytest.raises(SemanticCoreException):
-        raise_mapped(error, binding)
+        raise_mapped(error, fake_binding)
 
 
-def test_model_error_is_core_exception():
+def test_model_error_is_core_exception(fake_binding):
     error = ModelError("model is invalid:", code="invalid_model")
     with pytest.raises(SemanticCoreException) as exc:
-        raise_mapped(error, binding)
+        raise_mapped(error, fake_binding)
     assert "invalid_model" in str(exc.value)
 
 
-def test_unrelated_error_passes_through():
+def test_unrelated_error_passes_through(fake_binding):
     with pytest.raises(RuntimeError):
-        raise_mapped(RuntimeError("boom"), binding)
+        raise_mapped(RuntimeError("boom"), fake_binding)
