@@ -6,7 +6,11 @@ from pathlib import Path
 import pytest
 from packaging.version import Version
 
-from ci.resolve_package_publish import resolve_publish_state
+from ci.resolve_package_publish import (
+    next_patch_version,
+    resolve_publish_state,
+    resolve_requested_version,
+)
 
 
 PACKAGE = "datus-semantic-core"
@@ -61,58 +65,86 @@ def release_present(_package: str, _version: Version) -> bool:
     return True
 
 
-def test_new_release_uses_current_main_commit(repo: Path) -> None:
+def create_release_tag(repo: Path, version: str) -> str:
+    main_commit = git(repo, "rev-parse", "HEAD")
+    write_package(repo, version)
+    git(repo, "add", ".")
+    git(repo, "commit", "-m", f"release {version}")
+    release_commit = git(repo, "rev-parse", "HEAD")
+    git(repo, "tag", "-a", f"{PACKAGE}-v{version}", "-m", "release")
+    git(repo, "checkout", "--detach", main_commit)
+    git(repo, "branch", "-f", "main", main_commit)
+    return release_commit
+
+
+@pytest.mark.parametrize(
+    ("current", "expected"),
+    [
+        ("1", "1.0.1"),
+        ("1.2", "1.2.1"),
+        ("1.2.3", "1.2.4"),
+    ],
+)
+def test_next_patch_version(current: str, expected: str) -> None:
+    assert next_patch_version(Version(current)) == Version(expected)
+
+
+def test_auto_version_rejects_non_final_release() -> None:
+    with pytest.raises(ValueError, match="require a final release"):
+        next_patch_version(Version("1.2.3rc1"))
+
+
+def test_requested_version_overrides_auto_increment() -> None:
+    assert resolve_requested_version(Version("0.2.1"), "0.3.0") == Version("0.3.0")
+
+
+def test_new_release_auto_increments_patch(repo: Path) -> None:
+    state = resolve_publish_state(repo, PACKAGE, release_exists=release_missing)
+
+    assert state.state == "new"
+    assert state.current_version == "0.2.1"
+    assert state.version == "0.2.2"
+    assert state.release_commit == git(repo, "rev-parse", "HEAD")
+    assert state.tag == f"{PACKAGE}-v0.2.2"
+    assert state.branch == f"release/{PACKAGE}-0.2.2"
+    assert state.pypi_exists is False
+
+
+def test_explicit_release_version_is_used(repo: Path) -> None:
     state = resolve_publish_state(
         repo,
         PACKAGE,
-        "0.2.1",
+        "0.3.0",
         release_exists=release_missing,
     )
 
     assert state.state == "new"
-    assert state.release_commit == git(repo, "rev-parse", "HEAD")
-    assert state.tag == f"{PACKAGE}-v0.2.1"
-    assert state.pypi_exists is False
+    assert state.version == "0.3.0"
 
 
-def test_new_release_requires_version_to_be_merged(repo: Path) -> None:
-    with pytest.raises(ValueError, match="merge the release PR first"):
+def test_new_release_must_advance_main_version(repo: Path) -> None:
+    with pytest.raises(ValueError, match="must advance current"):
         resolve_publish_state(
             repo,
             PACKAGE,
-            "0.2.2",
+            "0.2.1",
             release_exists=release_missing,
         )
 
 
 def test_existing_tag_without_pypi_resumes_from_tagged_commit(repo: Path) -> None:
-    tag = f"{PACKAGE}-v0.2.1"
-    tagged_commit = git(repo, "rev-parse", "HEAD")
-    git(repo, "tag", "-a", tag, "-m", "release")
-    write_package(repo, "0.2.2")
-    git(repo, "add", ".")
-    git(repo, "commit", "-m", "advance main")
+    release_commit = create_release_tag(repo, "0.2.2")
 
-    state = resolve_publish_state(
-        repo,
-        PACKAGE,
-        "0.2.1",
-        release_exists=release_missing,
-    )
+    state = resolve_publish_state(repo, PACKAGE, release_exists=release_missing)
 
     assert state.state == "retry"
-    assert state.release_commit == tagged_commit
+    assert state.release_commit == release_commit
 
 
 def test_existing_tag_and_pypi_release_is_complete(repo: Path) -> None:
-    git(repo, "tag", "-a", f"{PACKAGE}-v0.2.1", "-m", "release")
+    create_release_tag(repo, "0.2.2")
 
-    state = resolve_publish_state(
-        repo,
-        PACKAGE,
-        "0.2.1",
-        release_exists=release_present,
-    )
+    state = resolve_publish_state(repo, PACKAGE, release_exists=release_present)
 
     assert state.state == "complete"
     assert state.pypi_exists is True
@@ -120,21 +152,11 @@ def test_existing_tag_and_pypi_release_is_complete(repo: Path) -> None:
 
 def test_pypi_release_without_tag_requires_investigation(repo: Path) -> None:
     with pytest.raises(ValueError, match="release tag .* is missing"):
-        resolve_publish_state(
-            repo,
-            PACKAGE,
-            "0.2.1",
-            release_exists=release_present,
-        )
+        resolve_publish_state(repo, PACKAGE, release_exists=release_present)
 
 
 def test_tag_must_point_to_requested_package_version(repo: Path) -> None:
     git(repo, "tag", "-a", f"{PACKAGE}-v0.2.2", "-m", "wrong release")
 
     with pytest.raises(ValueError, match="points to .* 0.2.1, expected 0.2.2"):
-        resolve_publish_state(
-            repo,
-            PACKAGE,
-            "0.2.2",
-            release_exists=release_missing,
-        )
+        resolve_publish_state(repo, PACKAGE, release_exists=release_missing)
