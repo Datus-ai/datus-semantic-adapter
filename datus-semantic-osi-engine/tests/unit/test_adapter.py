@@ -227,3 +227,25 @@ async def test_validate_semantic_ok(make_adapter):
     result = await adapter.validate_semantic()
     assert result.valid is True
     assert result.issues == []
+
+
+async def test_semantic_models_path_directory_single_file(tmp_path):
+    from datus_semantic_osi_engine.adapter import OSIEngineAdapter
+    from datus_semantic_osi_engine.config import OSIEngineConfig
+
+    (tmp_path / "model.yaml").write_text("version: '0.2.0.dev0'\nsemantic_model: []\n")
+    adapter = OSIEngineAdapter(OSIEngineConfig(semantic_models_path=str(tmp_path)))
+    await adapter.list_metrics()  # builds the engine
+    assert FakeEngine.instances[-1].model_path == str(tmp_path / "model.yaml")
+
+
+async def test_semantic_models_path_directory_multiple_is_error(tmp_path):
+    from datus_semantic_core.exceptions import SemanticCoreException
+    from datus_semantic_osi_engine.adapter import OSIEngineAdapter
+    from datus_semantic_osi_engine.config import OSIEngineConfig
+
+    (tmp_path / "a.yaml").write_text("version: '0.2.0.dev0'\nsemantic_model: []\n")
+    (tmp_path / "b.yaml").write_text("version: '0.2.0.dev0'\nsemantic_model: []\n")
+    adapter = OSIEngineAdapter(OSIEngineConfig(semantic_models_path=str(tmp_path)))
+    with pytest.raises(SemanticCoreException, match="set semantic_model_path"):
+        await adapter.list_metrics()

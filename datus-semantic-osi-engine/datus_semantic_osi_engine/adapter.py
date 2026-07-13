@@ -201,16 +201,12 @@ class OSIEngineAdapter(BaseSemanticAdapter):
 
     async def validate_semantic(self, scope: str = "all") -> ValidationResult:
         binding = await asyncio.to_thread(load_binding)
-        model_path = self.config.semantic_model_path
-        if not model_path:
+        try:
+            model_path = self._handle.model_file()
+        except SemanticCoreException as exc:
             return ValidationResult(
                 valid=False,
-                issues=[
-                    ValidationIssue(
-                        severity="error",
-                        message="osi_engine adapter requires semantic_model_path",
-                    )
-                ],
+                issues=[ValidationIssue(severity="error", message=str(exc))],
             )
 
         def _validate() -> Dict[str, Any]:

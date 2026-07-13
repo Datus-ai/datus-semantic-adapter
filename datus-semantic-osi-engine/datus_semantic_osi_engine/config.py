@@ -22,8 +22,13 @@ class OSIEngineConfig(SemanticAdapterConfig):
     """
 
     service_type: str = "osi_engine"
-    # Path to the OSI semantic model file (.yaml/.yml/.json).
+    # Path to the OSI semantic model file (.yaml/.yml/.json). Takes precedence
+    # over semantic_models_path.
     semantic_model_path: Optional[str] = None
+    # Directory of OSI models (Datus convention, e.g. subject/semantic_models/
+    # <datasource>). Used when semantic_model_path is unset: a single model
+    # file inside is picked automatically; multiple require semantic_model_path.
+    semantic_models_path: Optional[str] = None
     # Connections file passed to the engine verbatim (agent.yml vocabulary).
     connections_path: Optional[str] = None
     # Named connection profile; falls back to the base-class `datasource`.

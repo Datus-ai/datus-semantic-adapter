@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import glob
 import os
 import tempfile
 import threading
@@ -30,6 +31,38 @@ def _unlink_quietly(path: str) -> None:
         os.unlink(path)
     except OSError:
         pass
+
+
+def resolve_model_file(config: OSIEngineConfig) -> str:
+    """The OSI model file to load: explicit semantic_model_path, else the sole
+    model file in semantic_models_path (the Datus directory convention).
+
+    Raises SemanticCoreException when nothing resolves, or when a directory
+    holds several models (the engine loads exactly one).
+    """
+    if config.semantic_model_path:
+        return config.semantic_model_path
+    models_dir = config.semantic_models_path
+    if models_dir:
+        candidates = sorted(
+            path
+            for ext in ("*.yaml", "*.yml", "*.json")
+            for path in glob.glob(os.path.join(models_dir, ext))
+        )
+        if len(candidates) == 1:
+            return candidates[0]
+        if not candidates:
+            raise SemanticCoreException(
+                f"no OSI model file (*.yaml/*.yml/*.json) in {models_dir!r}"
+            )
+        raise SemanticCoreException(
+            f"{len(candidates)} model files in {models_dir!r}; "
+            "set semantic_model_path to select one"
+        )
+    raise SemanticCoreException(
+        "osi_engine adapter requires semantic_model_path (an OSI model file) "
+        "or semantic_models_path (a directory containing one)"
+    )
 
 
 def load_binding() -> Any:
@@ -76,35 +109,36 @@ class EngineHandle:
             return config.datasource or "default"
         return None
 
+    def model_file(self) -> str:
+        """The resolved OSI model file path (raises if unresolvable)."""
+        return resolve_model_file(self._config)
+
     def get(self) -> Any:
         config = self._config
-        if not config.semantic_model_path:
-            raise SemanticCoreException(
-                "osi_engine adapter requires semantic_model_path (an OSI model file)"
-            )
+        model_file = resolve_model_file(config)
         try:
-            mtime = os.path.getmtime(config.semantic_model_path)
+            mtime = os.path.getmtime(model_file)
         except OSError as exc:
             raise SemanticCoreException(
-                f"cannot read semantic model {config.semantic_model_path!r}: {exc}"
+                f"cannot read semantic model {model_file!r}: {exc}"
             ) from exc
         with self._lock:
             if self._engine is None or mtime != self._model_mtime:
-                self._engine = self._build(config)
+                self._engine = self._build(config, model_file)
                 self._model_mtime = mtime
             return self._engine
 
-    def _build(self, config: OSIEngineConfig) -> Any:
+    def _build(self, config: OSIEngineConfig, model_file: str) -> Any:
         binding = load_binding()
         try:
             return binding.Engine(
-                model_path=config.semantic_model_path,
+                model_path=model_file,
                 connections_path=self._resolve_connections(config),
                 pool_size=config.pool_size,
             )
         except binding.OsiError as exc:
             raise SemanticCoreException(
-                f"osi-engine failed to load model {config.semantic_model_path!r}: {exc}"
+                f"osi-engine failed to load model {model_file!r}: {exc}"
             ) from exc
 
     def _resolve_connections(self, config: OSIEngineConfig) -> Optional[str]:
