@@ -1,0 +1,191 @@
+name: Publish Package Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: "Workspace package to publish"
+        required: true
+        type: choice
+        options:
+          - datus-semantic-core
+          - datus-semantic-metricflow
+          - datus-semantic-osi
+      version:
+        description: "Canonical version already merged into main, for example 0.2.1"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-${{ inputs.package }}-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: Pypi Publish
+    steps:
+      - name: Checkout latest main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_BOT_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install release tooling
+        run: pip install packaging twine
+
+      - name: Resolve publication state
+        id: resolve
+        run: |
+          python3 ci/resolve_package_publish.py \
+            --package "${{ inputs.package }}" \
+            --expected-version "${{ inputs.version }}"
+
+      - name: Check out release commit
+        if: steps.resolve.outputs.state != 'complete'
+        env:
+          RELEASE_COMMIT: ${{ steps.resolve.outputs.release_commit }}
+        run: |
+          set -euo pipefail
+          git checkout --detach "${RELEASE_COMMIT}"
+          test "$(git rev-parse HEAD)" = "${RELEASE_COMMIT}"
+
+      - name: Validate package release
+        if: steps.resolve.outputs.state != 'complete'
+        env:
+          PACKAGE: ${{ steps.resolve.outputs.package }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 ci/check_package_release_readiness.py \
+            --package "${PACKAGE}" \
+            --expected-version "${VERSION}" \
+            --check-dependent-bounds \
+            --build
+          ci/run-unit-tests.sh "${PACKAGE}"
+          git diff --check
+
+      - name: Build release artifacts
+        if: steps.resolve.outputs.state != 'complete'
+        env:
+          PACKAGE: ${{ steps.resolve.outputs.package }}
+        run: |
+          set -euo pipefail
+          release_dir="dist/release/${PACKAGE}"
+          rm -rf dist/release
+          uv build --package "${PACKAGE}" --out-dir "${release_dir}"
+          python -m twine check "${release_dir}"/*
+
+      - name: Create release tag
+        if: steps.resolve.outputs.state == 'new'
+        env:
+          PACKAGE: ${{ steps.resolve.outputs.package }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --tags origin
+          if git rev-parse --verify --quiet "refs/tags/${TAG}" >/dev/null; then
+            echo "Release tag ${TAG} was created by another process" >&2
+            exit 1
+          fi
+          git tag -a "${TAG}" -m "Release ${PACKAGE} ${VERSION}"
+          git push origin "refs/tags/${TAG}"
+
+      - name: Publish to PyPI
+        if: steps.resolve.outputs.state != 'complete'
+        env:
+          PACKAGE: ${{ steps.resolve.outputs.package }}
+          PYPI_USERNAME: ${{ secrets.PYPI_USERNAME }}
+          PYPI_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
+          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+          PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+        run: |
+          set -euo pipefail
+          password="${PYPI_PASSWORD:-${PYPI_API_TOKEN:-${PYPI_TOKEN:-}}}"
+          if [ -z "${password}" ]; then
+            echo "Missing PyPI password/token secret" >&2
+            exit 1
+          fi
+
+          if [ -n "${PYPI_USERNAME:-}" ]; then
+            username="${PYPI_USERNAME}"
+          elif [ -n "${PYPI_PASSWORD:-}" ]; then
+            username="transform_data"
+          else
+            username="__token__"
+          fi
+
+          release_dir="dist/release/${PACKAGE}"
+          python -m twine upload \
+            --non-interactive \
+            --username "${username}" \
+            --password "${password}" \
+            "${release_dir}"/*
+
+      - name: Verify PyPI release
+        if: steps.resolve.outputs.state != 'complete'
+        env:
+          PACKAGE: ${{ steps.resolve.outputs.package }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          import time
+          import urllib.request
+
+          package = os.environ["PACKAGE"]
+          version = os.environ["VERSION"]
+          url = f"https://pypi.org/pypi/{package}/{version}/json"
+
+          for attempt in range(12):
+              try:
+                  with urllib.request.urlopen(url, timeout=20) as response:
+                      payload = json.loads(response.read().decode("utf-8"))
+                  published_version = str(payload.get("info", {}).get("version", ""))
+                  if published_version != version:
+                      raise ValueError(
+                          f"PyPI returned {package} {published_version}, expected {version}"
+                      )
+                  print(f"Verified {package} {version} on PyPI")
+                  break
+              except Exception as exc:
+                  if attempt == 11:
+                      raise
+                  print(f"PyPI verification attempt {attempt + 1} failed: {exc}")
+                  time.sleep(10)
+          PY
+
+      - name: Summarize release
+        env:
+          PACKAGE: ${{ steps.resolve.outputs.package }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+          STATE: ${{ steps.resolve.outputs.state }}
+        run: |
+          {
+            echo "### Package release"
+            echo "- Package: \`${PACKAGE}\`"
+            echo "- Version: \`${VERSION}\`"
+            echo "- Tag: \`${TAG}\`"
+            echo "- Initial state: \`${STATE}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"

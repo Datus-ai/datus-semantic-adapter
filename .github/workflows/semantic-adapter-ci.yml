@@ -35,7 +35,12 @@ jobs:
           enable-cache: true
 
       - name: Run unit tests
-        run: ci/run-unit-tests.sh
+        run: |
+          ci/run-unit-tests.sh
+          uv run --no-project --isolated \
+            --with packaging \
+            --with pytest \
+            python -m pytest ci/tests --verbose
 
   package-build:
     needs:
