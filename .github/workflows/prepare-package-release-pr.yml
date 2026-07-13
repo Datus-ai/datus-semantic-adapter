@@ -107,7 +107,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git checkout -B "${branch}"
-          git add */pyproject.toml
+          git add -- ./*/pyproject.toml
           git commit -m "chore: prepare ${PACKAGE} ${VERSION} release"
           git push --force-with-lease origin "${branch}"
 
