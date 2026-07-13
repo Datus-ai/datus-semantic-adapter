@@ -2,36 +2,17 @@
 # Licensed under the Apache License, Version 2.0.
 # See http://www.apache.org/licenses/LICENSE-2.0 for details.
 
-"""Integration fixtures: real datus-osi-engine wheel + duckdb CLI required."""
+"""Integration fixtures. Gating (integration marker + skip conditions) lives
+in the test module — a ``pytestmark`` in a conftest is not applied by pytest."""
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "orders"
-
-
-def _real_binding_available() -> bool:
-    try:
-        import datus_osi_engine
-    except ImportError:
-        return False
-    # The unit-test fake sets this marker; the real extension does not.
-    return not getattr(datus_osi_engine, "__osi_fake__", False)
-
-
-pytestmark = [
-    pytest.mark.integration,
-    pytest.mark.skipif(
-        not _real_binding_available(),
-        reason="real datus-osi-engine bindings not installed",
-    ),
-    pytest.mark.skipif(shutil.which("duckdb") is None, reason="duckdb CLI not installed"),
-]
 
 
 @pytest.fixture(scope="session")
