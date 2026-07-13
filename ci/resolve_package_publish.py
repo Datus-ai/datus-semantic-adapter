@@ -46,8 +46,10 @@ SUPPORTED_PACKAGES = frozenset(
 @dataclass(frozen=True)
 class PublishState:
     package: str
+    current_version: str
     version: str
     tag: str
+    branch: str
     state: str
     release_commit: str
     pypi_exists: bool
@@ -61,6 +63,27 @@ def run_git(repo_root: Path, *args: str, check: bool = True) -> subprocess.Compl
         capture_output=True,
         text=True,
     )
+
+
+def next_patch_version(current_version: Version) -> Version:
+    if current_version.pre or current_version.dev or current_version.post or current_version.local:
+        raise ValueError(
+            f"Automatic patch increments require a final release version; found {current_version}"
+        )
+    release = list(current_version.release)
+    if len(release) > 3:
+        raise ValueError(f"Automatic patch increments do not support {current_version}")
+    while len(release) < 3:
+        release.append(0)
+    release[2] += 1
+    return Version(".".join(str(part) for part in release))
+
+
+def resolve_requested_version(current_version: Version, requested_version: str) -> Version:
+    requested_version = requested_version.strip()
+    if requested_version:
+        return parse_canonical_version(requested_version)
+    return next_patch_version(current_version)
 
 
 def pypi_release_exists(package_name: str, version: Version) -> bool:
@@ -104,7 +127,7 @@ def package_version_at_commit(repo_root: Path, package_path: Path, commit: str) 
 def resolve_publish_state(
     repo_root: Path,
     package_name: str,
-    expected_version: str,
+    requested_version: str = "",
     *,
     release_exists: Callable[[str, Version], bool] = pypi_release_exists,
 ) -> PublishState:
@@ -113,10 +136,11 @@ def resolve_publish_state(
         supported = ", ".join(sorted(SUPPORTED_PACKAGES))
         raise ValueError(f"Unsupported package {package_name!r}; choose one of: {supported}")
 
-    version = parse_canonical_version(expected_version)
     packages = load_workspace_packages(repo_root)
     target = require_package(packages, package_name)
+    version = resolve_requested_version(target.version, requested_version)
     tag = f"{target.name}-v{version}"
+    branch = f"release/{target.name}-{version}"
     existing_tag_commit = tag_commit(repo_root, tag)
     exists_on_pypi = release_exists(target.name, version)
 
@@ -135,18 +159,20 @@ def resolve_publish_state(
         state = "complete" if exists_on_pypi else "retry"
         release_commit = existing_tag_commit
     else:
-        if target.version != version:
+        if version <= target.version:
             raise ValueError(
-                f"{target.name} version mismatch on main: pyproject.toml has {target.version}, "
-                f"requested {version}; merge the release PR first"
+                f"Release version must advance current {target.name} version {target.version}; "
+                f"got {version}"
             )
         state = "new"
         release_commit = run_git(repo_root, "rev-parse", "HEAD").stdout.strip()
 
     return PublishState(
         package=target.name,
+        current_version=str(target.version),
         version=str(version),
         tag=tag,
+        branch=branch,
         state=state,
         release_commit=release_commit,
         pypi_exists=exists_on_pypi,
@@ -165,7 +191,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)
     parser.add_argument("--package", required=True)
-    parser.add_argument("--expected-version", required=True)
+    parser.add_argument("--requested-version", default="")
     parser.add_argument(
         "--github-output",
         type=Path,
@@ -177,7 +203,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        state = resolve_publish_state(args.repo_root, args.package, args.expected_version)
+        state = resolve_publish_state(args.repo_root, args.package, args.requested_version)
     except Exception as exc:
         print(f"Package publish state check failed: {exc}", file=sys.stderr)
         return 1
