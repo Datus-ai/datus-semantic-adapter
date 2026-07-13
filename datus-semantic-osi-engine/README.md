@@ -38,6 +38,48 @@ inline `db_config` (one agent.yml datasource entry, written to a temporary
 connections file). With neither, the engine falls back to its own discovery
 order and, failing that, local DuckDB.
 
+## Use with Datus-agent
+
+Install the adapter and the engine wheel into the same virtualenv as
+`datus-agent` (entry-point discovery works off installed distributions, so
+editable installs are fine but `PYTHONPATH` alone is not):
+
+```bash
+uv pip install -e path/to/datus-semantic-osi-engine \
+               path/to/datus_osi_engine-*.whl      # the pyo3 wheel
+```
+
+Then wire it in `agent.yml`. The `semantic_layer` key **must equal the
+`service_type`** (`osi_engine`); Datus-agent fills `db_config` from the active
+datasource and `semantic_models_path` from `subject/semantic_models/<datasource>/`
+automatically, so a model file dropped there needs no further config:
+
+```yaml
+agent:
+  services:
+    datasources:
+      mydb:
+        type: duckdb
+        uri: /abs/path/to/orders.db
+    semantic_layer:
+      osi_engine:                 # key MUST be the service_type
+        # both optional; either overrides the auto-derived directory:
+        # semantic_model_path: /abs/path/to/model.yaml   # explicit single file
+        # connections_path: /abs/path/to/agent.yml       # reuse a connections file
+  agentic_nodes:
+    gen_metrics:
+      semantic_adapter: osi_engine
+    ask_metrics:
+      semantic_adapter: osi_engine
+```
+
+Place one OSI model file at `<project>/subject/semantic_models/mydb/model.yaml`
+(Datus's per-datasource convention). The adapter resolves a single file in that
+directory automatically; **if the directory holds several models, set
+`semantic_model_path`** to pick one (the engine loads exactly one model per
+document). Launch with `datus --datasource mydb`; the `ask_metrics` node then
+drives `list_metrics` / `query_metrics` through this adapter.
+
 ## Behavior notes
 
 - **`validate_semantic`** delegates to the engine's own validator (structure,
