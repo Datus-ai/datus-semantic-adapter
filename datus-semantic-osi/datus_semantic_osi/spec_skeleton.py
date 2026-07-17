@@ -29,16 +29,22 @@ semantic_model:
         unique_keys:                             # optional; each entry is one unique key
           - [<col>]
         fields:
-          # Declare a field ONLY when queries group/filter by it, or it is a key
-          # or the time column. Columns that are only aggregated by metrics are
-          # NOT declared - metric expressions reference physical columns directly.
-          - name: <column_name>
+          # Every business-meaningful column is a field. The `dimension:` block
+          # is the opt-in for grouping/filtering: grouping attributes carry it,
+          # aggregation-only columns (balances, amounts, rates) OMIT it.
+          - name: <grouping_or_filter_column>
             expression:
               dialects:
                 - dialect: {dialect}
                   expression: <scalar SQL, e.g. the column name>
             dimension: {{}}                        # presence of this block = usable for grouping/filtering
             description: <business meaning>
+          - name: <aggregation_only_column>
+            expression:
+              dialects:
+                - dialect: {dialect}
+                  expression: <scalar SQL>
+            description: <business meaning>       # no dimension block: row-level measure source
           - name: <time_column>
             expression:
               dialects:

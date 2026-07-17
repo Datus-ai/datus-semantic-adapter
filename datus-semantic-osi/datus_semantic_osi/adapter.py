@@ -835,7 +835,7 @@ class DatusOSIAdapter(BaseSemanticAdapter):
                 (
                     candidate
                     for candidate in to_dataset.fields
-                    if candidate.name == field_name
+                    if candidate.name == field_name and candidate.is_dimension
                 ),
                 None,
             )
@@ -1212,6 +1212,9 @@ class DatusOSIAdapter(BaseSemanticAdapter):
                 "__".join([*prefix, field.name]) if prefix else field.name,
             )
             for field in dataset.fields
+            # Plain row-level fields (no `dimension:` block in OSI core) back
+            # metric expressions but are not legal grouping dimensions.
+            if field.is_dimension
         ]
 
         for relationship in self._model().relationships:

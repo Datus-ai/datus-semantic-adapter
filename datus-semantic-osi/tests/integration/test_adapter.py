@@ -1286,6 +1286,57 @@ metrics:
     assert "customer_id__region_id__region_name" in metrics[0].dimensions
 
 
+async def test_get_dimensions_excludes_plain_measure_source_fields(tmp_path):
+    # A field without a `dimension:` block is a row-level measure source per
+    # OSI core; it must not be listed as a queryable dimension.
+    (tmp_path / "model.yaml").write_text(
+        """
+version: 0.2.0.dev0
+semantic_model:
+  - name: lending
+    datasets:
+      - name: loan_quality
+        source: dm.loan_quality
+        fields:
+          - name: snapshot_date
+            expression:
+              dialects: [{dialect: ANSI_SQL, expression: snapshot_date}]
+            dimension: {is_time: true}
+            custom_extensions:
+              - vendor_name: DATUS
+                data: '{"time_granularity": "month"}'
+          - name: branch_no
+            expression:
+              dialects: [{dialect: ANSI_SQL, expression: branch_no}]
+            dimension: {}
+          - name: loan_balance
+            expression:
+              dialects: [{dialect: ANSI_SQL, expression: loan_balance}]
+            description: "aggregation-only balance column"
+    metrics:
+      - name: loan_balance_total
+        description: "Total loan balance"
+        expression:
+          dialects: [{dialect: ANSI_SQL, expression: "SUM(loan_quality.loan_balance)"}]
+        custom_extensions:
+          - vendor_name: DATUS
+            data: '{"time_dimension": "snapshot_date"}'
+"""
+    )
+    adapter = DatusOSIAdapter(
+        DatusOSIConfig(semantic_models_path=str(tmp_path), datasource="duckdb")
+    )
+
+    dims = await adapter.get_dimensions("loan_balance_total")
+    names = {d.name for d in dims}
+    assert "branch_no" in names
+    assert "snapshot_date" in names
+    assert "loan_balance" not in names
+
+    metrics = await adapter.list_metrics()
+    assert "loan_balance" not in metrics[0].dimensions
+
+
 def _injected_dimensions(executor):
     """metric_time dimensions the adapter passed to the backend executor."""
     assert executor.calls, "expected the executor to be invoked"
