@@ -72,6 +72,7 @@ class OSIDimension(BaseModel):
     name: str
     expr: Optional[str] = None
     type: str = "categorical"  # categorical | time | numeric
+    is_dimension: bool = True
     granularity: Optional[str] = None
     description: Optional[str] = None
     ai_context: Optional[Union[str, Dict[str, Any]]] = None
@@ -90,6 +91,7 @@ class OSIDataset(BaseModel):
     description: Optional[str] = None
     ai_context: Optional[Union[str, Dict[str, Any]]] = None
     primary_key: Optional[Union[str, List[str]]] = None
+    unique_keys: List[List[str]] = Field(default_factory=list)
     time_dimension: Optional[OSITimeDimension] = None
     dimensions: List[OSIDimension] = Field(default_factory=list)
 
@@ -487,6 +489,10 @@ def _core_dataset_to_profile(dataset: Dict[str, Any]) -> Dict[str, Any]:
     if dataset.get("primary_key"):
         keys = list(dataset["primary_key"])
         profile["primary_key"] = keys[0] if len(keys) == 1 else keys
+    if dataset.get("unique_keys"):
+        profile["unique_keys"] = [
+            [str(column) for column in key] for key in dataset["unique_keys"] if key
+        ]
 
     explicit_time_dimension = _time_dimension_from_hint(hints.get("time_dimension"))
     primary_time_field = None
@@ -503,6 +509,12 @@ def _core_dataset_to_profile(dataset: Dict[str, Any]) -> Dict[str, Any]:
         )
         if not name:
             continue
+        # OSI core: the presence of a `dimension:` block opts a field into
+        # grouping/filtering. Legacy Datus documents carried a `type` hint on
+        # every field instead of blocks, so a type hint also marks a dimension
+        # for backward compatibility.
+        has_dimension_block = "dimension" in field
+        is_dimension = has_dimension_block or bool(field_hints.get("type"))
         is_time = bool((field.get("dimension") or {}).get("is_time"))
         expr = _first_core_expression(field) or str(name)
         granularity = field_hints.get("time_granularity") or field_hints.get(
@@ -534,6 +546,7 @@ def _core_dataset_to_profile(dataset: Dict[str, Any]) -> Dict[str, Any]:
             "name": str(name),
             "expr": expr,
             "type": dim_type,
+            "is_dimension": is_dimension,
         }
         if field.get("description"):
             dim["description"] = field["description"]
@@ -867,6 +880,8 @@ def to_core_schema_document(doc: OSIDocument) -> Dict[str, Any]:
                 else list(dataset.primary_key)
             )
             core_dataset["primary_key"] = keys
+        if dataset.unique_keys:
+            core_dataset["unique_keys"] = [list(key) for key in dataset.unique_keys]
 
         fields: List[Dict[str, Any]] = []
         if dataset.time_dimension:
@@ -893,13 +908,18 @@ def to_core_schema_document(doc: OSIDocument) -> Dict[str, Any]:
             field: Dict[str, Any] = {
                 "name": dim.name,
                 "expression": _core_expression(dim.expr or dim.name),
-                "dimension": {"is_time": dim.type == "time"},
             }
+            if dim.is_dimension:
+                field["dimension"] = {"is_time": dim.type == "time"}
+                hints = {"type": dim.type, "time_granularity": dim.granularity}
+            else:
+                # Plain row-level field: no `dimension:` block, and no `type`
+                # hint either — a type hint marks a legacy dimension on reload.
+                hints = {"time_granularity": dim.granularity}
             if dim.description:
                 field["description"] = dim.description
             if dim.ai_context:
                 field["ai_context"] = dim.ai_context
-            hints = {"type": dim.type, "time_granularity": dim.granularity}
             ext = _datus_extension(hints)
             if ext:
                 field["custom_extensions"] = ext

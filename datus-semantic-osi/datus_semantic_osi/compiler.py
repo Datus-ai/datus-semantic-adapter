@@ -264,6 +264,7 @@ def _compile_dataset(ds: OSIDataset) -> DatasetIR:
                 name=dim.name,
                 expr=dim.expr or dim.name,
                 type=dim.type,
+                is_dimension=dim.is_dimension,
                 time_granularity=dim.granularity,
             )
         )
@@ -276,6 +277,15 @@ def _compile_dataset(ds: OSIDataset) -> DatasetIR:
         )
         for key in keys:
             identifiers.append(IdentifierIR(name=key, type="primary", expr=key))
+
+    identifier_names = {i.name for i in identifiers}
+    for key in ds.unique_keys:
+        # Composite unique keys have no single-identifier representation in the
+        # backend; they are kept on the authoring side only.
+        if len(key) != 1 or key[0] in identifier_names:
+            continue
+        identifiers.append(IdentifierIR(name=key[0], type="unique", expr=key[0]))
+        identifier_names.add(key[0])
 
     return DatasetIR(
         name=ds.name,
