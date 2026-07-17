@@ -317,18 +317,23 @@ class TestRelationshipTypeInference:
         assert model.relationships[0].type == "many_to_one"
 
 
-class TestAuthoringSpecSkeleton:
-    def test_skeleton_renders_configured_dialect_and_version(self):
+class TestAuthoringSpecText:
+    def test_spec_text_renders_configured_dialect_and_strips_license(self):
         from datus_semantic_osi.profile import CORE_SCHEMA_VERSION
-        from datus_semantic_osi.spec_skeleton import authoring_spec_skeleton
+        from datus_semantic_osi.authoring_spec import authoring_spec_text
 
-        text = authoring_spec_skeleton("POSTGRESQL")
+        text = authoring_spec_text("GREENPLUM")
         assert f"version: {CORE_SCHEMA_VERSION}" in text
-        assert "dialect: POSTGRESQL" in text
-        assert "ANSI_SQL" not in text.replace("dialect: POSTGRESQL", "")
-        assert "dimension:" in text
+        assert '- "GREENPLUM"' in text
+        # the spec's own dialect enum is collapsed to the configured dialect
+        for other in ("SNOWFLAKE", "MDX", "TABLEAU", "MAQL", "BIGQUERY"):
+            assert f'- "{other}"' not in text
+        assert "Licensed to the Apache Software Foundation" not in text
+        # authoritative field semantics travel verbatim
+        assert "grouping, filtering, and metric expressions" in text
         assert "unique_keys" in text
-        assert "never guess" in text
+        assert "Datus execution subset notes" in text
+        assert "exactly one column" in text
 
 
 class TestMeasureAsDimensionWarning:
