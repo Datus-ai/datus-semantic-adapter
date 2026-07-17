@@ -200,6 +200,103 @@ class TestStructuralValidation:
         assert "loan_prin_bal" not in types
 
 
+class TestQualifiedColumnResolution:
+    """OSI core metric expressions qualify columns with the dataset name."""
+
+    def _two_dataset_doc(self, metric_expr):
+        loans = _snapshot_dataset(name="loans")
+        deposits = _snapshot_dataset(name="deposits")
+        deposits["fields"] = [_field("dep_bal")]
+        metric = {
+            "name": "loan_total",
+            "expression": {"dialects": [{"dialect": "ANSI_SQL", "expression": metric_expr}]},
+        }
+        return parse_osi(_core_doc([loans, deposits], metrics=[metric]))
+
+    def test_dataset_inferred_from_qualified_columns(self):
+        model = compile_document(self._two_dataset_doc("SUM(loans.loan_prin_bal)"))
+        metric = model.metrics[0]
+        assert metric.dataset == "loans"
+        # the qualifier must not leak into the backing measure expression
+        assert metric.measures[0].expr == "loan_prin_bal"
+
+    def test_unqualified_columns_in_multi_dataset_model_still_require_hint(self):
+        import pytest
+
+        from datus_semantic_osi.errors import OSIValidationError
+
+        with pytest.raises(OSIValidationError, match="must declare `dataset`"):
+            compile_document(self._two_dataset_doc("SUM(loan_prin_bal)"))
+
+    def test_qualifier_stripping_applies_to_single_dataset_models_too(self):
+        metric = {
+            "name": "loan_total",
+            "expression": {
+                "dialects": [{"dialect": "ANSI_SQL", "expression": "SUM(loan_quality.loan_prin_bal)"}]
+            },
+        }
+        model = compile_document(parse_osi(_core_doc([_snapshot_dataset()], metrics=[metric])))
+        assert model.metrics[0].measures[0].expr == "loan_prin_bal"
+
+
+class TestRelationshipTypeInference:
+    def test_unique_from_side_key_upgrades_to_one_to_one(self):
+        profile = {
+            "name": "orders_extension",
+            "source": "dm.orders_ext",
+            "primary_key": ["order_id"],
+            "fields": [_field("order_id", dimension={"is_time": False})],
+        }
+        orders = {
+            "name": "orders",
+            "source": "dm.orders",
+            "primary_key": ["order_id"],
+            "fields": [_field("order_id", dimension={"is_time": False})],
+        }
+        rel = {
+            "name": "ext_to_orders",
+            "from": "orders_extension",
+            "to": "orders",
+            "from_columns": ["order_id"],
+            "to_columns": ["order_id"],
+        }
+        model = compile_document(parse_osi(_core_doc([profile, orders], relationships=[rel])))
+        assert model.relationships[0].type == "one_to_one"
+
+    def test_non_unique_from_side_key_stays_many_to_one(self):
+        fact = _snapshot_dataset(name="fact")
+        fact["fields"].append(_field("org_no", dimension={"is_time": False}))
+        dim_ds = {
+            "name": "org",
+            "source": "dm.org",
+            "primary_key": ["org_no"],
+            "fields": [_field("org_no", dimension={"is_time": False})],
+        }
+        rel = {
+            "name": "fact_to_org",
+            "from": "fact",
+            "to": "org",
+            "from_columns": ["org_no"],
+            "to_columns": ["org_no"],
+        }
+        model = compile_document(parse_osi(_core_doc([fact, dim_ds], relationships=[rel])))
+        assert model.relationships[0].type == "many_to_one"
+
+
+class TestAuthoringSpecSkeleton:
+    def test_skeleton_renders_configured_dialect_and_version(self):
+        from datus_semantic_osi.profile import CORE_SCHEMA_VERSION
+        from datus_semantic_osi.spec_skeleton import authoring_spec_skeleton
+
+        text = authoring_spec_skeleton("POSTGRESQL")
+        assert f"version: {CORE_SCHEMA_VERSION}" in text
+        assert "dialect: POSTGRESQL" in text
+        assert "ANSI_SQL" not in text.replace("dialect: POSTGRESQL", "")
+        assert "dimension:" in text
+        assert "unique_keys" in text
+        assert "never guess" in text
+
+
 class TestMeasureAsDimensionWarning:
     def test_warns_when_aggregated_column_is_also_a_dimension(self):
         ds = _snapshot_dataset()
