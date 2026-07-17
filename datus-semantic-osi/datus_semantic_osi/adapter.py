@@ -66,6 +66,7 @@ from datus_semantic_osi.query_window import (
     query_window_metrics,
 )
 from datus_semantic_osi.validator import (
+    detect_measure_columns_modeled_as_dimensions,
     detect_nonportable_functions,
     validate_authoring_quality,
     validate_capabilities,
@@ -834,7 +835,7 @@ class DatusOSIAdapter(BaseSemanticAdapter):
                 (
                     candidate
                     for candidate in to_dataset.fields
-                    if candidate.name == field_name
+                    if candidate.name == field_name and candidate.is_dimension
                 ),
                 None,
             )
@@ -1211,6 +1212,9 @@ class DatusOSIAdapter(BaseSemanticAdapter):
                 "__".join([*prefix, field.name]) if prefix else field.name,
             )
             for field in dataset.fields
+            # Plain row-level fields (no `dimension:` block in OSI core) back
+            # metric expressions but are not legal grouping dimensions.
+            if field.is_dimension
         ]
 
         for relationship in self._model().relationships:
@@ -1517,6 +1521,10 @@ class DatusOSIAdapter(BaseSemanticAdapter):
         if "ir" in checks_list:
             issues.extend(
                 ValidationIssue(severity="error", message=m) for m in validate_ir(model)
+            )
+            issues.extend(
+                ValidationIssue(severity="warning", message=m)
+                for m in detect_measure_columns_modeled_as_dimensions(model, dialect=self._dialect)
             )
         if "capability" in checks_list:
             caps = getattr(self._backend, "capabilities", {}) or {}
