@@ -543,6 +543,18 @@ def compile_document(doc: OSIDocument, *, dialect: str = DEFAULT_SQLGLOT_DIALECT
         metric_ir = _compile_metric(m, dialect=dialect)
         if not metric_ir.dataset and inferred_dataset:
             metric_ir.dataset = inferred_dataset
+        elif (
+            metric_ir.dataset
+            and inferred_dataset
+            and metric_ir.dataset != inferred_dataset
+        ):
+            raise OSIValidationError(
+                f"declares dataset `{metric_ir.dataset}` but its expression qualifies "
+                f"columns with dataset `{inferred_dataset}`.",
+                metric=metric_ir.name,
+                hint="Qualify the expression columns with the owning dataset, or drop "
+                "the conflicting DATUS `dataset` hint.",
+            )
         if len(doc.datasets) > 1 and metric_ir.measures and not metric_ir.dataset:
             raise OSIValidationError(
                 "metric must declare `dataset` when the semantic model has multiple datasets.",

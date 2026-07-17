@@ -258,7 +258,15 @@ def validate_ir(model: SemanticModelIR) -> List[str]:
     # (identifier auto-resolution, relationship-derived foreign identifiers,
     # same-dataset shadowing) so only conflicts the backend would reject are
     # reported, with a structural fix instead of a type-toggling one.
-    for name, types in sorted(lowered_element_types(model).items()):
+    try:
+        element_types = lowered_element_types(model)
+    except OSIValidationError as exc:
+        # Relationship lowering itself can be structurally invalid (duplicate
+        # foreign identifiers with different expressions); surface it as an
+        # issue instead of escaping the validator.
+        issues.append(str(exc))
+        return issues
+    for name, types in sorted(element_types.items()):
         if len(types) > 1:
             issues.append(
                 f"Element `{name}` lowers to multiple MetricFlow element types "
@@ -274,7 +282,9 @@ def validate_ir(model: SemanticModelIR) -> List[str]:
     return issues
 
 
-def detect_measure_columns_modeled_as_dimensions(model: SemanticModelIR) -> List[str]:
+def detect_measure_columns_modeled_as_dimensions(
+    model: SemanticModelIR, *, dialect: str = DEFAULT_SQLGLOT_DIALECT
+) -> List[str]:
     """Warn when a metric aggregates a column its dataset also exposes as a dimension.
 
     Grouping by a measure's raw row-level value (a balance, an amount, a
@@ -295,7 +305,7 @@ def detect_measure_columns_modeled_as_dimensions(model: SemanticModelIR) -> List
             continue
         for measure in metric.measures:
             try:
-                tree = sqlglot.parse_one(measure.expr, read=DEFAULT_SQLGLOT_DIALECT)
+                tree = sqlglot.parse_one(measure.expr, read=dialect)
             except Exception:  # noqa: BLE001 - unparseable exprs surface elsewhere
                 continue
             if tree is None:

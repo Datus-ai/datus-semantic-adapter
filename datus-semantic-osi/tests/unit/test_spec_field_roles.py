@@ -189,6 +189,24 @@ class TestStructuralValidation:
         assert "Fix structurally" in issues[0]
         assert "dimension:" in issues[0]
 
+    def test_relationship_lowering_failure_surfaces_as_issue_not_exception(self):
+        # Two relationships lower to the same foreign identifier name with
+        # different expressions; validate_ir must report it, not raise.
+        fact = _snapshot_dataset(name="fact")
+        fact["fields"].extend(
+            [_field("a_id", dimension={"is_time": False}), _field("b_id", dimension={"is_time": False})]
+        )
+        dim_a = {"name": "dim_a", "source": "dm.a", "primary_key": ["id"], "fields": []}
+        dim_b = {"name": "dim_b", "source": "dm.b", "primary_key": ["id"], "fields": []}
+        rels = [
+            {"name": "f2a", "from": "fact", "to": "dim_a", "from_columns": ["a_id"], "to_columns": ["id"]},
+            {"name": "f2b", "from": "fact", "to": "dim_b", "from_columns": ["b_id"], "to_columns": ["id"]},
+        ]
+        model = compile_document(parse_osi(_core_doc([fact, dim_a, dim_b], relationships=rels)))
+        issues = validate_ir(model)
+        assert issues, "expected the duplicate foreign identifier to be reported"
+        assert any("duplicate foreign identifier" in issue for issue in issues)
+
     def test_lowered_element_types_mirrors_lowering(self):
         ds = _snapshot_dataset(primary_key=["etl_dt", "org_no"])
         ds["fields"].append(_field("org_no", dimension={"is_time": False}))
@@ -226,6 +244,23 @@ class TestQualifiedColumnResolution:
 
         with pytest.raises(OSIValidationError, match="must declare `dataset`"):
             compile_document(self._two_dataset_doc("SUM(loan_balance)"))
+
+    def test_explicit_dataset_hint_conflicting_with_qualifier_is_rejected(self):
+        import pytest
+
+        from datus_semantic_osi.errors import OSIValidationError
+
+        loans = _snapshot_dataset(name="loans")
+        deposits = _snapshot_dataset(name="deposits")
+        deposits["fields"] = [_field("dep_bal")]
+        metric = {
+            "name": "loan_total",
+            "expression": {"dialects": [{"dialect": "ANSI_SQL", "expression": "SUM(loans.loan_balance)"}]},
+            "custom_extensions": [{"vendor_name": "DATUS", "data": '{"dataset": "deposits"}'}],
+        }
+        doc = parse_osi(_core_doc([loans, deposits], metrics=[metric]))
+        with pytest.raises(OSIValidationError, match="qualifies\\s+columns with dataset `loans`"):
+            compile_document(doc)
 
     def test_qualifier_stripping_applies_to_single_dataset_models_too(self):
         metric = {

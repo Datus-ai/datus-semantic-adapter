@@ -1524,7 +1524,7 @@ class DatusOSIAdapter(BaseSemanticAdapter):
             )
             issues.extend(
                 ValidationIssue(severity="warning", message=m)
-                for m in detect_measure_columns_modeled_as_dimensions(model)
+                for m in detect_measure_columns_modeled_as_dimensions(model, dialect=self._dialect)
             )
         if "capability" in checks_list:
             caps = getattr(self._backend, "capabilities", {}) or {}
