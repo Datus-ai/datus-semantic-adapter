@@ -4,8 +4,7 @@
 """OSI core field-role semantics: `dimension:` block opt-in, unique_keys,
 snapshot-table identifier auto-resolution, and structural validation.
 
-Anchored on the monthly loan-asset-quality snapshot table shape that drove the
-design: a composite primary key that includes the time dimension, code columns
+Anchored on a monthly branch loan-quality snapshot table shape: a composite primary key that includes the time dimension, code columns
 used for grouping, and numeric columns that only back metric aggregations.
 """
 
@@ -35,7 +34,7 @@ def _field(name, *, dimension=None, hints=None):
 
 
 def _core_doc(datasets, metrics=None, relationships=None):
-    model = {"name": "njyh", "datasets": datasets}
+    model = {"name": "lending", "datasets": datasets}
     if relationships:
         model["relationships"] = relationships
     if metrics:
@@ -47,7 +46,7 @@ def _snapshot_dataset(name="loan_quality", primary_key=None, extra_fields=None):
     fields = [
         _field("etl_dt", dimension={"is_time": True}, hints={"time_granularity": "month"}),
         _field("org_name", dimension={"is_time": False}),
-        _field("loan_prin_bal"),  # plain row-level field: no dimension block
+        _field("loan_balance"),  # plain row-level field: no dimension block
     ]
     fields.extend(extra_fields or [])
     ds = {"name": name, "source": "dm.loan_quality", "fields": fields}
@@ -56,7 +55,7 @@ def _snapshot_dataset(name="loan_quality", primary_key=None, extra_fields=None):
     return ds
 
 
-def _sum_metric(name="loan_prin_bal_total", dataset="loan_quality", column="loan_prin_bal"):
+def _sum_metric(name="loan_balance_total", dataset="loan_quality", column="loan_balance"):
     return {
         "name": name,
         "expression": {"dialects": [{"dialect": "ANSI_SQL", "expression": f"SUM({column})"}]},
@@ -72,7 +71,7 @@ class TestDimensionBlockOptIn:
         model = compile_document(doc)
         fields = {f.name: f for f in model.datasets[0].fields}
         assert fields["org_name"].is_dimension is True
-        assert fields["loan_prin_bal"].is_dimension is False
+        assert fields["loan_balance"].is_dimension is False
         assert fields["etl_dt"].is_dimension is True
 
     def test_legacy_type_hint_still_marks_a_dimension(self):
@@ -88,16 +87,16 @@ class TestDimensionBlockOptIn:
         ds = art.data_source_docs[0]["data_source"]
         dim_names = {d["name"] for d in ds.get("dimensions", [])}
         assert "org_name" in dim_names
-        assert "loan_prin_bal" not in dim_names
+        assert "loan_balance" not in dim_names
         # the measure still aggregates the raw column
-        assert any(m["expr"] == "loan_prin_bal" for m in ds["measures"])
+        assert any(m["expr"] == "loan_balance" for m in ds["measures"])
 
     def test_round_trip_preserves_non_dimension_fields(self):
         doc = parse_osi(_core_doc([_snapshot_dataset()]))
         core = to_core_schema_document(doc)
         reloaded = compile_document(parse_osi(core))
         fields = {f.name: f for f in reloaded.datasets[0].fields}
-        assert fields["loan_prin_bal"].is_dimension is False
+        assert fields["loan_balance"].is_dimension is False
         assert fields["org_name"].is_dimension is True
 
 
@@ -197,7 +196,7 @@ class TestStructuralValidation:
         types = lowered_element_types(model)
         assert types["etl_dt"] == {"time"}
         assert types["org_no"] == {"identifier"}
-        assert "loan_prin_bal" not in types
+        assert "loan_balance" not in types
 
 
 class TestQualifiedColumnResolution:
@@ -214,11 +213,11 @@ class TestQualifiedColumnResolution:
         return parse_osi(_core_doc([loans, deposits], metrics=[metric]))
 
     def test_dataset_inferred_from_qualified_columns(self):
-        model = compile_document(self._two_dataset_doc("SUM(loans.loan_prin_bal)"))
+        model = compile_document(self._two_dataset_doc("SUM(loans.loan_balance)"))
         metric = model.metrics[0]
         assert metric.dataset == "loans"
         # the qualifier must not leak into the backing measure expression
-        assert metric.measures[0].expr == "loan_prin_bal"
+        assert metric.measures[0].expr == "loan_balance"
 
     def test_unqualified_columns_in_multi_dataset_model_still_require_hint(self):
         import pytest
@@ -226,17 +225,17 @@ class TestQualifiedColumnResolution:
         from datus_semantic_osi.errors import OSIValidationError
 
         with pytest.raises(OSIValidationError, match="must declare `dataset`"):
-            compile_document(self._two_dataset_doc("SUM(loan_prin_bal)"))
+            compile_document(self._two_dataset_doc("SUM(loan_balance)"))
 
     def test_qualifier_stripping_applies_to_single_dataset_models_too(self):
         metric = {
             "name": "loan_total",
             "expression": {
-                "dialects": [{"dialect": "ANSI_SQL", "expression": "SUM(loan_quality.loan_prin_bal)"}]
+                "dialects": [{"dialect": "ANSI_SQL", "expression": "SUM(loan_quality.loan_balance)"}]
             },
         }
         model = compile_document(parse_osi(_core_doc([_snapshot_dataset()], metrics=[metric])))
-        assert model.metrics[0].measures[0].expr == "loan_prin_bal"
+        assert model.metrics[0].measures[0].expr == "loan_balance"
 
 
 class TestRelationshipTypeInference:
@@ -302,12 +301,12 @@ class TestMeasureAsDimensionWarning:
         ds = _snapshot_dataset()
         ds["fields"] = [
             _field("etl_dt", dimension={"is_time": True}),
-            _field("loan_prin_bal", dimension={"is_time": False}),
+            _field("loan_balance", dimension={"is_time": False}),
         ]
         model = compile_document(parse_osi(_core_doc([ds], metrics=[_sum_metric()])))
         warnings = detect_measure_columns_modeled_as_dimensions(model)
         assert len(warnings) == 1
-        assert "`loan_prin_bal`" in warnings[0]
+        assert "`loan_balance`" in warnings[0]
         assert "dimension" in warnings[0]
 
     def test_silent_when_aggregated_column_is_a_plain_field(self):
