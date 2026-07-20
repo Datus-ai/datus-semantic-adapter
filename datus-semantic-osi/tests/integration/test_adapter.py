@@ -9,8 +9,9 @@ from types import SimpleNamespace
 
 pytest.importorskip("metricflow")
 
-from datus_semantic_core.models import QueryResult
+from datus_semantic_core.models import QueryResult, ValidationResult
 from datus_semantic_osi.adapter import DatusOSIAdapter
+from datus_semantic_osi.backend import MetricFlowBackend
 from datus_semantic_osi.config import DatusOSIConfig
 from datus_semantic_osi.profile import parse_osi_profile, to_core_schema_document
 
@@ -160,10 +161,42 @@ metrics:
 """
 
 
+SECOND_OSI_YAML = """
+semantic_model:
+  name: finance_budget
+datasets:
+  - name: budgets
+    source:
+      table: fact_budget
+    primary_key: budget_id
+    dimensions:
+      - name: cost_center
+        expr: cost_center
+metrics:
+  - name: budget_total
+    description: "Budget total"
+    expression: "SUM(budget_amount)"
+    dataset: budgets
+    subject_path: [finance, budget]
+"""
+
+
 @pytest.fixture
 def adapter(tmp_path):
     (tmp_path / "model.yaml").write_text(_core_yaml(OSI_YAML))
     config = DatusOSIConfig(semantic_models_path=str(tmp_path), datasource="starrocks")
+    return DatusOSIAdapter(config)
+
+
+@pytest.fixture
+def multi_model_adapter(tmp_path):
+    models_path = tmp_path / "models"
+    models_path.mkdir()
+    (models_path / "commerce_orders.yaml").write_text(_core_yaml(OSI_YAML))
+    (models_path / "finance_budget.yaml").write_text(_core_yaml(SECOND_OSI_YAML))
+    config = DatusOSIConfig(
+        semantic_models_path=str(models_path), datasource="starrocks"
+    )
     return DatusOSIAdapter(config)
 
 
@@ -194,6 +227,72 @@ class _FakeBackend:
     def make_executor(self, model):
         self.models.append(model)
         return self.executor
+
+
+class _FakeValidationBackend:
+    has_live_connection = False
+    capabilities = {}
+
+    def __init__(self):
+        self.models = []
+
+    def validate(self, model):
+        self.models.append(model)
+        return ValidationResult(valid=True)
+
+
+async def test_multi_model_adapter_lists_models_and_metrics(multi_model_adapter):
+    models = multi_model_adapter.list_semantic_models()
+    metrics = {metric.name: metric for metric in await multi_model_adapter.list_metrics()}
+
+    assert {model.name for model in models} == {"commerce_orders", "finance_budget"}
+    assert metrics["order_count"].metadata["semantic_model_name"] == "commerce_orders"
+    assert metrics["budget_total"].metadata["semantic_model_name"] == "finance_budget"
+
+
+async def test_multi_model_adapter_routes_query_to_metric_owner(multi_model_adapter):
+    executor = _FakeExecutor(QueryResult(columns=["budget_total"], data=[]))
+    backend = _FakeBackend(executor)
+    multi_model_adapter._backend = backend
+
+    await multi_model_adapter.query_metrics(["budget_total"])
+
+    assert [model.name for model in backend.models] == ["finance_budget"]
+
+
+async def test_multi_model_adapter_rejects_cross_model_query(multi_model_adapter):
+    with pytest.raises(ValueError, match="multiple semantic models"):
+        await multi_model_adapter.query_metrics(["order_count", "budget_total"])
+
+
+async def test_targeted_validation_only_validates_selected_model(multi_model_adapter):
+    backend = _FakeValidationBackend()
+    multi_model_adapter._backend = backend
+
+    result = await multi_model_adapter.validate_semantic(
+        scope="semantic_model",
+        semantic_model_name="finance_budget",
+        checks=["backend"],
+    )
+
+    assert result.valid
+    assert [model.name for model in backend.models] == ["finance_budget"]
+
+
+def test_backend_artifacts_are_isolated_by_model(multi_model_adapter, tmp_path):
+    backend = MetricFlowBackend(generated_path=str(tmp_path / "generated"))
+
+    commerce_path = backend._write_persistent(
+        multi_model_adapter._model("commerce_orders")
+    )
+    finance_path = backend._write_persistent(
+        multi_model_adapter._model("finance_budget")
+    )
+
+    assert commerce_path.name == "commerce_orders"
+    assert finance_path.name == "finance_budget"
+    assert (commerce_path / "semantic_models.yaml").is_file()
+    assert (finance_path / "semantic_models.yaml").is_file()
 
 
 async def test_validate_semantic_passes(adapter):
@@ -276,7 +375,10 @@ async def test_list_metrics_selects_subject_path(adapter):
 
 def test_offset_derived_metrics_use_current_period_anchor(adapter):
     query_metrics, hidden_anchor_metrics, filter_anchor_metrics = (
-        adapter._query_metrics_plan(["order_count_mom"])
+        adapter._query_metrics_plan(
+            adapter._resolve_query_model(["order_count_mom"]),
+            ["order_count_mom"],
+        )
     )
 
     assert query_metrics == ["order_count_mom", "order_count"]
@@ -286,7 +388,10 @@ def test_offset_derived_metrics_use_current_period_anchor(adapter):
 
 def test_offset_only_metrics_use_referenced_metric_as_anchor(adapter):
     query_metrics, hidden_anchor_metrics, filter_anchor_metrics = (
-        adapter._query_metrics_plan(["previous_month_order_count"])
+        adapter._query_metrics_plan(
+            adapter._resolve_query_model(["previous_month_order_count"]),
+            ["previous_month_order_count"],
+        )
     )
 
     assert query_metrics == ["previous_month_order_count", "order_count"]
@@ -296,7 +401,10 @@ def test_offset_only_metrics_use_referenced_metric_as_anchor(adapter):
 
 def test_period_over_period_metrics_use_generated_base_as_anchor(adapter):
     query_metrics, hidden_anchor_metrics, filter_anchor_metrics = (
-        adapter._query_metrics_plan(["order_count_month_yoy"])
+        adapter._query_metrics_plan(
+            adapter._resolve_query_model(["order_count_month_yoy"]),
+            ["order_count_month_yoy"],
+        )
     )
 
     assert query_metrics == [
@@ -309,7 +417,10 @@ def test_period_over_period_metrics_use_generated_base_as_anchor(adapter):
 
 def test_week_period_over_period_metrics_use_generated_base_as_anchor(adapter):
     query_metrics, hidden_anchor_metrics, filter_anchor_metrics = (
-        adapter._query_metrics_plan(["order_count_week_wow_delta"])
+        adapter._query_metrics_plan(
+            adapter._resolve_query_model(["order_count_week_wow_delta"]),
+            ["order_count_week_wow_delta"],
+        )
     )
 
     assert query_metrics == [

@@ -1,9 +1,12 @@
 import pytest
+import yaml
 
 from datus_semantic_osi.compiler import compile_document
 from datus_semantic_osi.profile import (
     load_osi_path,
+    load_osi_model,
     parse_osi,
+    parse_osi_model,
     parse_osi_profile,
     to_core_schema_document,
 )
@@ -37,6 +40,37 @@ semantic_model:
 """
 
 
+SECOND_DATASET_DOC = DATASET_DOC.replace("name: shop", "name: finance", 1).replace(
+    "name: orders", "name: budgets", 1
+).replace("source: orders", "source: budgets", 1).replace(
+    "order_id", "budget_id"
+)
+
+
+def test_parse_osi_returns_all_models():
+    document = yaml.safe_load(DATASET_DOC)
+    document["semantic_model"].extend(
+        yaml.safe_load(SECOND_DATASET_DOC)["semantic_model"]
+    )
+
+    models = parse_osi(document)
+
+    assert list(models) == ["shop", "finance"]
+    assert [dataset.name for dataset in models["shop"].datasets] == ["orders"]
+    assert [dataset.name for dataset in models["finance"].datasets] == ["budgets"]
+
+
+def test_load_osi_path_keeps_different_models_separate(tmp_path):
+    (tmp_path / "shop.yml").write_text(DATASET_DOC, encoding="utf-8")
+    (tmp_path / "finance.yml").write_text(SECOND_DATASET_DOC, encoding="utf-8")
+
+    models = load_osi_path(tmp_path)
+
+    assert set(models) == {"shop", "finance"}
+    assert [dataset.name for dataset in models["shop"].datasets] == ["orders"]
+    assert [dataset.name for dataset in models["finance"].datasets] == ["budgets"]
+
+
 def test_load_osi_path_recurses_metric_subdirectories(tmp_path):
     (tmp_path / "model.yml").write_text(DATASET_DOC, encoding="utf-8")
     metrics_dir = tmp_path / "metrics"
@@ -67,7 +101,7 @@ def test_load_osi_path_recurses_metric_subdirectories(tmp_path):
         encoding="utf-8",
     )
 
-    doc = load_osi_path(tmp_path)
+    doc = load_osi_model(tmp_path)
 
     assert [dataset.name for dataset in doc.datasets] == ["orders"]
     assert [metric.name for metric in doc.metrics] == ["order_count", "customer_count"]
@@ -75,7 +109,7 @@ def test_load_osi_path_recurses_metric_subdirectories(tmp_path):
 
 
 def test_parse_osi_accepts_core_relationship_shape():
-    doc = parse_osi(
+    doc = parse_osi_model(
         """
 version: 0.2.0.dev0
 semantic_model:
@@ -118,7 +152,7 @@ semantic_model:
 
 
 def test_parse_osi_preserves_dataset_ai_context():
-    doc = parse_osi(
+    doc = parse_osi_model(
         """
 version: 0.2.0.dev0
 semantic_model:
@@ -148,7 +182,7 @@ semantic_model:
 
 
 def test_parse_osi_preserves_metric_ai_context():
-    doc = parse_osi(
+    doc = parse_osi_model(
         """
 version: 0.2.0.dev0
 semantic_model:
@@ -184,7 +218,7 @@ semantic_model:
 
 def test_parse_osi_rejects_datus_filter_hint():
     with pytest.raises(Exception, match="not an OSI authoring field"):
-        parse_osi(
+        parse_osi_model(
             """
 version: 0.2.0.dev0
 semantic_model:
@@ -208,7 +242,7 @@ semantic_model:
 
 
 def test_primary_time_dimension_preserves_expression():
-    doc = parse_osi(
+    doc = parse_osi_model(
         """
 version: 0.2.0.dev0
 semantic_model:
@@ -258,7 +292,7 @@ semantic_model:
 
 def test_parse_osi_rejects_relationships_inside_dataset():
     with pytest.raises(Exception, match="OSI core schema validation failed"):
-        parse_osi(
+        parse_osi_model(
             """
 version: 0.2.0.dev0
 semantic_model:
@@ -274,7 +308,7 @@ semantic_model:
 
 def test_parse_osi_rejects_non_core_relationship_fields():
     with pytest.raises(Exception, match="OSI core schema validation failed"):
-        parse_osi(
+        parse_osi_model(
             """
 version: 0.2.0.dev0
 semantic_model:
@@ -295,7 +329,7 @@ semantic_model:
 
 def test_parse_osi_rejects_composite_relationship_columns_for_now():
     with pytest.raises(Exception, match="exactly one column"):
-        parse_osi(
+        parse_osi_model(
             """
 version: 0.2.0.dev0
 semantic_model:
@@ -317,7 +351,7 @@ semantic_model:
 
 def test_parse_osi_rejects_legacy_profile_by_default():
     with pytest.raises(Exception, match="must conform to OSI core schema"):
-        parse_osi("semantic_model: {name: shop}\ndatasets: []\n")
+        parse_osi_model("semantic_model: {name: shop}\ndatasets: []\n")
 
 
 def test_legacy_profile_parser_is_explicit():
