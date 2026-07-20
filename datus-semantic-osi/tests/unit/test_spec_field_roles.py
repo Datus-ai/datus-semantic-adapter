@@ -12,7 +12,8 @@ import yaml
 
 from datus_semantic_osi.compiler import compile_document
 from datus_semantic_osi.metricflow_backend import lower_to_metricflow, lowered_element_types
-from datus_semantic_osi.profile import parse_osi, to_core_schema_document
+from datus_semantic_osi.profile import parse_osi_model as parse_osi
+from datus_semantic_osi.profile import to_core_schema_document
 from datus_semantic_osi.validator import (
     detect_measure_columns_modeled_as_dimensions,
     validate_ir,
