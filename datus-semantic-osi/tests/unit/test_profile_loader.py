@@ -2,6 +2,7 @@ import pytest
 import yaml
 
 from datus_semantic_osi.compiler import compile_document
+from datus_semantic_osi.errors import OSIValidationError
 from datus_semantic_osi.profile import (
     load_osi_path,
     load_osi_model,
@@ -40,10 +41,11 @@ semantic_model:
 """
 
 
-SECOND_DATASET_DOC = DATASET_DOC.replace("name: shop", "name: finance", 1).replace(
-    "name: orders", "name: budgets", 1
-).replace("source: orders", "source: budgets", 1).replace(
-    "order_id", "budget_id"
+SECOND_DATASET_DOC = (
+    DATASET_DOC.replace("name: shop", "name: finance", 1)
+    .replace("name: orders", "name: budgets", 1)
+    .replace("source: orders", "source: budgets", 1)
+    .replace("order_id", "budget_id")
 )
 
 
@@ -69,6 +71,35 @@ def test_load_osi_path_keeps_different_models_separate(tmp_path):
     assert set(models) == {"shop", "finance"}
     assert [dataset.name for dataset in models["shop"].datasets] == ["orders"]
     assert [dataset.name for dataset in models["finance"].datasets] == ["budgets"]
+
+
+def test_load_named_model_ignores_unrelated_invalid_model(tmp_path):
+    (tmp_path / "shop.yml").write_text(DATASET_DOC, encoding="utf-8")
+    (tmp_path / "broken.yml").write_text(
+        "version: 0.2.0.dev0\n"
+        "semantic_model:\n"
+        "  - name: broken\n"
+        "    datasets:\n"
+        "      - name: missing_source\n",
+        encoding="utf-8",
+    )
+
+    document = load_osi_model(tmp_path, semantic_model_name="shop")
+
+    assert document.name == "shop"
+    assert [dataset.name for dataset in document.datasets] == ["orders"]
+    with pytest.raises(OSIValidationError, match="source.*required"):
+        load_osi_path(tmp_path)
+
+
+def test_load_named_model_keeps_target_document_schema_validation(tmp_path):
+    (tmp_path / "shop.yml").write_text(
+        DATASET_DOC.replace("version: 0.2.0.dev0", "version: unsupported"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(OSIValidationError, match="version"):
+        load_osi_model(tmp_path, semantic_model_name="shop")
 
 
 def test_load_osi_path_recurses_metric_subdirectories(tmp_path):

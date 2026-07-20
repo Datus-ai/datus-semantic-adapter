@@ -55,7 +55,7 @@ from datus_semantic_osi.metricflow_backend import (
     period_over_period_base_metric_name,
 )
 from datus_semantic_osi.normalizer import NormalizationResult, normalize_document
-from datus_semantic_osi.profile import OSIDocument, load_osi_path
+from datus_semantic_osi.profile import OSIDocument, load_osi_model, load_osi_path
 from datus_semantic_osi.query_join import apply_join_policy, normalize_join_policy
 from datus_semantic_osi.query_utils import (
     dimension_output_column,
@@ -208,6 +208,16 @@ class DatusOSIAdapter(BaseSemanticAdapter):
             raise OSIValidationError(" ".join(result.errors))
         return result
 
+    def _load_target_document_result(
+        self, semantic_model_name: str
+    ) -> NormalizationResult:
+        """Load one model without letting unrelated invalid files block validation."""
+        document = load_osi_model(
+            self._semantic_models_path(),
+            semantic_model_name=semantic_model_name,
+        )
+        return normalize_document(document)
+
     def _load_document(self, semantic_model_name: str) -> OSIDocument:
         return self._load_document_result(semantic_model_name).document
 
@@ -226,7 +236,9 @@ class DatusOSIAdapter(BaseSemanticAdapter):
     def _resolve_query_model(self, metrics: List[str]) -> SemanticModelIR:
         if not metrics:
             raise ValueError("At least one metric is required.")
-        unknown = [name for name in self._dedupe(metrics) if not self._metric_model_name(name)]
+        unknown = [
+            name for name in self._dedupe(metrics) if not self._metric_model_name(name)
+        ]
         if unknown:
             raise ValueError(f"Unknown metric(s): {', '.join(unknown)}.")
         owners = {
@@ -838,9 +850,7 @@ class DatusOSIAdapter(BaseSemanticAdapter):
             if referenced is None:
                 continue
             anchors.extend(
-                self._offset_anchor_metric_names(
-                    model, referenced, set(seen_metrics)
-                )
+                self._offset_anchor_metric_names(model, referenced, set(seen_metrics))
             )
 
         return self._dedupe(anchors)
@@ -857,9 +867,7 @@ class DatusOSIAdapter(BaseSemanticAdapter):
             if metric is None:
                 continue
             if self._metric_has_offset_dependency(model, metric):
-                anchor_metrics.extend(
-                    self._offset_anchor_metric_names(model, metric)
-                )
+                anchor_metrics.extend(self._offset_anchor_metric_names(model, metric))
             else:
                 filter_metrics.append(metric_name)
 
@@ -1100,9 +1108,7 @@ class DatusOSIAdapter(BaseSemanticAdapter):
         relationship, to_dataset, field, _join_name = rel_dim
         rel_dim_key = self._relationship_dimension_key(rel_dim)
         for metric in typed_metrics[1:]:
-            metric_rel_dim = self._relationship_dimension(
-                model, metric, dimensions[0]
-            )
+            metric_rel_dim = self._relationship_dimension(model, metric, dimensions[0])
             if (
                 metric_rel_dim is None
                 or self._relationship_dimension_key(metric_rel_dim) != rel_dim_key
@@ -1637,27 +1643,20 @@ class DatusOSIAdapter(BaseSemanticAdapter):
             )
 
         try:
-            results = self._load_document_results()
+            if semantic_model_name:
+                results = {
+                    semantic_model_name: self._load_target_document_result(
+                        semantic_model_name
+                    )
+                }
+            else:
+                results = self._load_document_results()
         except OSIError as e:
             return ValidationResult(
                 valid=False, issues=[ValidationIssue(severity="error", message=str(e))]
             )
 
         if semantic_model_name:
-            if semantic_model_name not in results:
-                candidates = ", ".join(sorted(results)) or "<none>"
-                return ValidationResult(
-                    valid=False,
-                    issues=[
-                        ValidationIssue(
-                            severity="error",
-                            message=(
-                                f"Semantic model `{semantic_model_name}` was not found. "
-                                f"Available models: {candidates}."
-                            ),
-                        )
-                    ],
-                )
             selected_names = [semantic_model_name]
         elif scope == "all":
             selected_names = list(results)
@@ -1701,9 +1700,7 @@ class DatusOSIAdapter(BaseSemanticAdapter):
             if "profile" in checks_list:
                 for message in validate_profile(doc):
                     add_issue(model_name, "error", message)
-                for message in detect_nonportable_functions(
-                    doc, dialect=self._dialect
-                ):
+                for message in detect_nonportable_functions(doc, dialect=self._dialect):
                     add_issue(model_name, "warning", message)
             if "authoring_quality" in checks_list:
                 for message in validate_authoring_quality(doc):
@@ -1712,14 +1709,17 @@ class DatusOSIAdapter(BaseSemanticAdapter):
                 for message in validate_mutation_guard(doc, baseline_artifact):
                     add_issue(model_name, "error", message)
 
-            if any(
-                issue.severity == "error"
-                for issue in issues[model_issue_start:]
-            ) or not needs_ir:
+            if (
+                any(issue.severity == "error" for issue in issues[model_issue_start:])
+                or not needs_ir
+            ):
                 continue
 
             try:
-                model = self._model(model_name)
+                if semantic_model_name:
+                    model = compile_document(doc, dialect=self._dialect)
+                else:
+                    model = self._model(model_name)
             except OSIValidationError as exc:
                 add_issue(model_name, "error", str(exc))
                 continue
@@ -1736,10 +1736,10 @@ class DatusOSIAdapter(BaseSemanticAdapter):
                 for message in validate_capabilities(model, caps):
                     add_issue(model_name, "error", message)
 
-            if any(
-                issue.severity == "error"
-                for issue in issues[model_issue_start:]
-            ) or "backend" not in checks_list:
+            if (
+                any(issue.severity == "error" for issue in issues[model_issue_start:])
+                or "backend" not in checks_list
+            ):
                 continue
 
             if getattr(self._backend, "has_live_connection", False):

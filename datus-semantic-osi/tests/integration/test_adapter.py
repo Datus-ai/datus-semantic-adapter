@@ -6,6 +6,7 @@
 import pytest
 import yaml
 from types import SimpleNamespace
+from typing import ClassVar
 
 pytest.importorskip("metricflow")
 
@@ -231,7 +232,7 @@ class _FakeBackend:
 
 class _FakeValidationBackend:
     has_live_connection = False
-    capabilities = {}
+    capabilities: ClassVar[dict] = {}
 
     def __init__(self):
         self.models = []
@@ -243,7 +244,9 @@ class _FakeValidationBackend:
 
 async def test_multi_model_adapter_lists_models_and_metrics(multi_model_adapter):
     models = multi_model_adapter.list_semantic_models()
-    metrics = {metric.name: metric for metric in await multi_model_adapter.list_metrics()}
+    metrics = {
+        metric.name: metric for metric in await multi_model_adapter.list_metrics()
+    }
 
     assert {model.name for model in models} == {"commerce_orders", "finance_budget"}
     assert metrics["order_count"].metadata["semantic_model_name"] == "commerce_orders"
@@ -277,6 +280,28 @@ async def test_targeted_validation_only_validates_selected_model(multi_model_ada
 
     assert result.valid
     assert [model.name for model in backend.models] == ["finance_budget"]
+
+
+async def test_targeted_validation_ignores_unrelated_invalid_model(
+    multi_model_adapter,
+):
+    models_path = multi_model_adapter.config.semantic_models_path
+    with open(f"{models_path}/broken.yml", "w", encoding="utf-8") as stream:
+        stream.write(
+            "version: 0.2.0.dev0\n"
+            "semantic_model:\n"
+            "  - name: broken\n"
+            "    datasets:\n"
+            "      - name: missing_source\n"
+        )
+
+    result = await multi_model_adapter.validate_semantic(
+        scope="semantic_model",
+        semantic_model_name="finance_budget",
+        checks=["profile"],
+    )
+
+    assert result.valid
 
 
 def test_backend_artifacts_are_isolated_by_model(multi_model_adapter, tmp_path):
