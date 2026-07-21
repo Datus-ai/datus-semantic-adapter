@@ -297,6 +297,22 @@ class DatusOSIAdapter(BaseSemanticAdapter):
     def _format_date_boundary(value: date) -> str:
         return value.isoformat()
 
+    @classmethod
+    def _exclusive_end_to_inclusive(cls, time_end: Optional[str]) -> Optional[str]:
+        """Translate the half-open ``time_end`` contract to an inclusive bound.
+
+        The Datus query contract for OSI-family semantic layers treats
+        ``time_end`` as an exclusive upper bound (half-open range
+        ``[time_start, time_end)``, matching osi-engine S-TIME-3), while
+        MetricFlow time constraints — and this adapter's own rendered SQL and
+        row filters — are end-inclusive at day grain. Convert once at the
+        query entry point; everything downstream stays inclusive.
+        """
+        end = cls._parse_date_boundary(time_end, label="time_end")
+        if end is None:
+            return time_end
+        return cls._format_date_boundary(end - timedelta(days=1))
+
     @staticmethod
     def _shift_months(value: date, months: int) -> date:
         month_index = value.month - 1 + months
@@ -1445,6 +1461,7 @@ class DatusOSIAdapter(BaseSemanticAdapter):
         period_over_period_metrics = self._period_over_period_metrics(model, metrics)
         live = getattr(self._backend, "has_live_connection", False)
         dimensions = dimensions or []
+        time_end = self._exclusive_end_to_inclusive(time_end)
         dimensions, time_granularity = self._ensure_time_grouping(
             model, metrics, dimensions, time_granularity
         )
