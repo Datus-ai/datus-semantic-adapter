@@ -142,9 +142,11 @@ class OSIEngineAdapter(BaseSemanticAdapter):
         dimensions = list(dimensions or [])
         # Fetched off the event loop; _build_query stays pure (no engine I/O).
         dimension_rows = await asyncio.to_thread(engine.dimensions)
+        metric_rows = await asyncio.to_thread(engine.metrics)
 
         query = self._build_query(
             dimension_rows,
+            metric_rows,
             metrics=metrics,
             dimensions=dimensions,
             time_start=time_start,
@@ -284,6 +286,7 @@ class OSIEngineAdapter(BaseSemanticAdapter):
     def _build_query(
         self,
         dimension_rows: List[Dict[str, Any]],
+        metric_rows: List[Dict[str, Any]],
         *,
         metrics: List[str],
         dimensions: List[str],
@@ -341,7 +344,44 @@ class OSIEngineAdapter(BaseSemanticAdapter):
         if where:
             query["where_sql"] = where
         if time_start or time_end:
-            query["time_range"] = {"start": time_start, "end": time_end}
+            time_range: Dict[str, Any] = {"start": time_start, "end": time_end}
+            # The engine binds a time range to an explicit `dimension`, else the
+            # single time dimension in the group-by, else it rejects the query
+            # (S-TIME-3). Datus callers routinely time-filter without grouping
+            # by time ("total for September"), so when the group-by carries no
+            # time dimension, resolve the target from the queried metrics'
+            # datasets and pass it explicitly.
+            if not any(is_time_dimension(item["field"]) for item in group_by):
+                metric_datasets = {
+                    dataset
+                    for row in metric_rows
+                    if row.get("name") in metrics
+                    for dataset in row.get("datasets") or []
+                }
+                candidates = sorted(
+                    name
+                    for name in time_dimension_names
+                    if name.split(".", 1)[0] in metric_datasets
+                )
+                if len(candidates) == 1:
+                    time_range["dimension"] = candidates[0]
+                elif len(candidates) > 1:
+                    raise SemanticValidationException(
+                        SemanticValidationError(
+                            code="time_range_needs_dimension",
+                            metrics=list(metrics),
+                            required_dimensions=candidates,
+                            message=(
+                                "the time range matches more than one time dimension of the "
+                                f"queried metrics ({', '.join(candidates)}); group by the "
+                                "intended one, or query metrics that share a single time "
+                                "dimension"
+                            ),
+                        )
+                    )
+                # No candidate: leave the range unbound — the engine reports
+                # time_range_needs_dimension with its own structured error.
+            query["time_range"] = time_range
         if order_by:
             query["order_by"] = [
                 {"key": key[1:], "desc": True}

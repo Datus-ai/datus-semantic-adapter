@@ -90,6 +90,63 @@ async def test_query_metrics_bare_time_dimension_gets_grain(make_adapter):
     ]
 
 
+async def test_time_range_without_time_grouping_binds_metric_time_dimension(make_adapter):
+    """A time filter with no time grouping resolves the metric's time dimension.
+
+    The engine otherwise rejects the query with time_range_needs_dimension —
+    but "total for September" style asks are the most common Datus shape.
+    """
+    adapter = make_adapter()
+    await adapter.query_metrics(metrics=["revenue"], time_start="2025-09-01", time_end="2025-10-01")
+    engine = FakeEngine.instances[-1]
+    assert engine.execute_calls[0]["query"]["time_range"] == {
+        "start": "2025-09-01",
+        "end": "2025-10-01",
+        "dimension": "orders.order_date",
+    }
+
+
+def test_time_range_with_ambiguous_time_dimensions_is_structured(make_adapter):
+    adapter = make_adapter()
+    with pytest.raises(SemanticValidationException) as exc:
+        adapter._build_query(
+            [
+                {"name": "orders.order_date", "is_time": True},
+                {"name": "orders.ship_date", "is_time": True},
+            ],
+            [{"name": "revenue", "datasets": ["orders"]}],
+            metrics=["revenue"],
+            dimensions=[],
+            time_start="2025-09-01",
+            time_end="2025-10-01",
+            time_granularity=None,
+            where=None,
+            limit=None,
+            order_by=None,
+        )
+    payload = exc.value.payload
+    assert payload.code == "time_range_needs_dimension"
+    assert payload.required_dimensions == ["orders.order_date", "orders.ship_date"]
+
+
+def test_time_range_with_no_reachable_time_dimension_stays_unbound(make_adapter):
+    """No candidate: pass the range through; the engine reports its own error."""
+    adapter = make_adapter()
+    query = adapter._build_query(
+        [{"name": "orders.status", "is_time": False}],
+        [{"name": "revenue", "datasets": ["orders"]}],
+        metrics=["revenue"],
+        dimensions=[],
+        time_start="2025-09-01",
+        time_end="2025-10-01",
+        time_granularity=None,
+        where=None,
+        limit=None,
+        order_by=None,
+    )
+    assert query["time_range"] == {"start": "2025-09-01", "end": "2025-10-01"}
+
+
 async def test_time_granularity_without_time_dimension_is_structured(make_adapter):
     adapter = make_adapter()
     with pytest.raises(SemanticValidationException) as exc:
