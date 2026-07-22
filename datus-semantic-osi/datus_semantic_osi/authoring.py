@@ -20,6 +20,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import stat
 import tempfile
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
@@ -143,7 +144,12 @@ def _set_datus_hints(node: Dict[str, Any], updates: Dict[str, Any]) -> None:
 
 
 class OSIMetricAuthor:
-    """Read/write/delete/validate a single OSI metric in its source file."""
+    """Read/write/delete/validate a single OSI metric in its source file.
+
+    Assumes a single writer: the read-modify-write cycle is not file-locked, so
+    concurrent writes to the same model file can lose updates. Callers that
+    allow concurrent authoring must serialize it upstream.
+    """
 
     def __init__(self, semantic_models_path: str):
         self._root = semantic_models_path
@@ -388,10 +394,16 @@ def _atomic_write(file_path: str, docs: List[Any]) -> None:
     payload = yaml.safe_dump_all(
         docs, sort_keys=False, allow_unicode=True, default_flow_style=False
     )
+    # Preserve the existing file's permission bits; mkstemp creates 0600, which
+    # would otherwise strip group/other read access on first edit.
+    mode = (
+        stat.S_IMODE(os.stat(file_path).st_mode) if os.path.exists(file_path) else 0o644
+    )
     fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(payload)
+        os.chmod(tmp_path, mode)
         os.replace(tmp_path, file_path)
     finally:
         if os.path.exists(tmp_path):

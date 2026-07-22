@@ -145,3 +145,15 @@ def test_write_tolerates_metricflow_wrapper(root):
     wrapped = "metric:\n" + textwrap.indent(src.text, "  ")
     res = author.write("daily_order_count", wrapped)
     assert res.name == "daily_order_count"
+
+
+def test_edit_preserves_file_permissions(root):
+    import os
+    import stat
+
+    author = OSIMetricAuthor(root)
+    target = os.path.join(root, "jeff_shop_live", "jeff_shop_live.yml")
+    os.chmod(target, 0o644)
+    src = author.read("daily_order_count")
+    author.write("daily_order_count", src.text)
+    assert stat.S_IMODE(os.stat(target).st_mode) == 0o644

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import glob
 import os
+import stat
 import tempfile
 from dataclasses import dataclass
 from typing import Any, List, Optional
@@ -69,7 +70,12 @@ def _set_subject_tree_tag(node: dict, subject_path: List[str]) -> None:
 
 
 class MetricFlowMetricAuthor:
-    """Read/write/delete/validate a single MetricFlow metric in its source file."""
+    """Read/write/delete/validate a single MetricFlow metric in its source file.
+
+    Assumes a single writer: the read-modify-write cycle is not file-locked, so
+    concurrent writes to the same file can lose updates. Callers that allow
+    concurrent authoring must serialize it upstream.
+    """
 
     def __init__(self, model_path: str):
         self._root = model_path
@@ -166,9 +172,11 @@ class MetricFlowMetricAuthor:
         if loc is None:
             raise FileNotFoundError(f"Metric `{metric_name}` was not found in {self._root}.")
         del loc.docs[loc.doc_index]
+        # Drop empty (``None``) documents that leading/trailing ``---`` produce,
+        # so we never write a literal ``null`` doc back to the file.
         remaining = [doc for doc in loc.docs if doc]
         if remaining:
-            _atomic_write(loc.file_path, loc.docs)
+            _atomic_write(loc.file_path, remaining)
         else:
             os.remove(loc.file_path)  # file held only this metric
         return MetricMutationResult(
@@ -210,10 +218,14 @@ def _atomic_write(file_path: str, docs: List[Any]) -> None:
     payload = yaml.safe_dump_all(
         docs, sort_keys=False, allow_unicode=True, default_flow_style=False
     )
+    # Preserve the existing file's permission bits; mkstemp creates 0600, which
+    # would otherwise strip group/other read access on first edit.
+    mode = stat.S_IMODE(os.stat(file_path).st_mode) if os.path.exists(file_path) else 0o644
     fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(payload)
+        os.chmod(tmp_path, mode)
         os.replace(tmp_path, file_path)
     finally:
         if os.path.exists(tmp_path):
