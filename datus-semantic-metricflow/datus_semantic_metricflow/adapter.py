@@ -9,7 +9,9 @@ import os
 import yaml
 
 from datus_semantic_core import BaseSemanticAdapter
+from datus_semantic_core.authoring import MetricMutationResult, MetricSource
 from datus_semantic_core.models import SemanticValidationError
+from datus_semantic_metricflow.authoring import MetricFlowMetricAuthor
 from datus_semantic_metricflow.config import MetricFlowConfig
 from datus_semantic_metricflow.models import (
     DimensionInfo,
@@ -1167,3 +1169,44 @@ class MetricFlowAdapter(BaseSemanticAdapter):
     @staticmethod
     def _is_no_metrics_present_issue(issue: ValidationIssue) -> bool:
         return issue.severity == "error" and "No metrics present in the model" in str(issue.message)
+
+    # ==================== Authoring Interface ====================
+    # Backend/editor surface; not exposed as an agent/LLM tool. Operates on the
+    # MetricFlow YAML files (source of truth), not on the KB projection.
+
+    def _author(self) -> MetricFlowMetricAuthor:
+        return MetricFlowMetricAuthor(self._resolve_model_path(self.config))
+
+    def read_metric_source(
+        self,
+        metric_name: str,
+        *,
+        subject_path: Optional[List[str]] = None,
+    ) -> MetricSource:
+        return self._author().read(metric_name)
+
+    def write_metric_source(
+        self,
+        metric_name: str,
+        source: str,
+        *,
+        subject_path: Optional[List[str]] = None,
+        create: bool = False,
+    ) -> MetricMutationResult:
+        return self._author().write(metric_name, source, subject_path=subject_path, create=create)
+
+    def delete_metric_source(
+        self,
+        metric_name: str,
+        *,
+        subject_path: Optional[List[str]] = None,
+    ) -> MetricMutationResult:
+        return self._author().delete(metric_name)
+
+    def validate_metric_source(
+        self,
+        source: str,
+        *,
+        metric_name: Optional[str] = None,
+    ) -> ValidationResult:
+        return self._author().validate(source, metric_name=metric_name)

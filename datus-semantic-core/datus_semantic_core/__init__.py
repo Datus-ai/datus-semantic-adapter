@@ -4,6 +4,11 @@
 
 """datus-semantic-core: Core interfaces for Datus semantic adapters."""
 
+from datus_semantic_core.authoring import (
+    AuthoringNotSupportedError,
+    MetricMutationResult,
+    MetricSource,
+)
 from datus_semantic_core.base import BaseSemanticAdapter
 from datus_semantic_core.config import SemanticAdapterConfig
 from datus_semantic_core.exceptions import SemanticCoreException
@@ -26,6 +31,9 @@ __all__ = [
     "BaseSemanticAdapter",
     "SemanticAdapterConfig",
     "SemanticCoreException",
+    "AuthoringNotSupportedError",
+    "MetricSource",
+    "MetricMutationResult",
     "AnomalyContext",
     "DimensionInfo",
     "MetricDefinition",
