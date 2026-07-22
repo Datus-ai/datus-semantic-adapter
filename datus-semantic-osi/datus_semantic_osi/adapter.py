@@ -32,6 +32,9 @@ from datus_semantic_core.models import (
     ValidationResult,
 )
 
+from datus_semantic_core.authoring import MetricMutationResult, MetricSource
+
+from datus_semantic_osi.authoring import OSIMetricAuthor
 from datus_semantic_osi.backend import make_backend
 from datus_semantic_osi.compiler import compile_document
 from datus_semantic_osi.config import DatusOSIConfig
@@ -1771,3 +1774,44 @@ class DatusOSIAdapter(BaseSemanticAdapter):
             valid=not any(issue.severity == "error" for issue in issues),
             issues=issues,
         )
+
+    # ==================== Authoring Interface ====================
+    # Backend/editor surface; not exposed as an agent/LLM tool. Operates on the
+    # OSI YAML files (source of truth), not on the KB projection.
+
+    def _author(self) -> OSIMetricAuthor:
+        return OSIMetricAuthor(self._semantic_models_path())
+
+    def read_metric_source(
+        self,
+        metric_name: str,
+        *,
+        subject_path: Optional[List[str]] = None,
+    ) -> MetricSource:
+        return self._author().read(metric_name)
+
+    def write_metric_source(
+        self,
+        metric_name: str,
+        source: str,
+        *,
+        subject_path: Optional[List[str]] = None,
+        create: bool = False,
+    ) -> MetricMutationResult:
+        return self._author().write(metric_name, source, subject_path=subject_path, create=create)
+
+    def delete_metric_source(
+        self,
+        metric_name: str,
+        *,
+        subject_path: Optional[List[str]] = None,
+    ) -> MetricMutationResult:
+        return self._author().delete(metric_name)
+
+    def validate_metric_source(
+        self,
+        source: str,
+        *,
+        metric_name: Optional[str] = None,
+    ) -> ValidationResult:
+        return self._author().validate(source, metric_name=metric_name)

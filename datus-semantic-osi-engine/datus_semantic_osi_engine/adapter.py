@@ -17,8 +17,10 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Dict, List, Optional
 
+from datus_semantic_core.authoring import MetricMutationResult, MetricSource
 from datus_semantic_core.base import BaseSemanticAdapter
 from datus_semantic_core.exceptions import SemanticCoreException
+from datus_semantic_core.metric_author import MetricAuthor
 from datus_semantic_core.models import (
     DimensionInfo,
     MetricDefinition,
@@ -65,7 +67,9 @@ class OSIEngineAdapter(BaseSemanticAdapter):
     ) -> Optional[SemanticModelInfo]:
         for row in self._engine().datasets():
             source = str(row.get("source", ""))
-            if table_name in (row.get("name"), source) or source.endswith(f".{table_name}"):
+            if table_name in (row.get("name"), source) or source.endswith(
+                f".{table_name}"
+            ):
                 return self._model_info(row)
         return None
 
@@ -79,7 +83,9 @@ class OSIEngineAdapter(BaseSemanticAdapter):
     ) -> List[MetricDefinition]:
         engine = await asyncio.to_thread(self._engine)
         rows = await asyncio.to_thread(engine.metrics)
-        dimension_names = [d["name"] for d in await asyncio.to_thread(engine.dimensions)]
+        dimension_names = [
+            d["name"] for d in await asyncio.to_thread(engine.dimensions)
+        ]
         metrics = [
             MetricDefinition(
                 name=row["name"],
@@ -249,6 +255,67 @@ class OSIEngineAdapter(BaseSemanticAdapter):
             )
         return ValidationResult(valid=bool(payload.get("valid")), issues=issues)
 
+    # ==================== Authoring Interface ====================
+    # Backend/editor surface; not an agent/LLM tool. osi_engine authors the same
+    # OSI YAML files as the osi adapter, so the file read/write/validate logic is
+    # reused from the shared core MetricAuthor — only the execution/query engine
+    # differs (native Rust here vs the Python compiler there). Uses core's
+    # default structural document validation (no dependency on datus-semantic-osi).
+
+    def _authoring_root(self) -> str:
+        """The OSI model path authoring operates on (mirrors resolve_model_file).
+
+        An explicit ``semantic_model_path`` pins authoring to exactly that file
+        so sibling models in the same directory are never touched; otherwise the
+        configured ``semantic_models_path`` directory is scanned.
+        """
+        if self.config.semantic_model_path:
+            return self.config.semantic_model_path
+        if self.config.semantic_models_path:
+            return self.config.semantic_models_path
+        raise SemanticCoreException(
+            "osi_engine authoring requires semantic_model_path or semantic_models_path"
+        )
+
+    def _author(self) -> MetricAuthor:
+        return MetricAuthor(self._authoring_root())
+
+    def read_metric_source(
+        self,
+        metric_name: str,
+        *,
+        subject_path: Optional[List[str]] = None,
+    ) -> MetricSource:
+        return self._author().read(metric_name)
+
+    def write_metric_source(
+        self,
+        metric_name: str,
+        source: str,
+        *,
+        subject_path: Optional[List[str]] = None,
+        create: bool = False,
+    ) -> MetricMutationResult:
+        return self._author().write(
+            metric_name, source, subject_path=subject_path, create=create
+        )
+
+    def delete_metric_source(
+        self,
+        metric_name: str,
+        *,
+        subject_path: Optional[List[str]] = None,
+    ) -> MetricMutationResult:
+        return self._author().delete(metric_name)
+
+    def validate_metric_source(
+        self,
+        source: str,
+        *,
+        metric_name: Optional[str] = None,
+    ) -> ValidationResult:
+        return self._author().validate(source, metric_name=metric_name)
+
     # ==================== Internals ====================
 
     def _engine(self) -> Any:
@@ -262,7 +329,9 @@ class OSIEngineAdapter(BaseSemanticAdapter):
             extra={k: v for k, v in row.items() if k not in ("name", "source")},
         )
 
-    def _dry_run_dialect(self, binding: Any, connection: Optional[str]) -> Optional[str]:
+    def _dry_run_dialect(
+        self, binding: Any, connection: Optional[str]
+    ) -> Optional[str]:
         """Dialect for compile-only calls: explicit config, else db_config type.
 
         With a connection profile the engine already knows the dialect; an
