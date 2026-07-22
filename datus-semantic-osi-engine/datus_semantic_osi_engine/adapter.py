@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional
 from datus_semantic_core.authoring import MetricMutationResult, MetricSource
 from datus_semantic_core.base import BaseSemanticAdapter
 from datus_semantic_core.exceptions import SemanticCoreException
+from datus_semantic_core.metric_author import MetricAuthor
 from datus_semantic_core.models import (
     DimensionInfo,
     MetricDefinition,
@@ -30,7 +31,6 @@ from datus_semantic_core.models import (
     ValidationIssue,
     ValidationResult,
 )
-from datus_semantic_osi.authoring import OSIMetricAuthor
 
 from datus_semantic_osi_engine.config import OSIEngineConfig
 from datus_semantic_osi_engine.dialects import resolve_engine_dialect
@@ -259,8 +259,9 @@ class OSIEngineAdapter(BaseSemanticAdapter):
     # ==================== Authoring Interface ====================
     # Backend/editor surface; not an agent/LLM tool. osi_engine authors the same
     # OSI YAML files as the osi adapter, so the file read/write/validate logic is
-    # reused verbatim from datus-semantic-osi — only the execution/query engine
-    # differs (native Rust here vs the Python compiler there).
+    # reused from the shared core MetricAuthor — only the execution/query engine
+    # differs (native Rust here vs the Python compiler there). Uses core's
+    # default structural document validation (no dependency on datus-semantic-osi).
 
     def _authoring_root(self) -> str:
         """Directory that holds the OSI model file(s) for authoring.
@@ -277,8 +278,8 @@ class OSIEngineAdapter(BaseSemanticAdapter):
             "osi_engine authoring requires semantic_model_path or semantic_models_path"
         )
 
-    def _author(self) -> OSIMetricAuthor:
-        return OSIMetricAuthor(self._authoring_root())
+    def _author(self) -> MetricAuthor:
+        return MetricAuthor(self._authoring_root())
 
     def read_metric_source(
         self,

@@ -12,6 +12,13 @@ from datus_semantic_core.authoring import (
 from datus_semantic_core.base import BaseSemanticAdapter
 from datus_semantic_core.config import SemanticAdapterConfig
 from datus_semantic_core.exceptions import SemanticCoreException
+from datus_semantic_core.metric_author import (
+    DATUS_VENDOR,
+    DEFAULT_SCHEMA_VERSION,
+    MetricAuthor,
+    MetricAuthoringError,
+    default_validate_document,
+)
 from datus_semantic_core.models import (
     AnomalyContext,
     DimensionInfo,
@@ -34,6 +41,11 @@ __all__ = [
     "AuthoringNotSupportedError",
     "MetricSource",
     "MetricMutationResult",
+    "MetricAuthor",
+    "MetricAuthoringError",
+    "default_validate_document",
+    "DATUS_VENDOR",
+    "DEFAULT_SCHEMA_VERSION",
     "AnomalyContext",
     "DimensionInfo",
     "MetricDefinition",

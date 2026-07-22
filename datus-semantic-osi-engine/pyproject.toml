@@ -8,11 +8,10 @@ authors = [{name = "DatusAI", email = "support@datus.ai"}]
 dependencies = [
     "pydantic>=2.0.0",
     "pyyaml>=6.0",
-    "datus-semantic-core>=0.2.0",
-    # Authoring reuse: OSI and osi_engine author the same OSI YAML files, so the
-    # file read/write/validate logic lives in datus-semantic-osi and is shared.
-    # Only the lightweight authoring/profile layer is imported (no compiler).
-    "datus-semantic-osi>=0.1.4",
+    # Authoring reuse: the shared MetricAuthor lives in core, so osi_engine
+    # reuses the OSI file read/write/validate logic without depending on the
+    # datus-semantic-osi (Python compiler) package.
+    "datus-semantic-core>=0.2.2",
 ]
 
 [project.optional-dependencies]
@@ -32,7 +31,6 @@ osi_engine = "datus_semantic_osi_engine:register"
 
 [tool.uv.sources]
 datus-semantic-core = { workspace = true }
-datus-semantic-osi = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]
