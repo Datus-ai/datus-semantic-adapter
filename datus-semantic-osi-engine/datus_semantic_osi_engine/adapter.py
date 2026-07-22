@@ -15,7 +15,6 @@ Scope note: an engine instance serves ONE OSI model file, so the ``path``
 from __future__ import annotations
 
 import asyncio
-import os
 from typing import Any, Dict, List, Optional
 
 from datus_semantic_core.authoring import MetricMutationResult, MetricSource
@@ -264,14 +263,14 @@ class OSIEngineAdapter(BaseSemanticAdapter):
     # default structural document validation (no dependency on datus-semantic-osi).
 
     def _authoring_root(self) -> str:
-        """Directory that holds the OSI model file(s) for authoring.
+        """The OSI model path authoring operates on (mirrors resolve_model_file).
 
-        ``OSIMetricAuthor`` scans a directory; mirror ``resolve_model_file``'s
-        precedence — an explicit ``semantic_model_path`` file uses its parent
-        dir, otherwise the configured ``semantic_models_path`` directory.
+        An explicit ``semantic_model_path`` pins authoring to exactly that file
+        so sibling models in the same directory are never touched; otherwise the
+        configured ``semantic_models_path`` directory is scanned.
         """
         if self.config.semantic_model_path:
-            return os.path.dirname(self.config.semantic_model_path) or "."
+            return self.config.semantic_model_path
         if self.config.semantic_models_path:
             return self.config.semantic_models_path
         raise SemanticCoreException(

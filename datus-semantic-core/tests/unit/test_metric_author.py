@@ -108,3 +108,17 @@ def test_custom_validator_is_invoked(root):
     result = author.validate(author.read("daily_order_count").text)
     assert result.valid is False
     assert calls  # the injected validator ran
+
+
+def test_file_root_pins_to_one_model_ignoring_siblings(tmp_path):
+    # A file root must not discover metrics in sibling files in the same dir.
+    (tmp_path / "model_a.yml").write_text(SAMPLE)
+    (tmp_path / "model_b.yml").write_text(
+        SAMPLE.replace("jeff_shop_live", "other_model").replace(
+            "daily_order_count", "sibling_metric"
+        )
+    )
+    author = MetricAuthor(str(tmp_path / "model_a.yml"))
+    assert author.read("daily_order_count").name == "daily_order_count"
+    with pytest.raises(MetricAuthoringError):
+        author.read("sibling_metric")  # lives only in the sibling file

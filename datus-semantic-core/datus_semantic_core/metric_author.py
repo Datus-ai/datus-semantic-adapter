@@ -67,6 +67,10 @@ class _MetricLocation:
 
 
 def _yaml_files(root: str) -> List[str]:
+    # A file root pins authoring to exactly that model file; a directory root
+    # scans it recursively for OSI YAML.
+    if os.path.isfile(root):
+        return [root]
     return sorted(
         glob.glob(os.path.join(root, "**", "*.yaml"), recursive=True)
         + glob.glob(os.path.join(root, "**", "*.yml"), recursive=True)
@@ -209,7 +213,8 @@ class MetricAuthor:
     allow concurrent authoring must serialize it upstream.
 
     Args:
-        semantic_models_path: directory scanned for OSI model YAML files.
+        semantic_models_path: a directory scanned for OSI model YAML files, or a
+            single model file to pin authoring to (siblings are never touched).
         validate_document: optional ``(doc_dict) -> None`` that raises on an
             invalid full document; defaults to :func:`default_validate_document`.
         schema_version: ``version`` stamped on the synthetic document built for
@@ -234,9 +239,11 @@ class MetricAuthor:
     # ---- location -------------------------------------------------------
 
     def _require_root(self) -> str:
-        if not self._root or not os.path.isdir(self._root):
+        if not self._root or not (
+            os.path.isdir(self._root) or os.path.isfile(self._root)
+        ):
             raise self._error_cls(
-                f"semantic_models_path is not a directory: {self._root}"
+                f"semantic_models_path is not a directory or file: {self._root}"
             )
         return self._root
 

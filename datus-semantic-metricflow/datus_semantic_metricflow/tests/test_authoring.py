@@ -96,17 +96,20 @@ def test_write_accepts_bare_node(root):
 
 
 def test_delete_one_of_multiple_metrics_writes_no_null_doc(tmp_path):
-    # Leading `---` yields a None document; deleting one metric must not leave a
-    # literal `null` doc behind.
+    # Consecutive `---` separators produce an explicit empty (None) document;
+    # deleting one metric must drop it, never write a literal `null` doc back.
     (tmp_path / "metrics.yml").write_text(
-        "---\nmetric:\n  name: a\n  type: aggregate\n---\nmetric:\n  name: b\n  type: aggregate\n"
+        "---\n---\nmetric:\n  name: a\n  type: aggregate\n---\nmetric:\n  name: b\n  type: aggregate\n"
     )
+    assert None in list(yaml.safe_load_all((tmp_path / "metrics.yml").read_text()))  # precondition
+
     author = MetricFlowMetricAuthor(str(tmp_path))
     author.delete("a")
     raw = (tmp_path / "metrics.yml").read_text()
     assert "null" not in raw
-    docs = [d for d in yaml.safe_load_all(raw)]
-    assert [d["metric"]["name"] for d in docs if d] == ["b"]
+    docs = list(yaml.safe_load_all(raw))
+    assert None not in docs
+    assert [d["metric"]["name"] for d in docs] == ["b"]
 
 
 def test_edit_preserves_file_permissions(root):
@@ -114,11 +117,12 @@ def test_edit_preserves_file_permissions(root):
     import stat
 
     target = os.path.join(root, "daily_order_count.yml")
-    os.chmod(target, 0o644)
+    # A non-default mode so the assertion proves preservation, not the 0644 default.
+    os.chmod(target, 0o640)
     author = MetricFlowMetricAuthor(root)
     src = author.read("daily_order_count")
     author.write("daily_order_count", src.text)
-    assert stat.S_IMODE(os.stat(target).st_mode) == 0o644
+    assert stat.S_IMODE(os.stat(target).st_mode) == 0o640
 
 
 def test_write_rejects_missing_type_before_writing(root):
