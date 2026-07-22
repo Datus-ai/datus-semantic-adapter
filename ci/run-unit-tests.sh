@@ -140,12 +140,15 @@ run_package_tests() {
       # The datus-osi-engine wheel is intentionally NOT installed here: unit
       # tests run against a fake binding, so they exercise the adapter without
       # the Rust extension. Integration tests (-m integration) are skipped.
+      # datus-semantic-osi is a real dependency (the shared authoring layer is
+      # reused from it), so it must be installed for the adapter to import.
       uv run --no-project --isolated \
         --with pytest \
         --with pytest-asyncio \
         --with pydantic \
         --with pyyaml \
         --with-editable ./datus-semantic-core \
+        --with-editable ./datus-semantic-osi \
         --with-editable ./datus-semantic-osi-engine \
         pytest "$test_path" \
         -m "not integration" \

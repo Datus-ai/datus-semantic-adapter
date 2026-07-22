@@ -15,8 +15,10 @@ Scope note: an engine instance serves ONE OSI model file, so the ``path``
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Any, Dict, List, Optional
 
+from datus_semantic_core.authoring import MetricMutationResult, MetricSource
 from datus_semantic_core.base import BaseSemanticAdapter
 from datus_semantic_core.exceptions import SemanticCoreException
 from datus_semantic_core.models import (
@@ -28,6 +30,7 @@ from datus_semantic_core.models import (
     ValidationIssue,
     ValidationResult,
 )
+from datus_semantic_osi.authoring import OSIMetricAuthor
 
 from datus_semantic_osi_engine.config import OSIEngineConfig
 from datus_semantic_osi_engine.dialects import resolve_engine_dialect
@@ -65,7 +68,9 @@ class OSIEngineAdapter(BaseSemanticAdapter):
     ) -> Optional[SemanticModelInfo]:
         for row in self._engine().datasets():
             source = str(row.get("source", ""))
-            if table_name in (row.get("name"), source) or source.endswith(f".{table_name}"):
+            if table_name in (row.get("name"), source) or source.endswith(
+                f".{table_name}"
+            ):
                 return self._model_info(row)
         return None
 
@@ -79,7 +84,9 @@ class OSIEngineAdapter(BaseSemanticAdapter):
     ) -> List[MetricDefinition]:
         engine = await asyncio.to_thread(self._engine)
         rows = await asyncio.to_thread(engine.metrics)
-        dimension_names = [d["name"] for d in await asyncio.to_thread(engine.dimensions)]
+        dimension_names = [
+            d["name"] for d in await asyncio.to_thread(engine.dimensions)
+        ]
         metrics = [
             MetricDefinition(
                 name=row["name"],
@@ -249,6 +256,66 @@ class OSIEngineAdapter(BaseSemanticAdapter):
             )
         return ValidationResult(valid=bool(payload.get("valid")), issues=issues)
 
+    # ==================== Authoring Interface ====================
+    # Backend/editor surface; not an agent/LLM tool. osi_engine authors the same
+    # OSI YAML files as the osi adapter, so the file read/write/validate logic is
+    # reused verbatim from datus-semantic-osi — only the execution/query engine
+    # differs (native Rust here vs the Python compiler there).
+
+    def _authoring_root(self) -> str:
+        """Directory that holds the OSI model file(s) for authoring.
+
+        ``OSIMetricAuthor`` scans a directory; mirror ``resolve_model_file``'s
+        precedence — an explicit ``semantic_model_path`` file uses its parent
+        dir, otherwise the configured ``semantic_models_path`` directory.
+        """
+        if self.config.semantic_model_path:
+            return os.path.dirname(self.config.semantic_model_path) or "."
+        if self.config.semantic_models_path:
+            return self.config.semantic_models_path
+        raise SemanticCoreException(
+            "osi_engine authoring requires semantic_model_path or semantic_models_path"
+        )
+
+    def _author(self) -> OSIMetricAuthor:
+        return OSIMetricAuthor(self._authoring_root())
+
+    def read_metric_source(
+        self,
+        metric_name: str,
+        *,
+        subject_path: Optional[List[str]] = None,
+    ) -> MetricSource:
+        return self._author().read(metric_name)
+
+    def write_metric_source(
+        self,
+        metric_name: str,
+        source: str,
+        *,
+        subject_path: Optional[List[str]] = None,
+        create: bool = False,
+    ) -> MetricMutationResult:
+        return self._author().write(
+            metric_name, source, subject_path=subject_path, create=create
+        )
+
+    def delete_metric_source(
+        self,
+        metric_name: str,
+        *,
+        subject_path: Optional[List[str]] = None,
+    ) -> MetricMutationResult:
+        return self._author().delete(metric_name)
+
+    def validate_metric_source(
+        self,
+        source: str,
+        *,
+        metric_name: Optional[str] = None,
+    ) -> ValidationResult:
+        return self._author().validate(source, metric_name=metric_name)
+
     # ==================== Internals ====================
 
     def _engine(self) -> Any:
@@ -262,7 +329,9 @@ class OSIEngineAdapter(BaseSemanticAdapter):
             extra={k: v for k, v in row.items() if k not in ("name", "source")},
         )
 
-    def _dry_run_dialect(self, binding: Any, connection: Optional[str]) -> Optional[str]:
+    def _dry_run_dialect(
+        self, binding: Any, connection: Optional[str]
+    ) -> Optional[str]:
         """Dialect for compile-only calls: explicit config, else db_config type.
 
         With a connection profile the engine already knows the dialect; an
