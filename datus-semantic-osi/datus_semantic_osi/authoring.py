@@ -367,7 +367,7 @@ class OSIMetricAuthor:
                 or self._sole_model()
             )
             if target is not None:
-                file_path, docs, doc_index, model_index = target
+                _file_path, docs, doc_index, model_index = target
                 model = json_clone(docs[doc_index]["semantic_model"][model_index])
                 model.setdefault("metrics", []).append(node)
             else:

@@ -119,3 +119,23 @@ def test_edit_preserves_file_permissions(root):
     src = author.read("daily_order_count")
     author.write("daily_order_count", src.text)
     assert stat.S_IMODE(os.stat(target).st_mode) == 0o644
+
+
+def test_write_rejects_missing_type_before_writing(root):
+    import os
+
+    author = MetricFlowMetricAuthor(root)
+    before = os.listdir(root)
+    with pytest.raises(ValueError, match="missing required field"):
+        author.write("daily_order_count", "metric:\n  name: daily_order_count\n")
+    assert os.listdir(root) == before  # nothing written
+
+
+def test_create_rejects_unsafe_metric_name(root):
+    author = MetricFlowMetricAuthor(root)
+    with pytest.raises(ValueError, match="Unsafe metric name"):
+        author.write(
+            "../evil",
+            "metric:\n  name: ../evil\n  type: aggregate\n",
+            create=True,
+        )

@@ -592,11 +592,7 @@ class MetricFlowAdapter(BaseSemanticAdapter):
             return {}
         if not isinstance(full_metrics, (list, tuple)):
             return {}
-        return {
-            name: metric
-            for metric in full_metrics
-            if (name := cls._metric_name(metric))
-        }
+        return {name: metric for metric in full_metrics if (name := cls._metric_name(metric))}
 
     @classmethod
     def _metric_has_offset_dependency(
@@ -606,7 +602,9 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         seen_metrics: Optional[Set[str]] = None,
     ) -> bool:
         for input_metric in cls._metric_input_metrics(metric):
-            if getattr(input_metric, "offset_window", None) or getattr(input_metric, "offset_to_grain", None):
+            if getattr(input_metric, "offset_window", None) or getattr(
+                input_metric, "offset_to_grain", None
+            ):
                 return True
 
         seen_metrics = seen_metrics or set()
@@ -629,8 +627,7 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         type_params = getattr(metric, "type_params", None)
         if cls._metric_type_name(metric) == "cumulative":
             return bool(
-                getattr(type_params, "window", None)
-                or getattr(type_params, "grain_to_date", None)
+                getattr(type_params, "window", None) or getattr(type_params, "grain_to_date", None)
             )
         return cls._metric_has_offset_dependency(metric, catalog)
 
@@ -674,9 +671,7 @@ class MetricFlowAdapter(BaseSemanticAdapter):
             referenced_name = str(getattr(input_metric, "name", "") or "").strip()
             referenced = catalog.get(referenced_name)
             if referenced is not None:
-                grains.update(
-                    cls._static_required_grains(referenced, catalog, seen_metrics)
-                )
+                grains.update(cls._static_required_grains(referenced, catalog, seen_metrics))
         return grains
 
     @classmethod
@@ -714,8 +709,7 @@ class MetricFlowAdapter(BaseSemanticAdapter):
             return dims, time_granularity
         if len(required_grains) > 1:
             details = ", ".join(
-                f"{grain}: {', '.join(names)}"
-                for grain, names in sorted(required_grains.items())
+                f"{grain}: {', '.join(names)}" for grain, names in sorted(required_grains.items())
             )
             raise MetricFlowSemanticValidationException(
                 SemanticValidationError(
@@ -735,8 +729,7 @@ class MetricFlowAdapter(BaseSemanticAdapter):
     @staticmethod
     def _is_query_validation_error(exc: BaseException) -> bool:
         return any(
-            "InvalidQuery" in klass.__name__
-            or "UnableToSatisfyQuery" in klass.__name__
+            "InvalidQuery" in klass.__name__ or "UnableToSatisfyQuery" in klass.__name__
             for klass in type(exc).__mro__
         )
 
@@ -753,17 +746,13 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         required_grain: Optional[str] = None
         if "granularity" in lowered and "must be" in lowered:
             code = "time_grain_required"
-            required_grain = cls._time_grain_from_text(
-                lowered.split("must be", 1)[1]
-            )
+            required_grain = cls._time_grain_from_text(lowered.split("must be", 1)[1])
             if required_grain:
                 required_dimensions = [f"metric_time__{required_grain}"]
         elif "metric_time" in lowered and ("offset" in lowered or "derived" in lowered):
             code = "offset_requires_metric_time"
             required_dimensions = ["metric_time"]
-        elif "metric_time" in lowered and (
-            "cumulative" in lowered or "accumulat" in lowered
-        ):
+        elif "metric_time" in lowered and ("cumulative" in lowered or "accumulat" in lowered):
             code = "cumulative_requires_metric_time"
             required_dimensions = ["metric_time"]
 
@@ -1177,6 +1166,15 @@ class MetricFlowAdapter(BaseSemanticAdapter):
     def _author(self) -> MetricFlowMetricAuthor:
         return MetricFlowMetricAuthor(self._resolve_model_path(self.config))
 
+    def _invalidate_client_cache(self) -> None:
+        """Drop the cached MetricFlowClient so the next read reloads the YAML.
+
+        The client caches the parsed semantic model, so after an authoring
+        mutation subsequent list_metrics / query_metrics / get_dimensions must
+        rebuild it via _ensure_client_ready() to see the change.
+        """
+        self._client_initialized = False
+
     def read_metric_source(
         self,
         metric_name: str,
@@ -1193,7 +1191,9 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         subject_path: Optional[List[str]] = None,
         create: bool = False,
     ) -> MetricMutationResult:
-        return self._author().write(metric_name, source, subject_path=subject_path, create=create)
+        result = self._author().write(metric_name, source, subject_path=subject_path, create=create)
+        self._invalidate_client_cache()
+        return result
 
     def delete_metric_source(
         self,
@@ -1201,7 +1201,9 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         *,
         subject_path: Optional[List[str]] = None,
     ) -> MetricMutationResult:
-        return self._author().delete(metric_name)
+        result = self._author().delete(metric_name)
+        self._invalidate_client_cache()
+        return result
 
     def validate_metric_source(
         self,

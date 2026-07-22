@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import glob
 import os
+import re
 import stat
 import tempfile
 from dataclasses import dataclass
@@ -29,6 +30,11 @@ from datus_semantic_core.authoring import MetricMutationResult, MetricSource
 from datus_semantic_core.models import ValidationIssue, ValidationResult
 
 FORMAT = "metricflow"
+
+# Safe metric name for use as a filename on create: alphanumerics plus _.- ,
+# never a path separator or traversal component (must start alnum/underscore, so
+# ".." and "." are rejected).
+_SAFE_METRIC_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
 
 
 @dataclass
@@ -132,10 +138,10 @@ class MetricFlowMetricAuthor:
         create: bool = False,
     ) -> MetricMutationResult:
         node = self._parse_node(source)
-        if node.get("name") != metric_name:
-            raise ValueError(
-                f"Metric name in source (`{node.get('name')}`) does not match `{metric_name}`."
-            )
+        # Validate before touching the file, using the same checks as validate().
+        errors = self._node_errors(node, metric_name)
+        if errors:
+            raise ValueError("; ".join(errors))
         if subject_path is not None:
             _set_subject_tree_tag(node, list(subject_path))
 
@@ -150,6 +156,10 @@ class MetricFlowMetricAuthor:
             _atomic_write(existing.file_path, existing.docs)
             file_path = existing.file_path
         else:
+            # The new file is named after the metric; reject names that could
+            # escape metrics_dir (path separators, traversal).
+            if not _SAFE_METRIC_NAME.match(metric_name):
+                raise ValueError(f"Unsafe metric name for file creation: {metric_name!r}")
             metrics_dir = os.path.join(self._require_root(), "metrics")
             os.makedirs(metrics_dir, exist_ok=True)
             file_path = os.path.join(metrics_dir, f"{metric_name}.yml")
@@ -189,6 +199,16 @@ class MetricFlowMetricAuthor:
 
     # ---- validate -------------------------------------------------------
 
+    @staticmethod
+    def _node_errors(node: dict, metric_name: Optional[str]) -> List[str]:
+        """Required-field checks shared by validate() and write()."""
+        errors: List[str] = []
+        if metric_name and node.get("name") != metric_name:
+            errors.append(f"Metric name `{node.get('name')}` does not match `{metric_name}`.")
+        if not node.get("type"):
+            errors.append("Metric is missing required field `type`.")
+        return errors
+
     def validate(self, source: str, *, metric_name: Optional[str] = None) -> ValidationResult:
         try:
             node = self._parse_node(source)
@@ -196,20 +216,10 @@ class MetricFlowMetricAuthor:
             return ValidationResult(
                 valid=False, issues=[ValidationIssue(severity="error", message=str(exc))]
             )
-        issues: List[ValidationIssue] = []
-        if metric_name and node.get("name") != metric_name:
-            issues.append(
-                ValidationIssue(
-                    severity="error",
-                    message=f"Metric name `{node.get('name')}` does not match `{metric_name}`.",
-                )
-            )
-        if not node.get("type"):
-            issues.append(
-                ValidationIssue(
-                    severity="error", message="Metric is missing required field `type`."
-                )
-            )
+        issues = [
+            ValidationIssue(severity="error", message=msg)
+            for msg in self._node_errors(node, metric_name)
+        ]
         return ValidationResult(valid=not any(i.severity == "error" for i in issues), issues=issues)
 
 
