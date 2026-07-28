@@ -966,10 +966,8 @@ class DatusOSIAdapter(BaseSemanticAdapter):
             to_dataset = datasets.get(relationship.to_dataset)
             if to_dataset is None:
                 continue
-            join_name = self._relationship_join_name(
-                to_dataset, relationship.to_identifier
-            )
-            prefix = f"{join_name}__"
+            relationship_name = relationship.name
+            prefix = f"{relationship_name}__"
             if not dimension.startswith(prefix):
                 continue
             field_name = dimension[len(prefix) :]
@@ -982,7 +980,7 @@ class DatusOSIAdapter(BaseSemanticAdapter):
                 None,
             )
             if field is not None:
-                return relationship, to_dataset, field, join_name
+                return relationship, to_dataset, field, relationship_name
         return None
 
     @staticmethod
@@ -1054,17 +1052,17 @@ class DatusOSIAdapter(BaseSemanticAdapter):
     @staticmethod
     def _relationship_dimension_key(
         rel_dim: tuple[RelationshipIR, DatasetIR, FieldIR, str],
-    ) -> tuple[str, ...]:
-        relationship, to_dataset, field, join_name = rel_dim
+    ) -> tuple[object, ...]:
+        relationship, to_dataset, field, relationship_name = rel_dim
         return (
             relationship.from_dataset,
-            relationship.from_identifier,
+            tuple(relationship.from_columns),
             relationship.to_dataset,
-            relationship.to_identifier,
+            tuple(relationship.to_columns),
             to_dataset.name,
             field.name,
             field.expr,
-            join_name,
+            relationship_name,
         )
 
     @staticmethod
@@ -1124,7 +1122,7 @@ class DatusOSIAdapter(BaseSemanticAdapter):
         rel_dim = self._relationship_dimension(model, first_metric, dimensions[0])
         if rel_dim is None:
             return None
-        relationship, to_dataset, field, _join_name = rel_dim
+        relationship, to_dataset, field, _relationship_name = rel_dim
         rel_dim_key = self._relationship_dimension_key(rel_dim)
         for metric in typed_metrics[1:]:
             metric_rel_dim = self._relationship_dimension(model, metric, dimensions[0])
@@ -1169,23 +1167,43 @@ class DatusOSIAdapter(BaseSemanticAdapter):
             f"{self._metric_aggregate_sql(metric)} AS {self._sql_identifier(metric.name, label='metric alias')}"
             for metric in typed_metrics
         ]
-        from_identifier = self._sql_identifier(
-            relationship.from_identifier, label="relationship key"
-        )
-        to_identifier = self._sql_identifier(
-            relationship.to_identifier, label="relationship key"
-        )
+        fact_field_expr = {item.name: item.expr for item in fact_dataset.fields}
+        dimension_field_expr = {item.name: item.expr for item in to_dataset.fields}
+        from_identifiers = [
+            self._profile_sql_expression(
+                fact_field_expr.get(column, column), label="relationship key"
+            )
+            for column in relationship.from_columns
+        ]
+        to_identifiers = [
+            self._profile_sql_expression(
+                dimension_field_expr.get(column, column), label="relationship key"
+            )
+            for column in relationship.to_columns
+        ]
+        join_aliases = [
+            f"__join_key_{index}" for index in range(len(relationship.from_columns))
+        ]
         field_expr = self._profile_sql_expression(
             field.expr, label="dimension expression"
         )
         field_name = self._sql_identifier(field.name, label="dimension alias")
+        fact_join_select = ", ".join(
+            f"{identifier} AS {alias}"
+            for identifier, alias in zip(from_identifiers, join_aliases)
+        )
+        dimension_join_select = ", ".join(
+            f"{identifier} AS {alias}"
+            for identifier, alias in zip(to_identifiers, join_aliases)
+        )
         fact_sql = (
-            f"SELECT {from_identifier} AS __join_key, "
+            f"SELECT {fact_join_select}, "
             f"{', '.join(select_metrics)} "
-            f"FROM {fact_source} {where_sql} GROUP BY {from_identifier}"
+            f"FROM {fact_source} {where_sql} "
+            f"GROUP BY {', '.join(from_identifiers)}"
         )
         dimension_sql = (
-            f"SELECT {to_identifier} AS __join_key, {field_expr} AS {field_name} "
+            f"SELECT {dimension_join_select}, {field_expr} AS {field_name} "
             f"FROM {dimension_source}"
         )
         metric_selects = []
@@ -1221,11 +1239,14 @@ class DatusOSIAdapter(BaseSemanticAdapter):
         else:
             order_sql = f" ORDER BY {field_name}"
         limit_sql = f" LIMIT {int(limit)}" if limit is not None else ""
+        join_condition = " AND ".join(
+            f"fact.{alias} = dim.{alias}" for alias in join_aliases
+        )
         return (
             f"SELECT dim.{field_name} AS {field_name}, {', '.join(metric_selects)} "
             f"FROM ({dimension_sql}) dim "
             f"LEFT JOIN ({fact_sql}) fact "
-            "ON fact.__join_key = dim.__join_key"
+            f"ON {join_condition}"
             f"{order_sql}{limit_sql}"
         )
 
@@ -1367,10 +1388,56 @@ class DatusOSIAdapter(BaseSemanticAdapter):
             is_primary_key=False,
         )
 
-    @staticmethod
-    def _relationship_join_name(to_dataset: DatasetIR, fallback_identifier: str) -> str:
-        primary = next((i for i in to_dataset.identifiers if i.type == "primary"), None)
-        return primary.name if primary else fallback_identifier
+    def _metric_time_field(
+        self, model: SemanticModelIR, metric: MetricIR
+    ) -> tuple[Optional[str], Optional[FieldIR]]:
+        dataset_names = self._root_dataset_names_for_metric(model, metric)
+        if len(dataset_names) != 1:
+            return None, None
+
+        dataset = self._dataset_by_name(model).get(dataset_names[0])
+        if dataset is None:
+            return None, None
+
+        time_dimension = metric.time_dimension or dataset.primary_time_dimension
+        if not time_dimension:
+            return None, None
+        field = next(
+            (
+                candidate
+                for candidate in dataset.fields
+                if candidate.name == time_dimension
+                and candidate.type == "time"
+                and candidate.is_dimension
+            ),
+            None,
+        )
+        return (time_dimension, field) if field is not None else (None, None)
+
+    def _time_granularities_for_metric(
+        self, model: SemanticModelIR, metric: MetricIR, time_field: FieldIR
+    ) -> List[str]:
+        """Return legal metric-time grains, ordered from finest to coarsest."""
+        minimum_grain = str(time_field.time_granularity or "day").lower()
+        if minimum_grain not in self._TIME_GRAINS:
+            return []
+
+        if metric.period_over_period is not None:
+            fixed_grain = str(metric.period_over_period.time_grain or "").lower()
+            return [fixed_grain] if fixed_grain in self._TIME_GRAINS else []
+
+        if self._requires_time_dimension(model, metric):
+            required_grains = self._static_required_grains(model, metric)
+            if len(required_grains) == 1:
+                required_grain = next(iter(required_grains))
+                return [required_grain] if required_grain in self._TIME_GRAINS else []
+            if len(required_grains) > 1:
+                return []
+            if metric.kind is MetricKind.CUMULATIVE:
+                return [minimum_grain]
+
+        minimum_index = self._TIME_GRAINS.index(minimum_grain)
+        return list(self._TIME_GRAINS[minimum_index:])
 
     def _dimensions_for_dataset(
         self,
@@ -1407,14 +1474,11 @@ class DatusOSIAdapter(BaseSemanticAdapter):
             to_dataset = datasets.get(relationship.to_dataset)
             if to_dataset is None:
                 continue
-            join_name = self._relationship_join_name(
-                to_dataset, relationship.to_identifier
-            )
             dimensions.extend(
                 self._dimensions_for_dataset(
                     model,
                     relationship.to_dataset,
-                    prefix=[*prefix, join_name],
+                    prefix=[*prefix, relationship.name],
                     visited=set(visited),
                 )
             )
@@ -1431,6 +1495,17 @@ class DatusOSIAdapter(BaseSemanticAdapter):
                     continue
                 seen.add(dimension.name)
                 dimensions.append(dimension)
+
+        time_dimension, time_field = self._metric_time_field(model, metric)
+        if time_dimension is not None and time_field is not None:
+            for dimension in dimensions:
+                if dimension.name != time_dimension:
+                    continue
+                dimension.is_primary_time = True
+                dimension.time_granularities = self._time_granularities_for_metric(
+                    model, metric, time_field
+                )
+                break
         return dimensions
 
     async def get_dimensions(
@@ -1798,7 +1873,9 @@ class DatusOSIAdapter(BaseSemanticAdapter):
         subject_path: Optional[List[str]] = None,
         create: bool = False,
     ) -> MetricMutationResult:
-        return self._author().write(metric_name, source, subject_path=subject_path, create=create)
+        return self._author().write(
+            metric_name, source, subject_path=subject_path, create=create
+        )
 
     def delete_metric_source(
         self,

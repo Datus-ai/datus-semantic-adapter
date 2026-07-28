@@ -798,6 +798,41 @@ metric:
         adapter.client.list_dimensions.assert_called_once_with(metric_names=["revenue"])
 
     @pytest.mark.asyncio
+    async def test_get_dimensions_reports_monthly_time_capabilities(self, adapter):
+        adapter.client.list_dimensions.return_value = [
+            SimpleNamespace(name="metric_time", description="Event month"),
+            SimpleNamespace(name="event_type", description="Event type"),
+        ]
+        adapter.client.engine._query_parser._time_granularity_solver.local_dimension_granularity_range.return_value = (
+            TimeGranularity.MONTH,
+            TimeGranularity.MONTH,
+        )
+        metric = _metricflow_metric("event_total", "simple")
+
+        with (
+            patch.object(
+                adapter,
+                "_time_dimension_names_for_metrics",
+                return_value={"metric_time"},
+            ),
+            patch.object(
+                adapter,
+                "_metric_catalog_for_query",
+                return_value={"event_total": metric},
+            ),
+        ):
+            dimensions = await adapter.get_dimensions("event_total")
+
+        assert dimensions[0] == DimensionInfo(
+            name="metric_time",
+            description="Event month",
+            type="time",
+            is_primary_time=True,
+            time_granularities=["month", "quarter", "year"],
+        )
+        assert dimensions[1].time_granularities == []
+
+    @pytest.mark.asyncio
     async def test_query_metrics_returns_rows_as_dicts(self, adapter):
         adapter.client.query.return_value = SimpleNamespace(
             result_df=_FakeDataFrame(

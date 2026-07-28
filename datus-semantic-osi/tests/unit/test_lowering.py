@@ -3,12 +3,17 @@
 
 """Tests for IR -> MetricFlow YAML lowering (legacy data_source dialect)."""
 
-import pytest
-
 from datus_semantic_osi.compiler import compile_document
-from datus_semantic_osi.errors import OSIValidationError
-from datus_semantic_osi.ir import DatasetIR, IdentifierIR, RelationshipIR, SemanticModelIR
-from datus_semantic_osi.metricflow_backend import MetricFlowArtifact, lower_to_metricflow
+from datus_semantic_osi.ir import (
+    DatasetIR,
+    IdentifierIR,
+    RelationshipIR,
+    SemanticModelIR,
+)
+from datus_semantic_osi.metricflow_backend import (
+    MetricFlowArtifact,
+    lower_to_metricflow,
+)
 from datus_semantic_osi.profile import parse_osi_profile as parse_osi
 
 OSI_YAML = """
@@ -148,7 +153,7 @@ def test_artifact_write_removes_stale_metrics_yaml(tmp_path):
     assert not stale_metrics.exists()
 
 
-def test_duplicate_relationship_foreign_identifier_name_is_rejected():
+def test_relationship_names_disambiguate_foreign_identifiers():
     model = SemanticModelIR(
         datasets=[
             DatasetIR(name="fact", sql_table="fact_orders"),
@@ -156,18 +161,14 @@ def test_duplicate_relationship_foreign_identifier_name_is_rejected():
                 name="buyers",
                 sql_table="buyers",
                 identifiers=[
-                    IdentifierIR(
-                        name="customer_id", type="primary", expr="customer_id"
-                    )
+                    IdentifierIR(name="customer_id", type="primary", expr="customer_id")
                 ],
             ),
             DatasetIR(
                 name="sellers",
                 sql_table="sellers",
                 identifiers=[
-                    IdentifierIR(
-                        name="customer_id", type="primary", expr="customer_id"
-                    )
+                    IdentifierIR(name="customer_id", type="primary", expr="customer_id")
                 ],
             ),
         ],
@@ -191,5 +192,22 @@ def test_duplicate_relationship_foreign_identifier_name_is_rejected():
         ],
     )
 
-    with pytest.raises(OSIValidationError, match="duplicate foreign identifier"):
-        lower_to_metricflow(model)
+    artifact = lower_to_metricflow(model)
+    sources = {
+        document["data_source"]["name"]: document["data_source"]
+        for document in artifact.data_source_docs
+    }
+    fact_identifiers = {
+        identifier["name"]: identifier for identifier in sources["fact"]["identifiers"]
+    }
+
+    assert fact_identifiers["fact_to_buyers"] == {
+        "name": "fact_to_buyers",
+        "type": "foreign",
+        "expr": "buyer_id",
+    }
+    assert fact_identifiers["fact_to_sellers"] == {
+        "name": "fact_to_sellers",
+        "type": "foreign",
+        "expr": "seller_id",
+    }
