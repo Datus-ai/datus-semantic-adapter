@@ -21,6 +21,7 @@ import yaml
 from datus_semantic_osi.errors import OSIValidationError
 from datus_semantic_osi.ir import (
     DatasetIR,
+    IdentifierIR,
     MeasureIR,
     MetricIR,
     MetricKind,
@@ -140,23 +141,98 @@ def _time_dimension_field_names(ds: DatasetIR) -> set:
     return {f.name for f in ds.fields if f.is_dimension and f.type == "time"}
 
 
+def _lower_identifier(identifier: IdentifierIR) -> dict:
+    entry: dict = {"name": identifier.name, "type": identifier.type}
+    if identifier.components:
+        entry["identifiers"] = [
+            {"name": component.name, "expr": component.expr}
+            for component in identifier.components
+        ]
+    elif identifier.expr is not None:
+        entry["expr"] = identifier.expr
+    return entry
+
+
 def _kept_identifiers(ds: DatasetIR, keep_names: set) -> List[dict]:
     """Dataset identifiers minus auto-resolved time-dimension collisions.
 
-    A snapshot-table key component that doubles as the dataset's time dimension
-    (e.g. a monthly ``etl_dt`` inside a composite primary key) is legal in OSI
-    core but MetricFlow forbids one element being both an identifier and a
-    dimension. Keep the time dimension and drop the identifier, unless a
-    relationship joins on it — then the join wins and the dimension is dropped
-    by the existing collision rule instead.
+    Composite key components have scoped internal names and may reference the
+    same physical expression as a time dimension. Only a scalar identifier
+    whose top-level name collides with a time dimension needs this resolution:
+    keep the time dimension unless a relationship explicitly joins on that
+    identifier, in which case the join wins.
     """
     time_names = _time_dimension_field_names(ds)
     kept: List[dict] = []
     for i in ds.identifiers:
         if i.name in time_names and i.name not in keep_names:
             continue
-        kept.append({"name": i.name, "type": i.type, "expr": i.expr})
+        kept.append(_lower_identifier(i))
     return kept
+
+
+def _identifier_shape(identifier: dict) -> tuple:
+    components = tuple(
+        (component.get("name"), component.get("expr"))
+        for component in identifier.get("identifiers", [])
+    )
+    return identifier.get("expr"), components
+
+
+def _append_identifier(
+    identifiers: List[dict], incoming: dict, dataset_name: str
+) -> None:
+    existing = next(
+        (
+            identifier
+            for identifier in identifiers
+            if identifier["name"] == incoming["name"]
+        ),
+        None,
+    )
+    if existing is None:
+        identifiers.append(incoming)
+        return
+    if _identifier_shape(existing) == _identifier_shape(incoming):
+        # Preserve an authored primary/unique type over a relationship-derived
+        # alias. MetricFlow accepts either as the non-fanout side of the join.
+        return
+    raise OSIValidationError(
+        f"relationships lower to duplicate {incoming['type']} identifier "
+        f"`{incoming['name']}` on dataset `{dataset_name}` with different key "
+        "expressions.",
+        hint="Give each relationship a distinct OSI core `name`.",
+    )
+
+
+def _merge_relationship_identifiers(
+    authored: List[dict], relationship_identifiers: List[dict], dataset_name: str
+) -> List[dict]:
+    """Prefer relationship-named aliases for the same unique target key.
+
+    OSI relationship names define the public join path. When a relationship
+    targets an authored primary/unique identifier with the same key shape, the
+    relationship-named unique alias is sufficient for MetricFlow and avoids
+    exposing the physical key name globally as a second identifier type.
+    """
+    unique_aliases = [
+        identifier
+        for identifier in relationship_identifiers
+        if identifier.get("type") in {"primary", "unique"}
+    ]
+    identifiers = [
+        identifier
+        for identifier in authored
+        if not any(
+            identifier.get("type") in {"primary", "unique"}
+            and identifier["name"] != alias["name"]
+            and _identifier_shape(identifier) == _identifier_shape(alias)
+            for alias in unique_aliases
+        )
+    ]
+    for extra in relationship_identifiers:
+        _append_identifier(identifiers, extra, dataset_name)
+    return identifiers
 
 
 def _lower_data_source(
@@ -167,10 +243,11 @@ def _lower_data_source(
 ) -> dict:
     body: dict = {"name": ds.name, "description": ds.name, "owners": [DEFAULT_OWNER]}
     body.update(_dataset_sql(ds))
-    identifiers = _kept_identifiers(ds, keep_identifier_names or set())
-    for extra in extra_identifiers or []:
-        if not any(existing["name"] == extra["name"] for existing in identifiers):
-            identifiers.append(extra)
+    identifiers = _merge_relationship_identifiers(
+        _kept_identifiers(ds, keep_identifier_names or set()),
+        extra_identifiers or [],
+        ds.name,
+    )
     if identifiers:
         body["identifiers"] = identifiers
     # MetricFlow forbids one element being both an identifier and a dimension.
@@ -244,7 +321,9 @@ def is_period_over_period_base_metric_name(metric_name: str) -> bool:
     return str(metric_name).startswith(f"{_PERIOD_OVER_PERIOD_BASE_PREFIX}_")
 
 
-def _period_over_period_expression(metric_name: str, previous_alias: str, calculation: str) -> str:
+def _period_over_period_expression(
+    metric_name: str, previous_alias: str, calculation: str
+) -> str:
     if calculation == "previous_value":
         return previous_alias
     if calculation == "delta":
@@ -262,7 +341,9 @@ def _period_over_period_expression(metric_name: str, previous_alias: str, calcul
 def _lower_period_over_period_metric(metric: MetricIR) -> dict:
     pop = metric.period_over_period
     if pop is None:  # pragma: no cover - caller guards this
-        raise OSIValidationError("period_over_period metric is missing semantics.", metric=metric.name)
+        raise OSIValidationError(
+            "period_over_period metric is missing semantics.", metric=metric.name
+        )
     base_name = period_over_period_base_metric_name(metric)
     previous_alias = f"{base_name}_previous"
     metric_inputs = [
@@ -280,7 +361,9 @@ def _lower_period_over_period_metric(metric: MetricIR) -> dict:
         "type": "derived",
         "type_params": {
             "metrics": metric_inputs,
-            "expr": _period_over_period_expression(base_name, previous_alias, pop.calculation),
+            "expr": _period_over_period_expression(
+                base_name, previous_alias, pop.calculation
+            ),
         },
     }
     if metric.description:
@@ -291,52 +374,63 @@ def _lower_period_over_period_metric(metric: MetricIR) -> dict:
 def _relationship_identifiers(model: SemanticModelIR) -> Dict[str, List[dict]]:
     """Materialize many-to-one relationships as MetricFlow join identifiers.
 
-    A relationship becomes a foreign identifier on the "from" dataset whose name
-    matches the "to" dataset's primary identifier, so MetricFlow can join them.
+    Each relationship creates the same identifier name and component names on
+    both sides. Local expressions may differ; MetricFlow correlates composite
+    components by their shared names.
     """
-    primary_name_by_ds: Dict[str, str] = {}
-    for ds in model.datasets:
-        primary = next((i for i in ds.identifiers if i.type == "primary"), None)
-        if primary:
-            primary_name_by_ds[ds.name] = primary.name
-
+    datasets = {ds.name: ds for ds in model.datasets}
     extras: Dict[str, List[dict]] = {ds.name: [] for ds in model.datasets}
+
+    def relationship_identifier(
+        rel,
+        dataset: DatasetIR,
+        columns: List[str],
+        identifier_type: str,
+    ) -> dict:
+        field_expr = {field.name: field.expr for field in dataset.fields}
+        if len(columns) == 1:
+            column = columns[0]
+            return {
+                "name": rel.name,
+                "type": identifier_type,
+                "expr": field_expr.get(column, column),
+            }
+        return {
+            "name": rel.name,
+            "type": identifier_type,
+            "identifiers": [
+                {
+                    "name": f"{rel.name}_key_{index}",
+                    "expr": field_expr.get(column, column),
+                }
+                for index, column in enumerate(columns, start=1)
+            ],
+        }
+
     for rel in model.relationships:
-        join_name = primary_name_by_ds.get(rel.to_dataset, rel.to_identifier)
-        dataset_extras = extras.setdefault(rel.from_dataset, [])
-        existing = next(
-            (item for item in dataset_extras if item["name"] == join_name), None
-        )
-        if existing is not None:
-            if existing["expr"] != rel.from_identifier:
-                raise OSIValidationError(
-                    "relationships lower to duplicate foreign identifier "
-                    f"`{join_name}` on dataset `{rel.from_dataset}` with "
-                    f"different expressions `{existing['expr']}` and "
-                    f"`{rel.from_identifier}`.",
-                    hint="Give the target datasets distinct primary identifier names "
-                    "or split the relationship roles into separate datasets.",
-                )
+        from_dataset = datasets.get(rel.from_dataset)
+        to_dataset = datasets.get(rel.to_dataset)
+        if from_dataset is None or to_dataset is None:
             continue
-        dataset_extras.append(
-            {"name": join_name, "type": "foreign", "expr": rel.from_identifier}
+        _append_identifier(
+            extras.setdefault(rel.from_dataset, []),
+            relationship_identifier(rel, from_dataset, rel.from_columns, "foreign"),
+            rel.from_dataset,
+        )
+        _append_identifier(
+            extras.setdefault(rel.to_dataset, []),
+            relationship_identifier(rel, to_dataset, rel.to_columns, "unique"),
+            rel.to_dataset,
         )
     return extras
 
 
 def _relationship_used_identifier_names(model: SemanticModelIR) -> Dict[str, set]:
     """Identifier names each dataset must keep because a relationship joins on them."""
-    primary_name_by_ds: Dict[str, str] = {}
-    for ds in model.datasets:
-        primary = next((i for i in ds.identifiers if i.type == "primary"), None)
-        if primary:
-            primary_name_by_ds[ds.name] = primary.name
-
     used: Dict[str, set] = {ds.name: set() for ds in model.datasets}
     for rel in model.relationships:
-        join_name = primary_name_by_ds.get(rel.to_dataset, rel.to_identifier)
-        used.setdefault(rel.to_dataset, set()).update({join_name, rel.to_identifier})
-        used.setdefault(rel.from_dataset, set()).add(rel.from_identifier)
+        used.setdefault(rel.to_dataset, set()).add(rel.name)
+        used.setdefault(rel.from_dataset, set()).add(rel.name)
     return used
 
 
@@ -352,12 +446,12 @@ def lowered_element_types(model: SemanticModelIR) -> Dict[str, set]:
     rel_extras = _relationship_identifiers(model)
     element_type: Dict[str, set] = {}
     for ds in model.datasets:
-        identifier_names = {
-            entry["name"] for entry in _kept_identifiers(ds, used.get(ds.name, set()))
-        }
-        identifier_names.update(
-            extra["name"] for extra in rel_extras.get(ds.name, [])
+        identifiers = _merge_relationship_identifiers(
+            _kept_identifiers(ds, used.get(ds.name, set())),
+            rel_extras.get(ds.name, []),
+            ds.name,
         )
+        identifier_names = {entry["name"] for entry in identifiers}
         for name in identifier_names:
             element_type.setdefault(name, set()).add("identifier")
         for f in ds.fields:

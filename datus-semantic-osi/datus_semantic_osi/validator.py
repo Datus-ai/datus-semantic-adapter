@@ -51,7 +51,9 @@ def detect_nonportable_functions(
             continue
         if tree is None:
             continue
-        names = sorted({node.name.upper() for node in tree.find_all(exp.Anonymous) if node.name})
+        names = sorted(
+            {node.name.upper() for node in tree.find_all(exp.Anonymous) if node.name}
+        )
         if names:
             warnings.append(
                 f"Metric `{metric.name}` uses function(s) {names} that sqlglot cannot "
@@ -312,7 +314,10 @@ def detect_measure_columns_modeled_as_dimensions(
                 continue
             for column in tree.find_all(exp.Column):
                 col_name = column.name
-                if col_name in dims_by_ds.get(ds_name, set()) and (ds_name, col_name) not in seen:
+                if (
+                    col_name in dims_by_ds.get(ds_name, set())
+                    and (ds_name, col_name) not in seen
+                ):
                     seen.add((ds_name, col_name))
                     warnings.append(
                         f"Metric `{metric.name}` aggregates column `{col_name}` which "
@@ -334,6 +339,14 @@ def validate_capabilities(model: SemanticModelIR, capabilities: dict) -> List[st
                 f"Backend does not support metric kind `{metric.kind.value}` "
                 f"used by metric `{metric.name}`. Supported: {sorted(supported_kinds)}."
             )
+    if not capabilities.get("composite_join", False):
+        for relationship in model.relationships:
+            if len(relationship.from_columns) > 1:
+                issues.append(
+                    f"Backend does not support composite relationship "
+                    f"`{relationship.name}` with {len(relationship.from_columns)} "
+                    "ordered key columns."
+                )
     return issues
 
 

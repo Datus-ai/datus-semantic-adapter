@@ -509,6 +509,49 @@ async def test_get_dimensions_includes_declared_dimension(adapter):
     assert "order_date" in names
 
 
+async def test_get_dimensions_reports_monthly_time_capabilities(tmp_path):
+    (tmp_path / "telemetry.yaml").write_text(
+        _core_yaml(
+            """
+semantic_model:
+  name: telemetry
+datasets:
+  - name: device_events
+    source: {table: device_events}
+    primary_key: event_id
+    time_dimension:
+      name: event_month
+      granularity: month
+    dimensions:
+      - {name: event_type, expr: event_type}
+metrics:
+  - name: event_total
+    expression: "COUNT(DISTINCT event_id)"
+    dataset: device_events
+"""
+        )
+    )
+    adapter = DatusOSIAdapter(
+        DatusOSIConfig(
+            semantic_models_path=str(tmp_path),
+            datasource="duckdb",
+        )
+    )
+
+    dimensions = {
+        dimension.name: dimension
+        for dimension in await adapter.get_dimensions("event_total")
+    }
+
+    assert dimensions["event_month"].is_primary_time is True
+    assert dimensions["event_month"].time_granularities == [
+        "month",
+        "quarter",
+        "year",
+    ]
+    assert dimensions["event_type"].time_granularities == []
+
+
 async def test_query_metrics_dry_run_renders_sql(adapter):
     result = await adapter.query_metrics(["order_count"], dry_run=True)
     sql = result.metadata.get("sql", "") or (
@@ -789,7 +832,7 @@ datasets:
     primary_key: customer_id
     dimensions: [{name: customer_name, expr: customer_name}]
 relationships:
-  - {name: o2c, from: orders, to: customers, from_columns: [customer_id], to_columns: [customer_id]}
+  - {name: customer, from: orders, to: customers, from_columns: [customer_id], to_columns: [customer_id]}
 metrics:
   - name: order_count
     expression: "COUNT(DISTINCT order_id)"
@@ -803,7 +846,7 @@ metrics:
 
     result = await adapter.query_metrics(
         ["order_count"],
-        dimensions=["customer_id__customer_name"],
+        dimensions=["customer__customer_name"],
         join_policy="dimension_preserving",
         zero_fill=True,
         dry_run=True,
@@ -813,6 +856,64 @@ metrics:
     assert "LEFT JOIN" in sql
     assert "COALESCE(fact.order_count, 0)" in sql
     assert result.metadata["join_policy"] == "dimension_preserving"
+
+
+async def test_query_metrics_dimension_preserving_uses_all_composite_join_keys(
+    tmp_path,
+):
+    (tmp_path / "model.yaml").write_text(
+        _core_yaml(
+            """
+semantic_model:
+  name: multi_tenant_shop
+datasets:
+  - name: orders
+    source: {table: orders}
+    time_dimension: {name: ordered_at, granularity: day}
+    dimensions:
+      - {name: tenant_id, expr: tenant_id}
+      - {name: buyer_id, expr: buyer_id}
+  - name: customers
+    source: {table: customers}
+    unique_keys: [[tenant_key, customer_key]]
+    time_dimension: {name: created_at, granularity: day}
+    dimensions:
+      - {name: tenant_key, expr: tenant_id}
+      - {name: customer_key, expr: customer_id}
+      - {name: country, expr: country}
+relationships:
+  - name: customer
+    from: orders
+    to: customers
+    from_columns: [tenant_id, buyer_id]
+    to_columns: [tenant_key, customer_key]
+metrics:
+  - name: order_revenue
+    expression: "SUM(amount)"
+    dataset: orders
+"""
+        )
+    )
+    adapter = DatusOSIAdapter(
+        DatusOSIConfig(semantic_models_path=str(tmp_path), datasource="duckdb")
+    )
+
+    result = await adapter.query_metrics(
+        ["order_revenue"],
+        dimensions=["customer__country"],
+        join_policy="dimension_preserving",
+        zero_fill=True,
+        dry_run=True,
+    )
+
+    sql = result.metadata["sql"]
+    assert "tenant_id AS __join_key_0" in sql
+    assert "buyer_id AS __join_key_1" in sql
+    assert "customer_id AS __join_key_1" in sql
+    assert (
+        "ON fact.__join_key_0 = dim.__join_key_0 "
+        "AND fact.__join_key_1 = dim.__join_key_1"
+    ) in sql
 
 
 async def test_query_metrics_dimension_preserving_accepts_dimension_expression(
@@ -835,7 +936,7 @@ datasets:
       - name: signup_month
         expr: "DATE_TRUNC('month', created_at)"
 relationships:
-  - {name: o2c, from: orders, to: customers, from_columns: [customer_id], to_columns: [customer_id]}
+  - {name: customer, from: orders, to: customers, from_columns: [customer_id], to_columns: [customer_id]}
 metrics:
   - name: order_count
     expression: "COUNT(DISTINCT order_id)"
@@ -849,7 +950,7 @@ metrics:
 
     result = await adapter.query_metrics(
         ["order_count"],
-        dimensions=["customer_id__signup_month"],
+        dimensions=["customer__signup_month"],
         join_policy="dimension_preserving",
         zero_fill=True,
         dry_run=True,
@@ -878,7 +979,7 @@ datasets:
     primary_key: customer_id
     dimensions: [{name: customer_name, expr: customer_name}]
 relationships:
-  - {name: o2c, from: orders, to: customers, from_columns: [customer_id], to_columns: [customer_id]}
+  - {name: customer, from: orders, to: customers, from_columns: [customer_id], to_columns: [customer_id]}
 metrics:
   - name: order_count
     expression: "COUNT(DISTINCT order_id)"
@@ -901,7 +1002,7 @@ metrics:
     adapter._backend = _FakeBackend(executor)
 
     result = await adapter.query_metrics(
-        ["order_count"], dimensions=["customer_id__customer_name"]
+        ["order_count"], dimensions=["customer__customer_name"]
     )
 
     assert result.data == [{"customer_name": "Alice", "order_count": 2}]
@@ -925,7 +1026,7 @@ datasets:
     primary_key: customer_id
     dimensions: [{name: customer_name, expr: customer_name}]
 relationships:
-  - {name: o2c, from: orders, to: customers, from_columns: [customer_id], to_columns: [customer_id]}
+  - {name: customer, from: orders, to: customers, from_columns: [customer_id], to_columns: [customer_id]}
 metrics:
   - name: order_count
     expression: "COUNT(DISTINCT order_id)"
@@ -945,7 +1046,7 @@ metrics:
     adapter._backend = _FakeBackend(executor)
 
     result = await adapter.query_metrics(
-        ["order_count"], dimensions=["customer_id__customer_name"]
+        ["order_count"], dimensions=["customer__customer_name"]
     )
 
     assert result.data == [{"customer_name": "Alice", "order_count": 2}]
@@ -969,7 +1070,7 @@ datasets:
     primary_key: customer_id
     dimensions: [{name: customer_name, expr: customer_name}]
 relationships:
-  - {name: o2c, from: orders, to: customers, from_columns: [customer_id], to_columns: [customer_id]}
+  - {name: customer, from: orders, to: customers, from_columns: [customer_id], to_columns: [customer_id]}
 metrics:
   - name: order_count
     expression: "COUNT(DISTINCT order_id)"
@@ -990,13 +1091,13 @@ metrics:
 
     result = await adapter.query_metrics(
         ["order_count"],
-        dimensions=["customer_id__customer_name"],
+        dimensions=["customer__customer_name"],
         join_policy="dimension_preserving",
         zero_fill=True,
         time_start="2025-01-01",
         time_end="2025-01-31",
         where="order_channel = 'web'",
-        order_by=["-customer_id__customer_name"],
+        order_by=["-customer__customer_name"],
     )
 
     assert result.data == [
@@ -1028,7 +1129,7 @@ datasets:
     primary_key: customer_id
     dimensions: [{name: customer_name, expr: customer_name}]
 relationships:
-  - {name: o2c, from: orders, to: customers, from_columns: [customer_id], to_columns: [customer_id]}
+  - {name: customer, from: orders, to: customers, from_columns: [customer_id], to_columns: [customer_id]}
 metrics:
   - name: order_count
     expression: "COUNT(DISTINCT order_id)"
@@ -1044,7 +1145,7 @@ metrics:
     with pytest.raises(ValueError, match="time_start"):
         await adapter.query_metrics(
             ["order_count"],
-            dimensions=["customer_id__customer_name"],
+            dimensions=["customer__customer_name"],
             join_policy="dimension_preserving",
             time_start="2025-01-01'; DROP TABLE orders; --",
         )
@@ -1052,7 +1153,7 @@ metrics:
     with pytest.raises(ValueError, match="order_by column"):
         await adapter.query_metrics(
             ["order_count"],
-            dimensions=["customer_id__customer_name"],
+            dimensions=["customer__customer_name"],
             join_policy="dimension_preserving",
             order_by=["customer_name; DROP TABLE orders"],
         )
@@ -1078,8 +1179,8 @@ datasets:
     primary_key: customer_id
     dimensions: [{name: customer_name, expr: customer_name}]
 relationships:
-  - {name: o2c, from: orders, to: customers, from_columns: [customer_id], to_columns: [customer_id]}
-  - {name: r2c, from: refunds, to: customers, from_columns: [customer_id], to_columns: [customer_id]}
+  - {name: customer, from: orders, to: customers, from_columns: [customer_id], to_columns: [customer_id]}
+  - {name: refund_customer, from: refunds, to: customers, from_columns: [customer_id], to_columns: [customer_id]}
 metrics:
   - name: order_count
     expression: "COUNT(DISTINCT order_id)"
@@ -1099,7 +1200,7 @@ metrics:
     with pytest.raises(ValueError, match="dimension_preserving"):
         await adapter.query_metrics(
             ["order_count", "refund_count"],
-            dimensions=["customer_id__customer_name"],
+            dimensions=["customer__customer_name"],
             join_policy="dimension_preserving",
         )
 
@@ -1125,7 +1226,7 @@ datasets:
     primary_key: customer_id
     dimensions: [{name: customer_name, expr: customer_name}]
 relationships:
-  - {name: o2c, from: orders, to: customers, from_columns: [customer_id], to_columns: [customer_id]}
+  - {name: customer, from: orders, to: customers, from_columns: [customer_id], to_columns: [customer_id]}
 metrics:
   - name: revenue
     expression: "SUM(order_amount)"
@@ -1149,7 +1250,7 @@ metrics:
     with pytest.raises(ValueError, match="dimension_preserving"):
         await adapter.query_metrics(
             ["average_order_value"],
-            dimensions=["customer_id__customer_name"],
+            dimensions=["customer__customer_name"],
             join_policy="dimension_preserving",
         )
 
@@ -1175,7 +1276,7 @@ datasets:
     primary_key: customer_id
     dimensions: [{name: customer_name, expr: customer_name}]
 relationships:
-  - {name: o2c, from: orders, to: customers, from_columns: [customer_id], to_columns: [customer_id]}
+  - {name: customer, from: orders, to: customers, from_columns: [customer_id], to_columns: [customer_id]}
 metrics:
   - name: order_count
     expression: "COUNT(DISTINCT order_id)"
@@ -1196,7 +1297,7 @@ metrics:
     with pytest.raises(ValueError, match="dimension_preserving"):
         await adapter.query_metrics(
             ["order_count", "shipped_order_count"],
-            dimensions=["customer_id__customer_name"],
+            dimensions=["customer__customer_name"],
             join_policy="dimension_preserving",
             time_start="2025-01-01",
         )
@@ -1399,8 +1500,8 @@ datasets:
     primary_key: region_id
     dimensions: [{name: region_name, expr: region_name}]
 relationships:
-  - {name: o2c, from: orders, to: customers, from_columns: [customer_id], to_columns: [customer_id]}
-  - {name: c2r, from: customers, to: regions, from_columns: [region_id], to_columns: [region_id]}
+  - {name: customer, from: orders, to: customers, from_columns: [customer_id], to_columns: [customer_id]}
+  - {name: region, from: customers, to: regions, from_columns: [region_id], to_columns: [region_id]}
 metrics:
   - name: order_count
     expression: "COUNT(DISTINCT order_id)"
@@ -1415,11 +1516,11 @@ metrics:
     dims = await adapter.get_dimensions("order_count")
     names = {d.name for d in dims}
     assert "order_date" in names
-    assert "customer_id__region_id" in names
-    assert "customer_id__region_id__region_name" in names
+    assert "customer__region_id" in names
+    assert "customer__region__region_name" in names
 
     metrics = await adapter.list_metrics()
-    assert "customer_id__region_id__region_name" in metrics[0].dimensions
+    assert "customer__region__region_name" in metrics[0].dimensions
 
 
 async def test_get_dimensions_excludes_plain_measure_source_fields(tmp_path):
