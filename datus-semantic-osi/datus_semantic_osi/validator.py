@@ -333,12 +333,25 @@ def validate_capabilities(model: SemanticModelIR, capabilities: dict) -> List[st
     """Check the IR against a backend's declared capabilities before lowering."""
     issues: List[str] = []
     supported_kinds = set(capabilities.get("metric_kinds", []))
+    supported_time_grains = set(capabilities.get("time_bucket", []))
     for metric in model.metrics:
         if supported_kinds and metric.kind.value not in supported_kinds:
             issues.append(
                 f"Backend does not support metric kind `{metric.kind.value}` "
                 f"used by metric `{metric.name}`. Supported: {sorted(supported_kinds)}."
             )
+    if supported_time_grains:
+        for dataset in model.datasets:
+            for field in dataset.fields:
+                if not field.is_dimension or field.type != "time":
+                    continue
+                grain = str(field.time_granularity or "day").lower()
+                if grain not in supported_time_grains:
+                    issues.append(
+                        f"Backend does not support time granularity `{grain}` used by "
+                        f"dataset `{dataset.name}` field `{field.name}`. Supported: "
+                        f"{sorted(supported_time_grains)}."
+                    )
     if not capabilities.get("composite_join", False):
         for relationship in model.relationships:
             if len(relationship.from_columns) > 1:

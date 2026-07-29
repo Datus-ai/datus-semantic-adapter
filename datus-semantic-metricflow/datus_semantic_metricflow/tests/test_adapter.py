@@ -1167,9 +1167,17 @@ metric:
         assert result == QueryResult(
             columns=["sql"],
             data=[{"sql": "SELECT 1"}],
-            metadata={"explain": True, "sql": "SELECT 1"},
+            metadata={
+                "explain": True,
+                "sql": "SELECT 1",
+                "warehouse_dry_run": {
+                    "status": "success",
+                    "method": "explain",
+                },
+            },
         )
         adapter.client.explain.assert_called_once()
+        adapter.client.sql_client.dry_run.assert_called_once_with("SELECT 1")
 
     @pytest.mark.asyncio
     async def test_validate_semantic_returns_valid_result(self, adapter):

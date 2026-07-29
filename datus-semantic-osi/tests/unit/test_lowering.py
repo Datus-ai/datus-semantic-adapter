@@ -78,6 +78,62 @@ metrics:
     assert sql_query.startswith("SELECT region, SUM(amount) AS amount")
     assert "WHERE region = 'east'" in sql_query
     assert "GROUP BY region" in sql_query
+    dimensions = art.data_source_docs[0]["data_source"]["dimensions"]
+    static_time = next(
+        dimension
+        for dimension in dimensions
+        if dimension["name"] == "datus_static_metric_time"
+    )
+    assert static_time["type"] == "time"
+    assert static_time["type_params"]["is_primary"] is True
+    assert static_time["expr"] == "CAST('1970-01-01' AS DATE)"
+
+
+def test_query_backed_dataset_omits_terminal_delimiter_only_when_lowering():
+    osi = """
+semantic_model:
+  name: query_model
+datasets:
+  - name: regional_orders
+    source:
+      query: "SELECT region, SUM(amount) AS amount FROM orders GROUP BY region;"
+    dimensions:
+      - name: region
+        expr: region
+metrics:
+  - name: total_amount
+    expression: "SUM(amount)"
+    dataset: regional_orders
+"""
+    model = compile_document(parse_osi(osi))
+
+    art = lower_to_metricflow(model)
+
+    assert model.datasets[0].sql_query.endswith(";")
+    assert not art.data_source_docs[0]["data_source"]["sql_query"].endswith(";")
+
+
+def test_reserved_time_grain_dimension_uses_internal_metricflow_name():
+    osi = """
+semantic_model:
+  name: weekly_model
+datasets:
+  - name: weekly_results
+    source:
+      query: SELECT week, COUNT(*) AS users FROM activity GROUP BY week
+    dimensions:
+      - name: week
+        expr: week
+metrics:
+  - name: user_count
+    expression: "SUM(users)"
+    dataset: weekly_results
+"""
+    art = lower_to_metricflow(compile_document(parse_osi(osi)))
+    dimension = art.data_source_docs[0]["data_source"]["dimensions"][0]
+
+    assert dimension["name"] == "datus_dimension_week"
+    assert dimension["expr"] == "week"
 
 
 def test_data_source_has_primary_time_dimension_and_measure():
@@ -151,6 +207,21 @@ def test_artifact_write_removes_stale_metrics_yaml(tmp_path):
 
     assert "metrics" not in written
     assert not stale_metrics.exists()
+
+
+def test_staged_dataset_without_executable_elements_is_not_lowered():
+    model = SemanticModelIR(
+        datasets=[
+            DatasetIR(
+                name="future_metric_results",
+                sql_query="SELECT total_users FROM results",
+            )
+        ]
+    )
+
+    artifact = lower_to_metricflow(model)
+
+    assert artifact.data_source_docs == []
 
 
 def test_relationship_names_disambiguate_foreign_identifiers():

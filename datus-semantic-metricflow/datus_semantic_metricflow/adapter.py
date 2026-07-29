@@ -1010,7 +1010,8 @@ class MetricFlowAdapter(BaseSemanticAdapter):
         )
 
         if dry_run:
-            # Use explain to get SQL without executing
+            # Compile first, then ask the warehouse to validate the rendered SQL
+            # without fetching rows.
             try:
                 result = client.explain(
                     metrics=query_metric_names,
@@ -1021,14 +1022,21 @@ class MetricFlowAdapter(BaseSemanticAdapter):
                     limit=limit,
                     order=order_list,
                 )
+                sql = result.rendered_sql_without_descriptions.sql_query
+                client.sql_client.dry_run(sql)
             except Exception as exc:
                 payload = self._semantic_validation_error_from(exc, query_metric_names)
                 if payload is None:
                     raise
                 raise MetricFlowSemanticValidationException(payload) from exc
-            # Return SQL as result
-            sql = result.rendered_sql_without_descriptions.sql_query
-            metadata = {"explain": True, "sql": sql}
+            metadata = {
+                "explain": True,
+                "sql": sql,
+                "warehouse_dry_run": {
+                    "status": "success",
+                    "method": "explain",
+                },
+            }
             return QueryResult(
                 columns=["sql"],
                 data=[{"sql": sql}],
