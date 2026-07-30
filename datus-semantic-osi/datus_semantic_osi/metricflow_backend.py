@@ -12,6 +12,7 @@ never produces it.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List
@@ -30,6 +31,36 @@ from datus_semantic_osi.ir import (
 
 DEFAULT_OWNER = "datus@datus.ai"
 _PERIOD_OVER_PERIOD_BASE_PREFIX = "datus_pop_base"
+_RESERVED_TIME_GRAIN_NAMES = {"day", "week", "month", "quarter", "year"}
+_RESERVED_DIMENSION_PREFIX = "datus_dimension_"
+_STATIC_METRIC_TIME = "datus_static_metric_time"
+
+
+def executable_query_source(sql: str) -> str:
+    """Return authored query SQL in a form that can be embedded as a subquery."""
+    return re.sub(r";\s*$", "", str(sql or ""))
+
+
+def metricflow_dimension_name(name: str) -> str:
+    """Map an OSI dimension name to a non-reserved MetricFlow element name."""
+    value = str(name or "")
+    lowered = value.lower()
+    if lowered.startswith(_RESERVED_DIMENSION_PREFIX):
+        return f"{_RESERVED_DIMENSION_PREFIX}{value}"
+    if lowered in _RESERVED_TIME_GRAIN_NAMES:
+        return f"{_RESERVED_DIMENSION_PREFIX}{value}"
+    return value
+
+
+def metricflow_dimension_path(name: str) -> str:
+    """Map the leaf of an OSI relationship dimension path for MetricFlow."""
+    value = str(name or "")
+    lowered = value.lower()
+    if lowered == "metric_time" or lowered.startswith("metric_time__"):
+        return value
+    parts = value.split("__")
+    parts[-1] = metricflow_dimension_name(parts[-1])
+    return "__".join(parts)
 
 
 @dataclass
@@ -72,7 +103,10 @@ def _dump_multidoc(docs: List[dict]) -> str:
 def _dataset_sql(ds: DatasetIR) -> dict:
     """Render a dataset's authored table or query source."""
     if ds.sql_query:
-        return {"sql_query": ds.sql_query}
+        # MetricFlow embeds query sources inside a FROM subquery. Preserve the
+        # authored OSI source, but omit its terminal statement delimiter in the
+        # generated execution artifact.
+        return {"sql_query": executable_query_source(ds.sql_query)}
     if ds.sql_table:
         # MetricFlow's sql_table requires a schema-qualified name
         # (``schema.table`` / ``db.schema.table``). Render bare table names as a
@@ -93,9 +127,10 @@ def _lower_dimensions(ds: DatasetIR) -> List[dict]:
             # Plain row-level field (no `dimension:` block in OSI core): it may
             # back metric expressions but is not exposed for grouping.
             continue
+        backend_name = metricflow_dimension_name(f.name)
         if f.type == "time":
             entry: dict = {
-                "name": f.name,
+                "name": backend_name,
                 "type": "time",
                 "type_params": {
                     "is_primary": bool(f.is_primary_time),
@@ -103,9 +138,10 @@ def _lower_dimensions(ds: DatasetIR) -> List[dict]:
                 },
             }
         else:
-            entry = {"name": f.name, "type": "categorical"}
-        if f.expr and f.expr != f.name:
-            entry["expr"] = f.expr
+            entry = {"name": backend_name, "type": "categorical"}
+        expression = f.expr or f.name
+        if expression != backend_name:
+            entry["expr"] = expression
         dims.append(entry)
     return dims
 
@@ -255,6 +291,30 @@ def _lower_data_source(
     # the author also listed as a dimension).
     identifier_names = {i["name"] for i in identifiers}
     dims = [d for d in _lower_dimensions(ds) if d["name"] not in identifier_names]
+    if measures and not any(
+        dimension.get("type") == "time"
+        and dimension.get("type_params", {}).get("is_primary")
+        for dimension in dims
+    ):
+        # MetricFlow requires every measure to have an aggregation-time
+        # dimension, while OSI permits timeless snapshot / pre-aggregated
+        # datasets. Add an execution-only constant dimension rather than
+        # changing the authored dataset or exposing a fabricated public field.
+        name = _STATIC_METRIC_TIME
+        existing_names = identifier_names | {dimension["name"] for dimension in dims}
+        while name in existing_names:
+            name = f"{name}_internal"
+        dims.append(
+            {
+                "name": name,
+                "type": "time",
+                "type_params": {
+                    "is_primary": True,
+                    "time_granularity": "day",
+                },
+                "expr": "CAST('1970-01-01' AS DATE)",
+            }
+        )
     if dims:
         body["dimensions"] = dims
     if measures:
@@ -470,14 +530,22 @@ def lower_to_metricflow(model: SemanticModelIR) -> MetricFlowArtifact:
     rel_used = _relationship_used_identifier_names(model)
     artifact = MetricFlowArtifact()
     for ds in model.datasets:
-        artifact.data_source_docs.append(
-            _lower_data_source(
-                ds,
-                measures_by_ds.get(ds.name, []),
-                rel_identifiers.get(ds.name, []),
-                rel_used.get(ds.name, set()),
-            )
+        document = _lower_data_source(
+            ds,
+            measures_by_ds.get(ds.name, []),
+            rel_identifiers.get(ds.name, []),
+            rel_used.get(ds.name, set()),
         )
+        body = document["data_source"]
+        if not any(
+            body.get(element_type)
+            for element_type in ("identifiers", "dimensions", "measures")
+        ):
+            # A staged query-backed dataset may contain only future metric
+            # outputs. MetricFlow cannot instantiate an element-free source;
+            # omit it until a metric contributes a backing measure.
+            continue
+        artifact.data_source_docs.append(document)
     for metric in model.metrics:
         if metric.period_over_period is not None:
             base_metric = metric.model_copy(
