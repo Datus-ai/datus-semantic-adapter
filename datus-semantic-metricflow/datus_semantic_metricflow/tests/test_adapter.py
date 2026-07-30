@@ -130,6 +130,10 @@ class UnableToSatisfyQueryError(Exception):
     """Stand-in matching MetricFlow's query validation exception by class name."""
 
 
+class InvalidQueryWarehouseError(Exception):
+    """Stand-in proving warehouse failures bypass semantic error conversion."""
+
+
 def _metricflow_metric(
     name,
     metric_type,
@@ -1178,6 +1182,22 @@ metric:
         )
         adapter.client.explain.assert_called_once()
         adapter.client.sql_client.dry_run.assert_called_once_with("SELECT 1")
+
+    @pytest.mark.asyncio
+    async def test_query_metrics_dry_run_preserves_warehouse_error(self, adapter):
+        adapter.client.explain.return_value = SimpleNamespace(
+            rendered_sql_without_descriptions=SimpleNamespace(sql_query="SELECT 1")
+        )
+        adapter.client.sql_client.dry_run.side_effect = InvalidQueryWarehouseError(
+            "warehouse rejected SQL"
+        )
+
+        with pytest.raises(InvalidQueryWarehouseError, match="warehouse rejected SQL"):
+            await adapter.query_metrics(
+                metrics=["revenue"],
+                dimensions=["date"],
+                dry_run=True,
+            )
 
     @pytest.mark.asyncio
     async def test_validate_semantic_returns_valid_result(self, adapter):

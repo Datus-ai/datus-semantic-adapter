@@ -15,7 +15,7 @@ from datus_semantic_osi.adapter import DatusOSIAdapter
 from datus_semantic_osi.backend import MetricFlowBackend
 from datus_semantic_osi.config import DatusOSIConfig
 from datus_semantic_osi.errors import OSIValidationError
-from datus_semantic_osi.ir import DatasetIR
+from datus_semantic_osi.ir import DatasetIR, FieldIR
 from datus_semantic_osi.profile import parse_osi_profile, to_core_schema_document
 
 
@@ -473,6 +473,25 @@ datasets:
         "(SELECT region, COUNT(*) AS order_count FROM orders GROUP BY region) "
         "AS __datus_query_source LIMIT 0"
     ]
+
+
+def test_query_dataset_projection_rejects_unsafe_expression(tmp_path):
+    adapter = DatusOSIAdapter(
+        DatusOSIConfig(semantic_models_path=str(tmp_path), datasource="starrocks")
+    )
+    dataset = DatasetIR(
+        name="grouped_results",
+        sql_query="SELECT region FROM orders",
+        fields=[
+            FieldIR(
+                name="region",
+                expr="region; DROP TABLE orders",
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="exactly one SQL expression"):
+        adapter._query_dataset_projection_sql(dataset)
 
 
 async def test_semantic_model_validation_reports_missing_query_dataset_projection(
@@ -996,6 +1015,57 @@ metrics:
             dry_run=True,
             **query_kwargs,
         )
+
+
+async def test_multi_dataset_metric_with_time_on_all_roots_is_not_timeless(tmp_path):
+    (tmp_path / "activity.yml").write_text(
+        _core_yaml(
+            """
+semantic_model:
+  name: activity_model
+datasets:
+  - name: orders
+    source: {table: orders}
+    time_dimension: {name: order_date, granularity: day}
+  - name: refunds
+    source: {table: refunds}
+    time_dimension: {name: refund_date, granularity: day}
+metrics:
+  - name: order_count
+    expression: COUNT(*)
+    dataset: orders
+  - name: refund_count
+    expression: COUNT(*)
+    dataset: refunds
+  - name: net_activity
+    metric_kind: derived
+    expression: order_count - refund_count
+    inputs: [order_count, refund_count]
+"""
+        ),
+        encoding="utf-8",
+    )
+    adapter = DatusOSIAdapter(
+        DatusOSIConfig(semantic_models_path=str(tmp_path), datasource="duckdb")
+    )
+    sql = "SELECT 1 AS net_activity"
+    executor = _FakeExecutor(
+        QueryResult(
+            columns=["sql"],
+            data=[{"sql": sql}],
+            metadata={"explain": True, "sql": sql},
+        )
+    )
+    adapter._backend = _FakeBackend(executor)
+
+    result = await adapter.query_metrics(
+        ["net_activity"],
+        dimensions=["metric_time__day"],
+        dry_run=True,
+    )
+
+    assert executor.calls
+    assert result.metadata["warehouse_dry_run"]["status"] == "success"
 
 
 async def test_live_query_metrics_dry_run_checks_compiled_sql_in_warehouse(adapter):

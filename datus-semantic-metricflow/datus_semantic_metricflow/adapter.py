@@ -1022,13 +1022,13 @@ class MetricFlowAdapter(BaseSemanticAdapter):
                     limit=limit,
                     order=order_list,
                 )
-                sql = result.rendered_sql_without_descriptions.sql_query
-                client.sql_client.dry_run(sql)
             except Exception as exc:
                 payload = self._semantic_validation_error_from(exc, query_metric_names)
                 if payload is None:
                     raise
                 raise MetricFlowSemanticValidationException(payload) from exc
+            sql = result.rendered_sql_without_descriptions.sql_query
+            client.sql_client.dry_run(sql)
             metadata = {
                 "explain": True,
                 "sql": sql,

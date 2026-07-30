@@ -13,6 +13,7 @@ from datus_semantic_osi.ir import (
 from datus_semantic_osi.metricflow_backend import (
     MetricFlowArtifact,
     lower_to_metricflow,
+    metricflow_dimension_path,
 )
 from datus_semantic_osi.profile import parse_osi_profile as parse_osi
 
@@ -134,6 +135,71 @@ metrics:
 
     assert dimension["name"] == "datus_dimension_week"
     assert dimension["expr"] == "week"
+
+
+def test_reserved_dimension_mapping_is_collision_free():
+    osi = """
+semantic_model:
+  name: weekly_model
+datasets:
+  - name: weekly_results
+    source:
+      query: SELECT week, datus_dimension_week, users FROM weekly_results
+    dimensions:
+      - name: week
+        expr: week
+      - name: datus_dimension_week
+        expr: datus_dimension_week
+metrics:
+  - name: user_count
+    expression: "SUM(users)"
+    dataset: weekly_results
+"""
+    art = lower_to_metricflow(compile_document(parse_osi(osi)))
+    dimensions = art.data_source_docs[0]["data_source"]["dimensions"]
+
+    assert [dimension["name"] for dimension in dimensions] == [
+        "datus_dimension_week",
+        "datus_dimension_datus_dimension_week",
+        "datus_static_metric_time",
+    ]
+
+
+def test_metricflow_dimension_path_only_bypasses_metric_time():
+    assert metricflow_dimension_path("metric_time") == "metric_time"
+    assert metricflow_dimension_path("metric_time__week") == "metric_time__week"
+    assert (
+        metricflow_dimension_path("metric_timezone__week")
+        == "metric_timezone__datus_dimension_week"
+    )
+
+
+def test_static_time_name_avoids_identifier_collision():
+    osi = """
+semantic_model:
+  name: snapshot_model
+datasets:
+  - name: snapshots
+    source:
+      table: snapshots
+    primary_key: datus_static_metric_time
+metrics:
+  - name: total_amount
+    expression: "SUM(amount)"
+    dataset: snapshots
+"""
+    art = lower_to_metricflow(compile_document(parse_osi(osi)))
+    data_source = art.data_source_docs[0]["data_source"]
+
+    assert any(
+        identifier["name"] == "datus_static_metric_time"
+        for identifier in data_source["identifiers"]
+    )
+    assert any(
+        dimension["name"] == "datus_static_metric_time_internal"
+        and dimension["type_params"]["is_primary"]
+        for dimension in data_source["dimensions"]
+    )
 
 
 def test_data_source_has_primary_time_dimension_and_measure():

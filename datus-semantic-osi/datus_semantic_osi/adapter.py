@@ -1089,7 +1089,7 @@ class DatusOSIAdapter(BaseSemanticAdapter):
             try:
                 return sqlglot.parse(sql)
             except Exception:
-                raise dialect_error
+                raise dialect_error from None
 
     @staticmethod
     def _warehouse_dry_run(executor: Any, result: QueryResult) -> None:
@@ -1112,8 +1112,9 @@ class DatusOSIAdapter(BaseSemanticAdapter):
             "method": "explain",
         }
 
-    @staticmethod
-    def _query_dataset_projection_sql(dataset: DatasetIR) -> tuple[str, List[str]]:
+    def _query_dataset_projection_sql(
+        self, dataset: DatasetIR
+    ) -> tuple[str, List[str]]:
         """Build a no-row query that validates a query dataset's public contract."""
         projections: List[tuple[str, str]] = [
             (field.name, field.expr or field.name) for field in dataset.fields
@@ -1135,7 +1136,12 @@ class DatusOSIAdapter(BaseSemanticAdapter):
                 continue
             seen_expressions.add(expression)
             names.append(name)
-            expressions.append(expression)
+            expressions.append(
+                self._profile_sql_expression(
+                    expression,
+                    label=f"dataset `{dataset.name}` projection `{name}`",
+                )
+            )
 
         select_list = ", ".join(expressions) if expressions else "*"
         source = executable_query_source(dataset.sql_query or "")
@@ -1544,6 +1550,23 @@ class DatusOSIAdapter(BaseSemanticAdapter):
         )
         return (time_dimension, field) if field is not None else (None, None)
 
+    def _metric_has_authored_time_dimension(
+        self, model: SemanticModelIR, metric: MetricIR
+    ) -> bool:
+        """Return whether every root needed by the metric has authored time semantics."""
+        if metric.time_dimension:
+            return True
+
+        dataset_names = self._root_dataset_names_for_metric(model, metric)
+        if not dataset_names:
+            return False
+        datasets = self._dataset_by_name(model)
+        return all(
+            (dataset := datasets.get(dataset_name)) is not None
+            and bool(dataset.primary_time_dimension)
+            for dataset_name in dataset_names
+        )
+
     def _time_granularities_for_metric(
         self, model: SemanticModelIR, metric: MetricIR, time_field: FieldIR
     ) -> List[str]:
@@ -1587,7 +1610,9 @@ class DatusOSIAdapter(BaseSemanticAdapter):
         timeless_metrics = []
         for name in metrics:
             metric = self._find_metric(name, model)
-            if metric is not None and self._metric_time_field(model, metric)[1] is None:
+            if metric is not None and not self._metric_has_authored_time_dimension(
+                model, metric
+            ):
                 timeless_metrics.append(name)
         if timeless_metrics:
             raise ValueError(

@@ -440,6 +440,29 @@ def test_capabilities_reject_unsupported_time_granularity():
     ]
 
 
+def test_capabilities_normalize_declared_time_granularity():
+    model = SemanticModelIR(
+        datasets=[
+            DatasetIR(
+                name="events",
+                sql_table="events",
+                fields=[
+                    FieldIR(
+                        name="event_time",
+                        expr="event_time",
+                        type="time",
+                        time_granularity="day",
+                    )
+                ],
+            )
+        ]
+    )
+
+    issues = validate_capabilities(model, {"time_bucket": ["Day", "Month"]})
+
+    assert issues == []
+
+
 def test_ensure_valid_raises_business_error():
     with pytest.raises(OSIValidationError):
         ensure_valid(["something is wrong"])

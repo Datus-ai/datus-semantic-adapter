@@ -44,7 +44,10 @@ def executable_query_source(sql: str) -> str:
 def metricflow_dimension_name(name: str) -> str:
     """Map an OSI dimension name to a non-reserved MetricFlow element name."""
     value = str(name or "")
-    if value.lower() in _RESERVED_TIME_GRAIN_NAMES:
+    lowered = value.lower()
+    if lowered.startswith(_RESERVED_DIMENSION_PREFIX):
+        return f"{_RESERVED_DIMENSION_PREFIX}{value}"
+    if lowered in _RESERVED_TIME_GRAIN_NAMES:
         return f"{_RESERVED_DIMENSION_PREFIX}{value}"
     return value
 
@@ -52,7 +55,8 @@ def metricflow_dimension_name(name: str) -> str:
 def metricflow_dimension_path(name: str) -> str:
     """Map the leaf of an OSI relationship dimension path for MetricFlow."""
     value = str(name or "")
-    if value.lower().startswith("metric_time"):
+    lowered = value.lower()
+    if lowered == "metric_time" or lowered.startswith("metric_time__"):
         return value
     parts = value.split("__")
     parts[-1] = metricflow_dimension_name(parts[-1])
@@ -297,7 +301,7 @@ def _lower_data_source(
         # datasets. Add an execution-only constant dimension rather than
         # changing the authored dataset or exposing a fabricated public field.
         name = _STATIC_METRIC_TIME
-        existing_names = {dimension["name"] for dimension in dims}
+        existing_names = identifier_names | {dimension["name"] for dimension in dims}
         while name in existing_names:
             name = f"{name}_internal"
         dims.append(

@@ -333,7 +333,9 @@ def validate_capabilities(model: SemanticModelIR, capabilities: dict) -> List[st
     """Check the IR against a backend's declared capabilities before lowering."""
     issues: List[str] = []
     supported_kinds = set(capabilities.get("metric_kinds", []))
-    supported_time_grains = set(capabilities.get("time_bucket", []))
+    supported_time_grains = {
+        str(grain).lower() for grain in capabilities.get("time_bucket", [])
+    }
     for metric in model.metrics:
         if supported_kinds and metric.kind.value not in supported_kinds:
             issues.append(
