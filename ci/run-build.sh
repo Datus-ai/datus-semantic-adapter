@@ -7,6 +7,7 @@ cd "$ROOT_DIR"
 PACKAGES=(
   "datus-semantic-core"
   "datus-semantic-metricflow"
+  "datus-semantic-dosi"
 )
 
 usage() {
@@ -118,6 +119,7 @@ smoke_check_package() {
   local package="$1"
   local wheel_path="$2"
   local core_wheel_path
+  local smoke_dir
 
   echo ""
   echo "=== Package smoke: $package ==="
@@ -188,6 +190,33 @@ assert metadata is not None
 assert metadata.adapter_class.__name__ == "MetricFlowAdapter"
 PY
       fi
+      ;;
+    datus-semantic-dosi)
+      core_wheel_path="$(single_artifact \
+        "datus-semantic-core" \
+        "$dist_dir/datus-semantic-core" \
+        "*.whl" \
+        "wheel")"
+      smoke_dir="$(mktemp -d)"
+      uv venv --python 3.12 "$smoke_dir"
+      uv pip install --python "$smoke_dir/bin/python" \
+        pydantic pyyaml "$core_wheel_path"
+      uv pip install --python "$smoke_dir/bin/python" --no-deps "$wheel_path"
+      "$smoke_dir/bin/python" - <<'PY'
+from importlib import metadata
+
+from datus_semantic_core import semantic_adapter_registry
+import datus_semantic_dosi
+
+entry_points = metadata.entry_points(group="datus.semantic_adapters")
+dosi = [entry_point for entry_point in entry_points if entry_point.name == "dosi"]
+assert dosi, "dosi semantic adapter entry point is missing"
+dosi[0].load()()
+registered = semantic_adapter_registry.get_metadata("dosi")
+assert registered is not None
+assert registered.adapter_class.__name__ == "DosiAdapter"
+PY
+      rm -rf "$smoke_dir"
       ;;
     *)
       echo "No package smoke configured for package: $package" >&2

@@ -1,4 +1,4 @@
-# Tutorial-sized OSI model used across osi-engine tests:
+# Tutorial-sized OSI model used across Dosi tests:
 # one fact table (orders), two dimensions (customers, products),
 # a time dimension, and one metric of each inferable kind.
 

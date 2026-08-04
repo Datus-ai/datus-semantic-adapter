@@ -2,7 +2,7 @@
 # Licensed under the Apache License, Version 2.0.
 # See http://www.apache.org/licenses/LICENSE-2.0 for details.
 
-"""The OSI Engine semantic adapter: a thin translator onto osi-engine.
+"""The Dosi semantic adapter: a thin translator onto the native engine.
 
 All planning, SQL generation, and execution happen inside the Rust engine;
 this class maps the Datus contract onto the engine API. Engine calls are
@@ -20,7 +20,6 @@ from typing import Any, Dict, List, Optional
 from datus_semantic_core.authoring import MetricMutationResult, MetricSource
 from datus_semantic_core.base import BaseSemanticAdapter
 from datus_semantic_core.exceptions import SemanticCoreException
-from datus_semantic_core.metric_author import MetricAuthor
 from datus_semantic_core.models import (
     DimensionInfo,
     MetricDefinition,
@@ -31,21 +30,21 @@ from datus_semantic_core.models import (
     ValidationResult,
 )
 
-from datus_semantic_osi_engine.config import OSIEngineConfig
-from datus_semantic_osi_engine.dialects import resolve_engine_dialect
-from datus_semantic_osi_engine.engine import EngineHandle, load_binding
-from datus_semantic_osi_engine.errors import (
+from datus_semantic_dosi.config import DosiConfig
+from datus_semantic_dosi.dialects import resolve_engine_dialect
+from datus_semantic_dosi.engine import EngineHandle, load_binding
+from datus_semantic_dosi.errors import (
     SemanticValidationException,
     raise_mapped,
 )
 
 
-class OSIEngineAdapter(BaseSemanticAdapter):
-    """Datus semantic adapter backed by the native Rust OSI engine."""
+class DosiAdapter(BaseSemanticAdapter):
+    """Datus semantic adapter backed by the native Rust Dosi engine."""
 
-    def __init__(self, config: OSIEngineConfig):
-        super().__init__(config, service_type="osi_engine")
-        self.config: OSIEngineConfig = config
+    def __init__(self, config: DosiConfig):
+        super().__init__(config, service_type="dosi")
+        self.config: DosiConfig = config
         self._handle = EngineHandle(config)
 
     # ==================== Semantic Model Interface ====================
@@ -256,11 +255,11 @@ class OSIEngineAdapter(BaseSemanticAdapter):
         return ValidationResult(valid=bool(payload.get("valid")), issues=issues)
 
     # ==================== Authoring Interface ====================
-    # Backend/editor surface; not an agent/LLM tool. osi_engine authors the same
+    # Backend/editor surface; not an agent/LLM tool. Dosi authors the same
     # OSI YAML files as the osi adapter, so the file read/write/validate logic is
-    # reused from the shared core MetricAuthor — only the execution/query engine
-    # differs (native Rust here vs the Python compiler there). Uses core's
-    # default structural document validation (no dependency on datus-semantic-osi).
+    # reused from the OSI adapter — only the execution/query engine differs
+    # (native Rust here vs the Python compiler there). This keeps direct adapter
+    # mutations and Datus-agent authoring on the same strict OSI schema contract.
 
     def _authoring_root(self) -> str:
         """The OSI model path authoring operates on (mirrors resolve_model_file).
@@ -274,11 +273,13 @@ class OSIEngineAdapter(BaseSemanticAdapter):
         if self.config.semantic_models_path:
             return self.config.semantic_models_path
         raise SemanticCoreException(
-            "osi_engine authoring requires semantic_model_path or semantic_models_path"
+            "dosi authoring requires semantic_model_path or semantic_models_path"
         )
 
-    def _author(self) -> MetricAuthor:
-        return MetricAuthor(self._authoring_root())
+    def _author(self) -> Any:
+        from datus_semantic_osi.authoring import OSIMetricAuthor
+
+        return OSIMetricAuthor(self._authoring_root())
 
     def read_metric_source(
         self,
@@ -325,7 +326,7 @@ class OSIEngineAdapter(BaseSemanticAdapter):
         return SemanticModelInfo(
             name=str(row.get("name", "")),
             table_name=str(row.get("source", "")),
-            platform_type="osi_engine",
+            platform_type="dosi",
             extra={k: v for k, v in row.items() if k not in ("name", "source")},
         )
 

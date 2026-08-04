@@ -10,35 +10,35 @@ import shutil
 
 import pytest
 
-from datus_semantic_osi_engine.adapter import OSIEngineAdapter
-from datus_semantic_osi_engine.config import OSIEngineConfig
-from datus_semantic_osi_engine.errors import SemanticValidationException
+from datus_semantic_dosi.adapter import DosiAdapter
+from datus_semantic_dosi.config import DosiConfig
+from datus_semantic_dosi.errors import SemanticValidationException
 
 
 def _real_binding_available() -> bool:
     try:
-        import datus_osi_engine
+        import dosi_engine
     except ImportError:
         return False
     # The unit-test fake sets this marker; the real extension does not.
-    return not getattr(datus_osi_engine, "__osi_fake__", False)
+    return not getattr(dosi_engine, "__dosi_fake__", False)
 
 
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
         not _real_binding_available(),
-        reason="real datus-osi-engine bindings not installed",
+        reason="real dosi-engine bindings not installed",
     ),
     pytest.mark.skipif(shutil.which("duckdb") is None, reason="duckdb CLI not installed"),
 ]
 
 
-def _adapter(model_path: str, seeded_db: str | None = None) -> OSIEngineAdapter:
+def _adapter(model_path: str, seeded_db: str | None = None) -> DosiAdapter:
     kwargs = {"semantic_model_path": model_path}
     if seeded_db is not None:
         kwargs["db_config"] = {"type": "duckdb", "uri": seeded_db}
-    return OSIEngineAdapter(OSIEngineConfig(**kwargs))
+    return DosiAdapter(DosiConfig(**kwargs))
 
 
 async def test_list_metrics_and_dimensions(model_path):

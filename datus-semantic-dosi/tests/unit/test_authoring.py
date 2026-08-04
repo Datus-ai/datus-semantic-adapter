@@ -2,7 +2,7 @@
 # Licensed under the Apache License, Version 2.0.
 # See http://www.apache.org/licenses/LICENSE-2.0 for details.
 
-"""osi_engine reuses the OSI file authoring layer verbatim.
+"""Dosi reuses the OSI file authoring layer verbatim.
 
 Authoring only touches the YAML files (never the Rust binding), so these run
 against the fake binding like the rest of the unit suite.

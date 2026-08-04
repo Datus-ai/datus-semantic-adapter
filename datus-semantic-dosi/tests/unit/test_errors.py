@@ -10,7 +10,7 @@ import pytest
 from _fakes import ExecuteError, FakeEngine, ModelError, QueryError
 from datus_semantic_core.exceptions import SemanticCoreException
 
-from datus_semantic_osi_engine.errors import (
+from datus_semantic_dosi.errors import (
     SemanticValidationException,
     raise_mapped,
     validation_error_from_query_error,

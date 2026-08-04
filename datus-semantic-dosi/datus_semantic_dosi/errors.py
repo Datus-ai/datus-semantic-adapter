@@ -111,6 +111,6 @@ def raise_mapped(exc: Any, binding: Any, **request_context: Any) -> None:
         ) from exc
     if isinstance(exc, binding.OsiError):
         raise SemanticCoreException(
-            f"osi-engine {type(exc).__name__} [{exc.code}]: {_message_with_context(exc)}"
+            f"Dosi {type(exc).__name__} [{exc.code}]: {_message_with_context(exc)}"
         ) from exc
     raise exc

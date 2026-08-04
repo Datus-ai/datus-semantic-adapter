@@ -2,14 +2,14 @@
 # Licensed under the Apache License, Version 2.0.
 # See http://www.apache.org/licenses/LICENSE-2.0 for details.
 
-"""Fake datus-osi-engine binding for unit tests.
+"""Fake dosi-engine binding for unit tests.
 
 Importable directly by test modules (``from _fakes import FakeEngine``) so
 they never depend on the fake being present in ``sys.modules`` at import
 time. The conftest installs :func:`build_fake_module` into
-``sys.modules["datus_osi_engine"]`` only for the duration of each test (and
+``sys.modules["dosi_engine"]`` only for the duration of each test (and
 restores the original afterward), so the fake never leaks into a same-process
-integration run. Row shapes match the ``osi_engine::list`` machine contract.
+integration run. Row shapes match the ``dosi::list`` machine contract.
 """
 
 from __future__ import annotations
@@ -179,14 +179,14 @@ def default_validate(model_text: str) -> Dict[str, Any]:
 
 
 def build_fake_module() -> types.ModuleType:
-    """Build a module object mirroring the real ``datus_osi_engine`` surface.
+    """Build a module object mirroring the real ``dosi_engine`` surface.
 
     Not installed into ``sys.modules`` here — the conftest installs it per
     test and restores the previous entry, so it never shadows a real wheel
     outside unit tests.
     """
-    module = types.ModuleType("datus_osi_engine")
-    module.__osi_fake__ = True
+    module = types.ModuleType("dosi_engine")
+    module.__dosi_fake__ = True
     module.Engine = FakeEngine
     module.validate = default_validate
     module.SPEC_VERSION = "0.2.0.dev0"

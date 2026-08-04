@@ -11,6 +11,7 @@ on:
           - datus-semantic-core
           - datus-semantic-metricflow
           - datus-semantic-osi
+          - datus-semantic-dosi
       version:
         description: "Optional version; leave empty to increment the current patch version"
         required: false

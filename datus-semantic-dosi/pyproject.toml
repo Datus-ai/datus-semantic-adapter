@@ -1,0 +1,53 @@
+[project]
+name = "datus-semantic-dosi"
+version = "0.1.0"
+description = "Datus semantic adapter backed by the native Dosi engine"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "Apache-2.0"}
+authors = [{name = "DatusAI", email = "support@datus.ai"}]
+dependencies = [
+    "pydantic>=2.0.0",
+    "pyyaml>=6.0",
+    # Shared adapter contract and file authoring primitives.
+    "datus-semantic-core>=0.2.3",
+    # Datus-agent reuses the packaged OSI schema, validator, and authoring spec.
+    # MetricFlow remains optional and is not pulled by this dependency.
+    "datus-semantic-osi>=0.1.6",
+    # Runtime engine: a normal dependency so one adapter install is sufficient.
+    "dosi-engine>=0.1.0",
+]
+
+[project.urls]
+Repository = "https://github.com/Datus-ai/datus-semantic-adapter"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "ruff>=0.1.0",
+]
+
+[project.entry-points."datus.semantic_adapters"]
+dosi = "datus_semantic_dosi:register"
+
+[tool.uv.sources]
+datus-semantic-core = { workspace = true }
+datus-semantic-osi = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["datus_semantic_dosi"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+markers = [
+    "integration: needs the installed dosi-engine wheel and the duckdb CLI",
+]
