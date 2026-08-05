@@ -17,7 +17,7 @@ dependencies = [
 # MetricFlow execution backend. Pulls the heavy datus-metricflow stack; the
 # OSI compiler / IR / lowering layers work without it.
 metricflow = [
-    "datus-semantic-metricflow>=0.2.8",
+    "datus-semantic-metricflow>=0.2.14",
 ]
 dev = [
     "pytest>=7.0.0",
