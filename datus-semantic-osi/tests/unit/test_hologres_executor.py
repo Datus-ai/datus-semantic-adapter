@@ -78,4 +78,8 @@ def test_live_executor_preserves_connection_details(tmp_path):
     assert url.port == 80
     assert url.database == "njyh"
     assert url.username == "holo_user"
+    # The password travels separately from the URL — make_sql_client_from_config
+    # passes it as the second argument to from_connection_details — so a
+    # regression that drops it would otherwise still satisfy this test.
+    assert url.password == "holo_pw"
     assert url.query.get("sslmode") == "require"
