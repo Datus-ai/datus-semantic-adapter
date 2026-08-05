@@ -1,32 +1,31 @@
-# datus-semantic-osi-engine
+# datus-semantic-dosi
 
-A Datus semantic adapter backed by [osi-engine](https://github.com/datus-ai/osi-engine),
-the native Rust OSI engine — no MetricFlow dependency. It is a thin protocol
-translator: the OSI YAML is loaded, planned, compiled to dialect SQL, and
-executed entirely inside the Rust engine (via the `datus-osi-engine` pyo3
-bindings); this package only maps the Datus semantic-adapter contract onto the
-engine's API and its structured errors onto `SemanticValidationError`.
+A Datus semantic adapter backed by Dosi, the native Rust OSI engine, with no
+MetricFlow dependency. It is a thin protocol translator: the OSI YAML is
+loaded, planned, compiled to dialect SQL, and executed entirely inside the Rust
+engine (via the `dosi-engine` pyo3 bindings); this package only maps the Datus
+semantic-adapter contract onto the engine's API and its structured errors onto
+`SemanticValidationError`.
 
-`service_type`: `osi_engine`.
+`service_type`: `dosi`.
 
 ## Install
 
-The Rust bindings are an optional extra so the package can be imported (and its
-entry point discovered) without the compiled wheel:
+The adapter declares the native engine as a normal dependency. One command
+installs both packages:
 
 ```bash
-pip install 'datus-semantic-osi-engine[engine]'
+pip install datus-semantic-dosi
 ```
 
-Without the `[engine]` extra, adapter use raises a `SemanticCoreException` with
-an install hint. DuckDB execution additionally needs the system `duckdb` CLI.
+No separate `dosi-engine` installation is required.
 
 ## Configure
 
 ```python
-from datus_semantic_osi_engine.config import OSIEngineConfig
+from datus_semantic_dosi.config import DosiConfig
 
-OSIEngineConfig(
+DosiConfig(
     semantic_model_path="model.yaml",     # OSI model (.yaml/.yml/.json)
     db_config={"type": "duckdb", "uri": "orders.db"},  # or connections_path=...
 )
@@ -40,17 +39,18 @@ order and, failing that, local DuckDB.
 
 ## Use with Datus-agent
 
-Install the adapter and the engine wheel into the same virtualenv as
-`datus-agent` (entry-point discovery works off installed distributions, so
-editable installs are fine but `PYTHONPATH` alone is not):
+Install the adapter into the same virtualenv as `datus-agent`:
 
 ```bash
-uv pip install -e path/to/datus-semantic-osi-engine \
-               path/to/datus_osi_engine-*.whl      # the pyo3 wheel
+uv pip install datus-semantic-dosi
 ```
 
+For local development before a PyPI release, install the adapter checkout and a
+locally built `dosi_engine-*.whl` together. Entry-point discovery requires an
+installed distribution; `PYTHONPATH` alone is not sufficient.
+
 Then wire it in `agent.yml`. The `semantic_layer` key **must equal the
-`service_type`** (`osi_engine`); Datus-agent fills `db_config` from the active
+`service_type`** (`dosi`); Datus-agent fills `db_config` from the active
 datasource and `semantic_models_path` from `subject/semantic_models/<datasource>/`
 automatically, so a model file dropped there needs no further config:
 
@@ -62,15 +62,10 @@ agent:
         type: duckdb
         uri: /abs/path/to/orders.db
     semantic_layer:
-      osi_engine:                 # key MUST be the service_type
+      dosi:                 # key MUST be the service_type
         # both optional; either overrides the auto-derived directory:
         # semantic_model_path: /abs/path/to/model.yaml   # explicit single file
         # connections_path: /abs/path/to/agent.yml       # reuse a connections file
-  agentic_nodes:
-    gen_metrics:
-      semantic_adapter: osi_engine
-    ask_metrics:
-      semantic_adapter: osi_engine
 ```
 
 Place one OSI model file at `<project>/subject/semantic_models/mydb/model.yaml`
@@ -97,6 +92,7 @@ drives `list_metrics` / `query_metrics` through this adapter.
 ## Tests
 
 Unit tests run against a fake binding (no wheel needed):
-`ci/run-unit-tests.sh datus-semantic-osi-engine`. Integration tests
-(`-m integration`) need the real `datus-osi-engine` wheel and the `duckdb` CLI,
+`ci/run-unit-tests.sh datus-semantic-dosi`. Integration tests
+(`-m integration`) need the real `dosi-engine` wheel and the `duckdb` CLI used
+to seed the test fixture,
 and use the vendored `tests/fixtures/orders/` copy.

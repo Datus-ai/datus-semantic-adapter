@@ -2,7 +2,7 @@
 # Licensed under the Apache License, Version 2.0.
 # See http://www.apache.org/licenses/LICENSE-2.0 for details.
 
-"""Configuration for the OSI Engine semantic adapter."""
+"""Configuration for the Dosi semantic adapter."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from typing import Any, Dict, Optional
 from datus_semantic_core.config import SemanticAdapterConfig
 
 
-class OSIEngineConfig(SemanticAdapterConfig):
+class DosiConfig(SemanticAdapterConfig):
     """Adapter configuration.
 
     Connection precedence: an explicit ``connections_path`` (agent.yml or a
@@ -21,7 +21,7 @@ class OSIEngineConfig(SemanticAdapterConfig):
     its own discovery order and, failing that, local DuckDB.
     """
 
-    service_type: str = "osi_engine"
+    service_type: str = "dosi"
     # Path to the OSI semantic model file (.yaml/.yml/.json). Takes precedence
     # over semantic_models_path.
     semantic_model_path: Optional[str] = None

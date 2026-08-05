@@ -5,7 +5,7 @@
 """OSI metric authoring.
 
 The file read/write/delete/validate machinery lives in
-``datus_semantic_core.metric_author.MetricAuthor`` (shared with the osi_engine
+``datus_semantic_core.metric_author.MetricAuthor`` (shared with the dosi
 adapter). This module specializes it for the Python OSI compiler adapter:
 document validation runs the full OSI jsonschema + profile parse, and
 structural failures keep raising :class:`OSIValidationError` for backward

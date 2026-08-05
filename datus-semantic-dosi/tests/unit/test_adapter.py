@@ -13,7 +13,7 @@ import pytest
 import yaml
 from _fakes import FakeEngine
 
-from datus_semantic_osi_engine.errors import SemanticValidationException
+from datus_semantic_dosi.errors import SemanticValidationException
 
 
 async def test_list_metrics_maps_rows_and_slices(make_adapter):
@@ -26,7 +26,9 @@ async def test_list_metrics_maps_rows_and_slices(make_adapter):
     assert "orders.status" in metrics[0].dimensions
 
     assert [m.name for m in await adapter.list_metrics(limit=1)] == ["order_count"]
-    assert [m.name for m in await adapter.list_metrics(limit=5, offset=1)] == ["revenue"]
+    assert [m.name for m in await adapter.list_metrics(limit=5, offset=1)] == [
+        "revenue"
+    ]
 
 
 async def test_get_dimensions_returns_all_and_flags_time(make_adapter):
@@ -34,7 +36,10 @@ async def test_get_dimensions_returns_all_and_flags_time(make_adapter):
     dims = {d.name: d for d in await adapter.get_dimensions("revenue")}
     assert set(dims) == {"orders.status", "orders.order_date", "customers.region"}
     assert dims["orders.order_date"].type == "time"
+    assert dims["orders.order_date"].is_primary_time is True
+    assert dims["orders.order_date"].time_granularities == ["day"]
     assert dims["orders.status"].type is None
+    assert dims["orders.status"].is_primary_time is False
 
 
 async def test_get_dimensions_unknown_metric_is_structured(make_adapter):
@@ -90,14 +95,27 @@ async def test_query_metrics_bare_time_dimension_gets_grain(make_adapter):
     ]
 
 
-async def test_time_range_without_time_grouping_binds_metric_time_dimension(make_adapter):
+async def test_bare_ambiguous_dimension_is_forwarded_to_dosi(make_adapter):
+    adapter = make_adapter()
+
+    await adapter.query_metrics(metrics=["revenue"], dimensions=["status"])
+
+    engine = FakeEngine.instances[-1]
+    assert engine.execute_calls[0]["query"]["group_by"] == [{"field": "status"}]
+
+
+async def test_time_range_without_time_grouping_binds_metric_time_dimension(
+    make_adapter,
+):
     """A time filter with no time grouping resolves the metric's time dimension.
 
     The engine otherwise rejects the query with time_range_needs_dimension —
     but "total for September" style asks are the most common Datus shape.
     """
     adapter = make_adapter()
-    await adapter.query_metrics(metrics=["revenue"], time_start="2025-09-01", time_end="2025-10-01")
+    await adapter.query_metrics(
+        metrics=["revenue"], time_start="2025-09-01", time_end="2025-10-01"
+    )
     engine = FakeEngine.instances[-1]
     assert engine.execute_calls[0]["query"]["time_range"] == {
         "start": "2025-09-01",
@@ -179,7 +197,9 @@ async def test_dry_run_returns_sql_contract(make_adapter):
 
 async def test_execute_result_maps_to_query_result(make_adapter):
     adapter = make_adapter()
-    result = await adapter.query_metrics(metrics=["order_count"], dimensions=["orders.status"])
+    result = await adapter.query_metrics(
+        metrics=["order_count"], dimensions=["orders.status"]
+    )
     assert result.columns == ["status", "order_count"]
     assert result.data == [{"status": "paid", "order_count": 2}]
     assert result.metadata["row_count"] == 1
@@ -286,23 +306,47 @@ async def test_validate_semantic_ok(make_adapter):
     assert result.issues == []
 
 
+async def test_validate_semantic_supports_targeted_single_model(
+    make_adapter, model_file
+):
+    model_file.write_text(
+        "version: '0.2.0.dev0'\nsemantic_model:\n  - name: activity_management\n"
+    )
+    adapter = make_adapter()
+
+    matched = await adapter.validate_semantic(
+        scope="semantic_model",
+        semantic_model_name="activity_management",
+    )
+    missing = await adapter.validate_semantic(
+        scope="semantic_model",
+        semantic_model_name="missing_model",
+    )
+
+    assert matched.valid is True
+    assert matched.issues == []
+    assert missing.valid is False
+    assert len(missing.issues) == 1
+    assert "semantic_model_not_found" in missing.issues[0].message
+
+
 async def test_semantic_models_path_directory_single_file(tmp_path):
-    from datus_semantic_osi_engine.adapter import OSIEngineAdapter
-    from datus_semantic_osi_engine.config import OSIEngineConfig
+    from datus_semantic_dosi.adapter import DosiAdapter
+    from datus_semantic_dosi.config import DosiConfig
 
     (tmp_path / "model.yaml").write_text("version: '0.2.0.dev0'\nsemantic_model: []\n")
-    adapter = OSIEngineAdapter(OSIEngineConfig(semantic_models_path=str(tmp_path)))
+    adapter = DosiAdapter(DosiConfig(semantic_models_path=str(tmp_path)))
     await adapter.list_metrics()  # builds the engine
     assert FakeEngine.instances[-1].model_path == str(tmp_path / "model.yaml")
 
 
 async def test_semantic_models_path_directory_multiple_is_error(tmp_path):
     from datus_semantic_core.exceptions import SemanticCoreException
-    from datus_semantic_osi_engine.adapter import OSIEngineAdapter
-    from datus_semantic_osi_engine.config import OSIEngineConfig
+    from datus_semantic_dosi.adapter import DosiAdapter
+    from datus_semantic_dosi.config import DosiConfig
 
     (tmp_path / "a.yaml").write_text("version: '0.2.0.dev0'\nsemantic_model: []\n")
     (tmp_path / "b.yaml").write_text("version: '0.2.0.dev0'\nsemantic_model: []\n")
-    adapter = OSIEngineAdapter(OSIEngineConfig(semantic_models_path=str(tmp_path)))
+    adapter = DosiAdapter(DosiConfig(semantic_models_path=str(tmp_path)))
     with pytest.raises(SemanticCoreException, match="set semantic_model_path"):
         await adapter.list_metrics()

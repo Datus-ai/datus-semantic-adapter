@@ -17,12 +17,12 @@ import yaml
 
 from datus_semantic_core.exceptions import SemanticCoreException
 
-from datus_semantic_osi_engine.config import OSIEngineConfig
-from datus_semantic_osi_engine.dialects import normalize_dialect
+from datus_semantic_dosi.config import DosiConfig
+from datus_semantic_dosi.dialects import normalize_dialect
 
 _INSTALL_HINT = (
-    "datus-osi-engine is not installed; "
-    "pip install 'datus-semantic-osi-engine[engine]'"
+    "dosi-engine is missing from the datus-semantic-dosi installation; "
+    "reinstall with `pip install --force-reinstall datus-semantic-dosi`"
 )
 
 
@@ -33,7 +33,7 @@ def _unlink_quietly(path: str) -> None:
         pass
 
 
-def resolve_model_file(config: OSIEngineConfig) -> str:
+def resolve_model_file(config: DosiConfig) -> str:
     """The OSI model file to load: explicit semantic_model_path, else the sole
     model file in semantic_models_path (the Datus directory convention).
 
@@ -60,18 +60,18 @@ def resolve_model_file(config: OSIEngineConfig) -> str:
             "set semantic_model_path to select one"
         )
     raise SemanticCoreException(
-        "osi_engine adapter requires semantic_model_path (an OSI model file) "
+        "dosi adapter requires semantic_model_path (an OSI model file) "
         "or semantic_models_path (a directory containing one)"
     )
 
 
 def load_binding() -> Any:
-    """Import the datus-osi-engine bindings, failing with an install hint."""
+    """Import the mandatory dosi-engine binding with a repair hint."""
     try:
-        import datus_osi_engine
+        import dosi_engine
     except ImportError as exc:  # pragma: no cover - exercised via fake absence
         raise SemanticCoreException(_INSTALL_HINT) from exc
-    return datus_osi_engine
+    return dosi_engine
 
 
 class EngineHandle:
@@ -82,7 +82,7 @@ class EngineHandle:
     without restarting the process.
     """
 
-    def __init__(self, config: OSIEngineConfig):
+    def __init__(self, config: DosiConfig):
         self._config = config
         self._lock = threading.Lock()
         self._engine: Optional[Any] = None
@@ -128,7 +128,7 @@ class EngineHandle:
                 self._model_mtime = mtime
             return self._engine
 
-    def _build(self, config: OSIEngineConfig, model_file: str) -> Any:
+    def _build(self, config: DosiConfig, model_file: str) -> Any:
         binding = load_binding()
         try:
             return binding.Engine(
@@ -138,10 +138,10 @@ class EngineHandle:
             )
         except binding.OsiError as exc:
             raise SemanticCoreException(
-                f"osi-engine failed to load model {model_file!r}: {exc}"
+                f"Dosi failed to load model {model_file!r}: {exc}"
             ) from exc
 
-    def _resolve_connections(self, config: OSIEngineConfig) -> Optional[str]:
+    def _resolve_connections(self, config: DosiConfig) -> Optional[str]:
         if config.connections_path:
             return config.connections_path
         if not config.db_config:
@@ -150,7 +150,7 @@ class EngineHandle:
             self._connections_file = self._write_connections_file(config)
         return self._connections_file
 
-    def _write_connections_file(self, config: OSIEngineConfig) -> str:
+    def _write_connections_file(self, config: DosiConfig) -> str:
         """Materialize `db_config` as a `datasources:` YAML the engine reads.
 
         The engine's connections vocabulary IS the agent.yml datasource
@@ -167,7 +167,7 @@ class EngineHandle:
         handle = tempfile.NamedTemporaryFile(
             mode="w",
             suffix=".yaml",
-            prefix="osi-connections-",
+            prefix="dosi-connections-",
             delete=False,
         )
         with handle:

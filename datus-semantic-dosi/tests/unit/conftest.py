@@ -4,8 +4,8 @@
 
 """Unit-test fixtures.
 
-The fake datus-osi-engine binding (in ``_fakes.py``) is installed into
-``sys.modules["datus_osi_engine"]`` only for the duration of each test and the
+The fake dosi-engine binding (in ``_fakes.py``) is installed into
+``sys.modules["dosi_engine"]`` only for the duration of each test and the
 previous entry is restored afterward — so it never shadows a real wheel in a
 same-process integration run.
 """
@@ -26,12 +26,12 @@ def fake_binding(monkeypatch):
     """Install the fake binding for one test, restoring the prior module.
 
     ``monkeypatch.setitem`` records and restores whatever was in
-    ``sys.modules["datus_osi_engine"]`` before (usually nothing), so the fake
+    ``sys.modules["dosi_engine"]`` before (usually nothing), so the fake
     is scoped to unit tests only.
     """
     FakeEngine.instances.clear()
     _FAKE_MODULE.validate = build_fake_module().validate
-    monkeypatch.setitem(sys.modules, "datus_osi_engine", _FAKE_MODULE)
+    monkeypatch.setitem(sys.modules, "dosi_engine", _FAKE_MODULE)
     yield _FAKE_MODULE
     FakeEngine.instances.clear()
 
@@ -45,11 +45,11 @@ def model_file(tmp_path):
 
 @pytest.fixture
 def make_adapter(model_file):
-    from datus_semantic_osi_engine.adapter import OSIEngineAdapter
-    from datus_semantic_osi_engine.config import OSIEngineConfig
+    from datus_semantic_dosi.adapter import DosiAdapter
+    from datus_semantic_dosi.config import DosiConfig
 
     def _make(**overrides):
         kwargs = {"semantic_model_path": str(model_file), **overrides}
-        return OSIEngineAdapter(OSIEngineConfig(**kwargs))
+        return DosiAdapter(DosiConfig(**kwargs))
 
     return _make

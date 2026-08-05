@@ -39,6 +39,7 @@ SUPPORTED_PACKAGES = frozenset(
         "datus-semantic-core",
         "datus-semantic-metricflow",
         "datus-semantic-osi",
+        "datus-semantic-dosi",
     }
 )
 

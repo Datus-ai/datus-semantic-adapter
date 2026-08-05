@@ -11,7 +11,7 @@ the raw core-schema dicts — not any compiled IR — so round-trips keep
 OSI-native fields (``expression.dialects``, ``ai_context``) intact.
 
 It lives in core so every OSI-family adapter (the Python ``osi`` compiler
-adapter and the native ``osi_engine`` adapter) shares one implementation
+adapter and the native ``dosi`` adapter) shares one implementation
 without depending on each other. Document validation is pluggable via
 ``validate_document``: the default performs a lightweight structural check, and
 adapters that own a schema (e.g. the OSI jsonschema) inject a stricter one.

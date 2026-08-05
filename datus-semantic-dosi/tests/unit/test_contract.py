@@ -7,24 +7,24 @@
 import pytest
 from datus_semantic_core.testing import make_semantic_contract_suite
 
-from datus_semantic_osi_engine.adapter import OSIEngineAdapter
-from datus_semantic_osi_engine.config import OSIEngineConfig
+from datus_semantic_dosi.adapter import DosiAdapter
+from datus_semantic_dosi.config import DosiConfig
 
 
 @pytest.fixture(autouse=True)
 def _model_path(model_file, monkeypatch):
-    monkeypatch.setenv("OSI_CONTRACT_MODEL", str(model_file))
+    monkeypatch.setenv("DOSI_CONTRACT_MODEL", str(model_file))
 
 
 def _factory():
     import os
 
-    return OSIEngineAdapter(
-        OSIEngineConfig(semantic_model_path=os.environ["OSI_CONTRACT_MODEL"])
+    return DosiAdapter(
+        DosiConfig(semantic_model_path=os.environ["DOSI_CONTRACT_MODEL"])
     )
 
 
-TestOSIEngineContract = make_semantic_contract_suite(
+TestDosiContract = make_semantic_contract_suite(
     _factory,
     sample_metric_name="order_count",
     sample_dimension_name="orders.status",
