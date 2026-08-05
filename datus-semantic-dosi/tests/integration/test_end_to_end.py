@@ -30,7 +30,9 @@ pytestmark = [
         not _real_binding_available(),
         reason="real dosi-engine bindings not installed",
     ),
-    pytest.mark.skipif(shutil.which("duckdb") is None, reason="duckdb CLI not installed"),
+    pytest.mark.skipif(
+        shutil.which("duckdb") is None, reason="duckdb CLI not installed"
+    ),
 ]
 
 
@@ -88,11 +90,14 @@ async def test_execute_with_time_grain(model_path, seeded_db):
     assert result.metadata["row_count"] > 0
 
 
-async def test_ambiguous_dimension_is_structured(model_path):
+async def test_bare_ambiguous_dimension_is_structured(model_path):
     adapter = _adapter(model_path)
     with pytest.raises(SemanticValidationException) as exc:
-        # customer_id exists on both orders and customers.
-        await adapter.query_metrics(metrics=["revenue"], dimensions=["customer_id"], dry_run=True)
+        # customer_id exists on both orders and customers. The adapter leaves
+        # it bare so Dosi remains the single authority for name resolution.
+        await adapter.query_metrics(
+            metrics=["revenue"], dimensions=["customer_id"], dry_run=True
+        )
     payload = exc.value.payload
     assert payload.code == "ambiguous_dimension"
     assert "customer_id" in payload.message
@@ -107,6 +112,9 @@ async def test_unknown_metric_is_structured(model_path):
 
 async def test_validate_semantic_ok(model_path):
     adapter = _adapter(model_path)
-    result = await adapter.validate_semantic()
+    result = await adapter.validate_semantic(
+        scope="semantic_model",
+        semantic_model_name="orders_model",
+    )
     assert result.valid is True
     assert result.issues == []

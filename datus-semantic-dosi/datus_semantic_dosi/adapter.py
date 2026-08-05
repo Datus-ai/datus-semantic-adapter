@@ -17,6 +17,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Dict, List, Optional
 
+import yaml
+
 from datus_semantic_core.authoring import MetricMutationResult, MetricSource
 from datus_semantic_core.base import BaseSemanticAdapter
 from datus_semantic_core.exceptions import SemanticCoreException
@@ -104,7 +106,8 @@ class DosiAdapter(BaseSemanticAdapter):
         path: Optional[List[str]] = None,
     ) -> List[DimensionInfo]:
         engine = await asyncio.to_thread(self._engine)
-        metric_names = [m["name"] for m in await asyncio.to_thread(engine.metrics)]
+        metric_rows = await asyncio.to_thread(engine.metrics)
+        metric_names = [m["name"] for m in metric_rows]
         if metric_name not in metric_names:
             raise SemanticValidationException(
                 SemanticValidationError(
@@ -116,17 +119,30 @@ class DosiAdapter(BaseSemanticAdapter):
                     ),
                 )
             )
-        # v1: every dimension in the model. Relationship-reachable dimensions
-        # from other datasets are genuinely queryable, so filtering to the
-        # metric's own datasets would under-report; invalid combinations are
-        # rejected by the planner with structured, retryable errors.
+        # Expose Dosi's canonical discovery names unchanged. Query inputs are
+        # deliberately not constrained to this list: Dosi itself accepts a
+        # globally unique bare field name and reports structured ambiguity.
+        metric_row = next(row for row in metric_rows if row.get("name") == metric_name)
+        primary_time_dimension = str(metric_row.get("time_dimension") or "")
+        rows = await asyncio.to_thread(engine.dimensions)
         return [
             DimensionInfo(
-                name=row["name"],
+                name=str(row.get("name") or ""),
                 description=row.get("description") or None,
                 type="time" if row.get("is_time") else None,
+                is_primary_time=bool(
+                    primary_time_dimension and row.get("name") == primary_time_dimension
+                ),
+                time_granularities=(
+                    [str(row.get("time_granularity")).lower()]
+                    if primary_time_dimension
+                    and row.get("name") == primary_time_dimension
+                    and row.get("time_granularity")
+                    else []
+                ),
             )
-            for row in await asyncio.to_thread(engine.dimensions)
+            for row in rows
+            if row.get("name")
         ]
 
     async def query_metrics(
@@ -206,7 +222,18 @@ class DosiAdapter(BaseSemanticAdapter):
             )
             raise  # unreachable; raise_mapped always raises
 
-    async def validate_semantic(self, scope: str = "all") -> ValidationResult:
+    async def validate_semantic(
+        self,
+        scope: str = "all",
+        semantic_model_name: str = "",
+    ) -> ValidationResult:
+        """Validate the configured model, optionally asserting its model name.
+
+        Dosi v1 compiles exactly one semantic model per document, so validating
+        that document is also a targeted validation once the requested name is
+        confirmed. The optional name keeps the adapter compatible with Datus
+        authoring publish gates without pretending to support multi-model files.
+        """
         binding = await asyncio.to_thread(load_binding)
         try:
             model_path = self._handle.model_file()
@@ -218,7 +245,33 @@ class DosiAdapter(BaseSemanticAdapter):
 
         def _validate() -> Dict[str, Any]:
             with open(model_path, encoding="utf-8") as fh:
-                return binding.validate(fh.read())
+                model_text = fh.read()
+            payload = dict(binding.validate(model_text))
+            if payload.get("valid") and semantic_model_name:
+                document = yaml.safe_load(model_text) or {}
+                names = (
+                    [
+                        str(model.get("name") or "")
+                        for model in document.get("semantic_model", [])
+                        if isinstance(model, dict)
+                    ]
+                    if isinstance(document, dict)
+                    else []
+                )
+                if semantic_model_name not in names:
+                    payload["valid"] = False
+                    payload.setdefault("issues", []).append(
+                        {
+                            "severity": "error",
+                            "code": "semantic_model_not_found",
+                            "location": "semantic_model",
+                            "message": (
+                                f"semantic model {semantic_model_name!r} was not found; "
+                                f"available: {', '.join(names) or '(none)'}"
+                            ),
+                        }
+                    )
+            return payload
 
         try:
             payload = await asyncio.to_thread(_validate)
@@ -423,7 +476,7 @@ class DosiAdapter(BaseSemanticAdapter):
             # datasets and pass it explicitly.
             if not any(is_time_dimension(item["field"]) for item in group_by):
                 metric_datasets = {
-                    dataset
+                    str(dataset)
                     for row in metric_rows
                     if row.get("name") in metrics
                     for dataset in row.get("datasets") or []

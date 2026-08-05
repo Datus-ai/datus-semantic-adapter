@@ -23,6 +23,7 @@ METRIC_ROWS = [
         "kind": "aggregate",
         "datasets": ["orders"],
         "measures": ["order_count"],
+        "time_dimension": "orders.order_date",
         "description": "Number of orders",
     },
     {
@@ -30,13 +31,19 @@ METRIC_ROWS = [
         "kind": "aggregate",
         "datasets": ["orders"],
         "measures": ["revenue"],
+        "time_dimension": "orders.order_date",
         "description": "Total order amount",
     },
 ]
 
 DIMENSION_ROWS = [
     {"name": "orders.status", "is_time": False, "description": "Order status"},
-    {"name": "orders.order_date", "is_time": True, "description": "Order date"},
+    {
+        "name": "orders.order_date",
+        "is_time": True,
+        "time_granularity": "day",
+        "description": "Order date",
+    },
     {"name": "customers.region", "is_time": False, "description": None},
 ]
 
@@ -150,7 +157,12 @@ class FakeEngine:
 
     def compile(self, query, dialect=None, connection=None, pretty=False):
         self.compile_calls.append(
-            {"query": query, "dialect": dialect, "connection": connection, "pretty": pretty}
+            {
+                "query": query,
+                "dialect": dialect,
+                "connection": connection,
+                "pretty": pretty,
+            }
         )
         if self.fail_with is not None:
             raise self.fail_with
@@ -159,7 +171,9 @@ class FakeEngine:
     def explain(self, query) -> str:
         return "ScanDataset orders"
 
-    def execute(self, query, dialect=None, connection=None, timeout_secs=None, db_path=None):
+    def execute(
+        self, query, dialect=None, connection=None, timeout_secs=None, db_path=None
+    ):
         self.execute_calls.append(
             {
                 "query": query,
@@ -191,8 +205,18 @@ def build_fake_module() -> types.ModuleType:
     module.validate = default_validate
     module.SPEC_VERSION = "0.2.0.dev0"
     module.DIALECTS = [
-        "duckdb", "starrocks", "clickhouse", "doris", "tidb", "trino",
-        "postgres", "mysql", "snowflake", "bigquery", "databricks", "redshift",
+        "duckdb",
+        "starrocks",
+        "clickhouse",
+        "doris",
+        "tidb",
+        "trino",
+        "postgres",
+        "mysql",
+        "snowflake",
+        "bigquery",
+        "databricks",
+        "redshift",
     ]
     module.OsiError = OsiError
     module.ModelError = ModelError
