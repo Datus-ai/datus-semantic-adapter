@@ -1,11 +1,11 @@
 # datus-semantic-dosi
 
-A Datus semantic adapter backed by [Dosi](https://github.com/datus-ai/osi-engine),
-the native Rust OSI engine, with no MetricFlow dependency. It is a thin protocol
-translator: the OSI YAML is loaded, planned, compiled to dialect SQL, and
-executed entirely inside the Rust engine (via the `dosi-engine` pyo3
-bindings); this package only maps the Datus semantic-adapter contract onto the
-engine's API and its structured errors onto `SemanticValidationError`.
+A Datus semantic adapter backed by Dosi, the native Rust OSI engine, with no
+MetricFlow dependency. It is a thin protocol translator: the OSI YAML is
+loaded, planned, compiled to dialect SQL, and executed entirely inside the Rust
+engine (via the `dosi-engine` pyo3 bindings); this package only maps the Datus
+semantic-adapter contract onto the engine's API and its structured errors onto
+`SemanticValidationError`.
 
 `service_type`: `dosi`.
 
