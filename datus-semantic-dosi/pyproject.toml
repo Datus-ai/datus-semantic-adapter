@@ -13,7 +13,7 @@ dependencies = [
     "datus-semantic-core>=0.2.3",
     # Datus-agent reuses the packaged OSI schema, validator, and authoring spec.
     # MetricFlow remains optional and is not pulled by this dependency.
-    "datus-semantic-osi>=0.1.6",
+    "datus-semantic-osi>=0.1.7",
     # Runtime engine: a normal dependency so one adapter install is sufficient.
     "dosi-engine>=0.1.0",
 ]
