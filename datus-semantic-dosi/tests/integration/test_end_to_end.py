@@ -61,6 +61,8 @@ async def test_dry_run_emits_sql(model_path):
     assert result.columns == ["sql"]
     sql = result.data[0]["sql"]
     assert "main.orders" in sql
+    # Compiled with pretty=True, so the engine formats it over several lines.
+    assert "\n" in sql
     assert result.metadata["dry_run"] is True
 
 
