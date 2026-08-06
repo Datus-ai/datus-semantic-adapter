@@ -192,6 +192,7 @@ async def test_dry_run_returns_sql_contract(make_adapter):
     (call,) = engine.compile_calls
     # postgresql (Datus vocabulary) normalized to postgres (engine dialect)
     assert call["dialect"] == "postgres"
+    assert call["pretty"] is True
     assert not engine.execute_calls
 
 

@@ -185,6 +185,9 @@ class DosiAdapter(BaseSemanticAdapter):
                     query,
                     dialect=self._dry_run_dialect(binding, connection),
                     connection=connection,
+                    # Dry-run SQL is read by humans and LLM callers, never fed
+                    # to a driver, so hand back the formatted form.
+                    pretty=True,
                 )
                 return QueryResult(
                     columns=["sql"],
