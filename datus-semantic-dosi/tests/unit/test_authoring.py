@@ -2,7 +2,7 @@
 # Licensed under the Apache License, Version 2.0.
 # See http://www.apache.org/licenses/LICENSE-2.0 for details.
 
-"""Dosi reuses the OSI file authoring layer verbatim.
+"""Dosi uses the shared OSI file editor with native validation.
 
 Authoring only touches the YAML files (never the Rust binding), so these run
 against the fake binding like the rest of the unit suite.
@@ -85,8 +85,88 @@ def test_validate_and_delete(osi_adapter):
     assert yaml.safe_load(model_path.read_text())["semantic_model"][0]["metrics"] == []
 
 
+def test_native_structured_window_round_trips_through_authoring(osi_adapter):
+    adapter, model_path = osi_adapter
+    source = adapter.read_metric_source("daily_order_count").text
+    node = yaml.safe_load(source)
+    node["custom_extensions"][0]["data"] = (
+        '{"v":"1.2","dataset":"raw_orders","window":'
+        '{"type":"rolling","function":"sum","periods":7}}'
+    )
+    updated = yaml.safe_dump(node, sort_keys=False)
+
+    assert adapter.validate_metric_source(
+        updated, metric_name="daily_order_count"
+    ).valid
+    adapter.write_metric_source("daily_order_count", updated)
+
+    on_disk = yaml.safe_load(model_path.read_text())
+    payload = yaml.safe_load(
+        on_disk["semantic_model"][0]["metrics"][0]["custom_extensions"][0]["data"]
+    )
+    assert payload["window"]["type"] == "rolling"
+
+
+def test_legacy_window_is_rejected(osi_adapter):
+    adapter, _ = osi_adapter
+    source = adapter.read_metric_source("daily_order_count").text
+    node = yaml.safe_load(source)
+    node["custom_extensions"][0]["data"] = (
+        '{"dataset":"raw_orders","window":"7 days","window_aggregation":"sum"}'
+    )
+
+    result = adapter.validate_metric_source(
+        yaml.safe_dump(node, sort_keys=False), metric_name="daily_order_count"
+    )
+    assert result.valid is False
+
+
+async def test_metadata_reads_the_same_first_datus_entry_as_native_engine(
+    make_adapter, model_file
+):
+    model_file.write_text(
+        """
+version: 0.2.0.dev0
+semantic_model:
+  - name: orders_model
+    datasets: []
+    metrics:
+      - name: running_revenue
+        custom_extensions:
+          - vendor_name: DATUS
+            data: '{"v":"1.3","unit":"USD"}'
+          - vendor_name: DATUS
+            data: '{"v":"1.3","window":{"type":"cumulative","function":"sum"}}'
+""".lstrip()
+    )
+
+    metric = next(
+        metric
+        for metric in await make_adapter().list_metrics()
+        if metric.name == "running_revenue"
+    )
+
+    assert metric.type == "aggregate"
+    assert metric.unit == "USD"
+
+
 def test_authoring_root_falls_back_to_models_dir(tmp_path, make_adapter):
     (tmp_path / "jeff_shop_live.yml").write_text(MODEL)
     # Config with only semantic_models_path (a directory), no explicit file.
     adapter = make_adapter(semantic_model_path=None, semantic_models_path=str(tmp_path))
     assert adapter.read_metric_source("daily_order_count").name == "daily_order_count"
+
+
+def test_datus_extension_authoring_spec_matches_native_version(
+    monkeypatch, fake_binding
+):
+    from datus_semantic_dosi.authoring_spec import datus_extension_authoring_spec_text
+    from datus_semantic_dosi.engine import datus_extension_version
+
+    monkeypatch.setattr(fake_binding, "DATUS_EXT", {"version": "1.3"})
+    version = datus_extension_version()
+    spec = datus_extension_authoring_spec_text("STARROCKS")
+
+    assert f'extension_version: "{version}"' in spec
+    assert "dialect: STARROCKS" in spec
+    assert "structured_window:" in spec

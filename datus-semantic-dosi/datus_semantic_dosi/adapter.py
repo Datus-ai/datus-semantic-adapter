@@ -18,7 +18,6 @@ import asyncio
 from typing import Any, Dict, List, Optional
 
 import yaml
-
 from datus_semantic_core.authoring import MetricMutationResult, MetricSource
 from datus_semantic_core.base import BaseSemanticAdapter
 from datus_semantic_core.exceptions import SemanticCoreException
@@ -32,12 +31,22 @@ from datus_semantic_core.models import (
     ValidationResult,
 )
 
+from datus_semantic_dosi.authoring import dosi_validation_text_payload
 from datus_semantic_dosi.config import DosiConfig
 from datus_semantic_dosi.dialects import resolve_engine_dialect
-from datus_semantic_dosi.engine import EngineHandle, load_binding
+from datus_semantic_dosi.engine import (
+    EngineHandle,
+    datus_extension_version,
+    load_binding,
+)
 from datus_semantic_dosi.errors import (
     SemanticValidationException,
     raise_mapped,
+)
+from datus_semantic_dosi.model import (
+    load_document,
+    metric_payloads,
+    queryable_grains,
 )
 
 
@@ -82,22 +91,73 @@ class DosiAdapter(BaseSemanticAdapter):
         limit: int = 100,
         offset: int = 0,
     ) -> List[MetricDefinition]:
+        extension_version = await asyncio.to_thread(datus_extension_version)
         engine = await asyncio.to_thread(self._engine)
         rows = await asyncio.to_thread(engine.metrics)
-        dimension_names = [
-            d["name"] for d in await asyncio.to_thread(engine.dimensions)
-        ]
-        metrics = [
-            MetricDefinition(
-                name=row["name"],
-                description=row.get("description") or None,
-                type=row.get("kind"),
-                dimensions=dimension_names,
-                measures=list(row.get("measures") or []),
-                metadata={"datasets": list(row.get("datasets") or [])},
+        dataset_rows = await asyncio.to_thread(engine.datasets)
+        dimension_rows = await asyncio.to_thread(engine.dimensions)
+        payloads = self._metric_payloads()
+        binding = await asyncio.to_thread(load_binding)
+        metrics = []
+        for row in rows:
+            hints = payloads.get(str(row.get("name") or ""), {})
+            window = hints.get("window")
+            effective_time = self._effective_time_dimension(
+                row, dataset_rows, dimension_rows
             )
-            for row in rows
-        ]
+            metadata: Dict[str, Any] = {
+                "datasets": list(row.get("datasets") or []),
+                "base_kind": row.get("kind"),
+                "datus_ext_version": extension_version,
+            }
+            for key in ("window_family", "window_function"):
+                if row.get(key):
+                    metadata[key] = row[key]
+            if effective_time:
+                metadata["time_dimension"] = effective_time
+            if isinstance(window, dict):
+                requires_time_axis = await asyncio.to_thread(
+                    self._probe_requires_time_axis,
+                    engine,
+                    binding,
+                    str(row.get("name") or ""),
+                )
+                metadata.update(
+                    {
+                        "window": window,
+                        "requires_time_axis": requires_time_axis,
+                    }
+                )
+            if "fill_nulls_with" in hints:
+                metadata["fill_nulls_with"] = hints["fill_nulls_with"]
+            metrics.append(
+                MetricDefinition(
+                    name=row["name"],
+                    description=row.get("description") or None,
+                    type="window" if isinstance(window, dict) else row.get("kind"),
+                    # The native catalog currently exposes model-wide dimensions,
+                    # not the dimensions queryable for this specific metric. Do
+                    # not publish that broader set as metric-level capability;
+                    # callers use get_dimensions(), which verifies each candidate
+                    # through the native planner.
+                    dimensions=[],
+                    measures=list(row.get("measures") or []),
+                    unit=str(hints.get("unit"))
+                    if hints.get("unit") is not None
+                    else None,
+                    format=(
+                        str(hints.get("format"))
+                        if hints.get("format") is not None
+                        else None
+                    ),
+                    path=(
+                        [str(item) for item in hints.get("subject_path")]
+                        if isinstance(hints.get("subject_path"), list)
+                        else None
+                    ),
+                    metadata=metadata,
+                )
+            )
         return metrics[offset : offset + limit]
 
     async def get_dimensions(
@@ -123,8 +183,108 @@ class DosiAdapter(BaseSemanticAdapter):
         # deliberately not constrained to this list: Dosi itself accepts a
         # globally unique bare field name and reports structured ambiguity.
         metric_row = next(row for row in metric_rows if row.get("name") == metric_name)
-        primary_time_dimension = str(metric_row.get("time_dimension") or "")
+        dataset_rows = await asyncio.to_thread(engine.datasets)
+        binding = await asyncio.to_thread(load_binding)
         rows = await asyncio.to_thread(engine.dimensions)
+        connection = self._handle.profile_name
+        dialect = self._dry_run_dialect(binding, connection)
+
+        requires_time_axis = await asyncio.to_thread(
+            self._probe_requires_time_axis,
+            engine,
+            binding,
+            metric_name,
+        )
+        primary_time_dimension = self._effective_time_dimension(
+            metric_row, dataset_rows, rows
+        )
+
+        def _queryable_rows() -> List[tuple[Dict[str, Any], List[str]]]:
+            queryable: List[tuple[Dict[str, Any], List[str]]] = []
+            axis_grains: List[str] = []
+            axis_error: Any = None
+            if requires_time_axis:
+                for grain in queryable_grains(
+                    next(
+                        (
+                            row.get("time_granularity")
+                            for row in rows
+                            if row.get("name") == primary_time_dimension
+                        ),
+                        None,
+                    )
+                ):
+                    error = self._probe_compile(
+                        engine,
+                        binding,
+                        metric_name,
+                        [{"field": "metric_time", "grain": grain}],
+                        dialect=dialect,
+                        connection=connection,
+                    )
+                    if error is None:
+                        axis_grains.append(grain)
+                    elif axis_error is None:
+                        axis_error = error
+                if not axis_grains and axis_error is not None:
+                    raise_mapped(
+                        axis_error,
+                        binding,
+                        requested_metrics=[metric_name],
+                        requested_dimensions=["metric_time"],
+                    )
+
+            for row in rows:
+                name = str(row.get("name") or "")
+                if not name:
+                    continue
+                if row.get("is_time"):
+                    if requires_time_axis and name == primary_time_dimension:
+                        grains = list(axis_grains)
+                    else:
+                        grains = []
+                        for grain in queryable_grains(row.get("time_granularity")):
+                            group_by = [{"field": name, "grain": grain}]
+                            if requires_time_axis:
+                                group_by.append(
+                                    {
+                                        "field": "metric_time",
+                                        "grain": axis_grains[0],
+                                    }
+                                )
+                            error = self._probe_compile(
+                                engine,
+                                binding,
+                                metric_name,
+                                group_by,
+                                dialect=dialect,
+                                connection=connection,
+                            )
+                            if error is None:
+                                grains.append(grain)
+                    if grains:
+                        queryable.append((row, grains))
+                    continue
+
+                group_by = [{"field": name}]
+                if requires_time_axis:
+                    group_by.insert(
+                        0,
+                        {"field": "metric_time", "grain": axis_grains[0]},
+                    )
+                error = self._probe_compile(
+                    engine,
+                    binding,
+                    metric_name,
+                    group_by,
+                    dialect=dialect,
+                    connection=connection,
+                )
+                if error is None:
+                    queryable.append((row, []))
+            return queryable
+
+        queryable_rows = await asyncio.to_thread(_queryable_rows)
         return [
             DimensionInfo(
                 name=str(row.get("name") or ""),
@@ -134,14 +294,13 @@ class DosiAdapter(BaseSemanticAdapter):
                     primary_time_dimension and row.get("name") == primary_time_dimension
                 ),
                 time_granularities=(
-                    [str(row.get("time_granularity")).lower()]
+                    grains
                     if primary_time_dimension
                     and row.get("name") == primary_time_dimension
-                    and row.get("time_granularity")
                     else []
                 ),
             )
-            for row in rows
+            for row, grains in queryable_rows
             if row.get("name")
         ]
 
@@ -222,6 +381,7 @@ class DosiAdapter(BaseSemanticAdapter):
                 binding,
                 requested_metrics=metrics,
                 requested_dimensions=dimensions,
+                requested_time_granularity=time_granularity,
             )
             raise  # unreachable; raise_mapped always raises
 
@@ -237,7 +397,6 @@ class DosiAdapter(BaseSemanticAdapter):
         confirmed. The optional name keeps the adapter compatible with Datus
         authoring publish gates without pretending to support multi-model files.
         """
-        binding = await asyncio.to_thread(load_binding)
         try:
             model_path = self._handle.model_file()
         except SemanticCoreException as exc:
@@ -246,10 +405,10 @@ class DosiAdapter(BaseSemanticAdapter):
                 issues=[ValidationIssue(severity="error", message=str(exc))],
             )
 
-        def _validate() -> Dict[str, Any]:
+        def _validate() -> dict[str, Any]:
             with open(model_path, encoding="utf-8") as fh:
                 model_text = fh.read()
-            payload = dict(binding.validate(model_text))
+            payload = dosi_validation_text_payload(model_text)
             if payload.get("valid") and semantic_model_name:
                 document = yaml.safe_load(model_text) or {}
                 names = (
@@ -269,7 +428,8 @@ class DosiAdapter(BaseSemanticAdapter):
                             "code": "semantic_model_not_found",
                             "location": "semantic_model",
                             "message": (
-                                f"semantic model {semantic_model_name!r} was not found; "
+                                f"semantic model {semantic_model_name!r} "
+                                "was not found; "
                                 f"available: {', '.join(names) or '(none)'}"
                             ),
                         }
@@ -333,9 +493,9 @@ class DosiAdapter(BaseSemanticAdapter):
         )
 
     def _author(self) -> Any:
-        from datus_semantic_osi.authoring import OSIMetricAuthor
+        from datus_semantic_dosi.authoring import DosiMetricAuthor
 
-        return OSIMetricAuthor(self._authoring_root())
+        return DosiMetricAuthor(self._authoring_root())
 
     def read_metric_source(
         self,
@@ -386,6 +546,126 @@ class DosiAdapter(BaseSemanticAdapter):
             extra={k: v for k, v in row.items() if k not in ("name", "source")},
         )
 
+    def _metric_payloads(self) -> Dict[str, Dict[str, Any]]:
+        """Presentation metadata from the raw model; Dosi still validates it."""
+
+        return metric_payloads(load_document(self._handle.model_file()))
+
+    @staticmethod
+    def _probe_compile(
+        engine: Any,
+        binding: Any,
+        metric_name: str,
+        group_by: List[Dict[str, Any]],
+        *,
+        dialect: Optional[str],
+        connection: Optional[str],
+    ) -> Any:
+        """Compile one discovery query and return only planner rejections."""
+
+        try:
+            engine.compile(
+                {"metrics": [metric_name], "group_by": group_by},
+                dialect=dialect,
+                connection=connection,
+            )
+        except binding.QueryError as exc:
+            return exc
+        except Exception as exc:
+            raise_mapped(
+                exc,
+                binding,
+                requested_metrics=[metric_name],
+                requested_dimensions=[
+                    str(item.get("field") or "") for item in group_by
+                ],
+            )
+        return None
+
+    @classmethod
+    def _probe_requires_time_axis(
+        cls,
+        engine: Any,
+        binding: Any,
+        metric_name: str,
+    ) -> bool:
+        """Ask the native planner whether a metric needs a grouped time axis."""
+
+        without_axis = cls._probe_compile(
+            engine,
+            binding,
+            metric_name,
+            [],
+            dialect="duckdb",
+            connection=None,
+        )
+        if without_axis is None:
+            return False
+        for grain in queryable_grains(None):
+            if (
+                cls._probe_compile(
+                    engine,
+                    binding,
+                    metric_name,
+                    [{"field": "metric_time", "grain": grain}],
+                    dialect="duckdb",
+                    connection=None,
+                )
+                is None
+            ):
+                return True
+        return str(getattr(without_axis, "code", "")) in {
+            "no_primary_time_dimension",
+            "unknown_dimension",
+        }
+
+    @staticmethod
+    def _effective_time_dimension(
+        metric_row: Dict[str, Any],
+        dataset_rows: List[Dict[str, Any]],
+        dimension_rows: List[Dict[str, Any]],
+    ) -> str:
+        """Discover time dimensions from the engine's compiled catalog rows."""
+
+        dimension_names = {
+            str(row.get("name") or "") for row in dimension_rows if row.get("name")
+        }
+        explicit = str(metric_row.get("time_dimension") or "").strip()
+        if explicit:
+            if explicit in dimension_names:
+                return explicit
+            metric_datasets = [
+                str(name) for name in metric_row.get("datasets") or [] if name
+            ]
+            qualified = [
+                f"{dataset}.{explicit}"
+                for dataset in metric_datasets
+                if f"{dataset}.{explicit}" in dimension_names
+            ]
+            if len(qualified) == 1:
+                return qualified[0]
+
+        metric_datasets = {
+            str(name) for name in metric_row.get("datasets") or [] if name
+        }
+        candidates: set[str] = set()
+        for dataset in dataset_rows:
+            dataset_name = str(dataset.get("name") or "")
+            if dataset_name not in metric_datasets:
+                continue
+            primary = str(dataset.get("primary_time_dimension") or "").strip()
+            if not primary:
+                time_dimensions = [
+                    str(name) for name in dataset.get("time_dimensions") or [] if name
+                ]
+                if len(time_dimensions) == 1:
+                    primary = time_dimensions[0]
+            if primary:
+                candidate = primary if "." in primary else f"{dataset_name}.{primary}"
+                if candidate in dimension_names:
+                    candidates.add(candidate)
+        return next(iter(candidates)) if len(candidates) == 1 else ""
+
     def _dry_run_dialect(
         self, binding: Any, connection: Optional[str]
     ) -> Optional[str]:
@@ -424,26 +704,30 @@ class DosiAdapter(BaseSemanticAdapter):
         order_by: Optional[List[str]],
     ) -> Dict[str, Any]:
         """Assemble the engine's MetricQuery dict. Pure: no engine I/O."""
+        del metric_rows  # Kept for backward-compatible direct-call tests/callers.
         time_dimension_names = {
             row["name"] for row in dimension_rows if row.get("is_time")
         }
 
         def is_time_dimension(name: str) -> bool:
-            return name in time_dimension_names or any(
-                full.endswith(f".{name}") for full in time_dimension_names
+            return (
+                name == "metric_time"
+                or name in time_dimension_names
+                or any(full.endswith(f".{name}") for full in time_dimension_names)
             )
 
         group_by: List[Dict[str, Any]] = []
         grain_attached = False
+        requested_grain = str(time_granularity or "").strip().lower() or None
         for dimension in dimensions:
             item: Dict[str, Any] = {"field": dimension}
-            if time_granularity and is_time_dimension(dimension):
-                item["grain"] = time_granularity
+            if requested_grain and is_time_dimension(dimension):
+                item["grain"] = requested_grain
                 grain_attached = True
             group_by.append(item)
 
         if time_granularity and not grain_attached:
-            model_time_dims = sorted(time_dimension_names)
+            model_time_dims = ["metric_time", *sorted(time_dimension_names)]
             raise SemanticValidationException(
                 SemanticValidationError(
                     code="time_grain_required",
@@ -461,7 +745,8 @@ class DosiAdapter(BaseSemanticAdapter):
                     ),
                     message=(
                         "time_granularity was given but no requested dimension is a "
-                        f"time dimension | time dimensions: {', '.join(model_time_dims)}"
+                        "time dimension | time dimensions: "
+                        f"{', '.join(model_time_dims)}"
                     ),
                 )
             )
@@ -471,42 +756,12 @@ class DosiAdapter(BaseSemanticAdapter):
             query["where_sql"] = where
         if time_start or time_end:
             time_range: Dict[str, Any] = {"start": time_start, "end": time_end}
-            # The engine binds a time range to an explicit `dimension`, else the
-            # single time dimension in the group-by, else it rejects the query
-            # (S-TIME-3). Datus callers routinely time-filter without grouping
-            # by time ("total for September"), so when the group-by carries no
-            # time dimension, resolve the target from the queried metrics'
-            # datasets and pass it explicitly.
             if not any(is_time_dimension(item["field"]) for item in group_by):
-                metric_datasets = {
-                    str(dataset)
-                    for row in metric_rows
-                    if row.get("name") in metrics
-                    for dataset in row.get("datasets") or []
-                }
-                candidates = sorted(
-                    name
-                    for name in time_dimension_names
-                    if name.split(".", 1)[0] in metric_datasets
-                )
-                if len(candidates) == 1:
-                    time_range["dimension"] = candidates[0]
-                elif len(candidates) > 1:
-                    raise SemanticValidationException(
-                        SemanticValidationError(
-                            code="time_range_needs_dimension",
-                            metrics=list(metrics),
-                            required_dimensions=candidates,
-                            message=(
-                                "the time range matches more than one time dimension of the "
-                                f"queried metrics ({', '.join(candidates)}); group by the "
-                                "intended one, or query metrics that share a single time "
-                                "dimension"
-                            ),
-                        )
-                    )
-                # No candidate: leave the range unbound — the engine reports
-                # time_range_needs_dimension with its own structured error.
+                # The reserved time name lets the engine resolve each metric's
+                # effective axis and report no_primary_time_dimension or
+                # metric_time_conflict itself. The adapter must not guess from
+                # raw dataset membership.
+                time_range["dimension"] = "metric_time"
             query["time_range"] = time_range
         if order_by:
             query["order_by"] = [

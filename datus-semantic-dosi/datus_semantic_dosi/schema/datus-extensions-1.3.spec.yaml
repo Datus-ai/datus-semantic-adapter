@@ -1,0 +1,196 @@
+# Copyright 2025-present DatusAI, Inc.
+# Licensed under the Apache License, Version 2.0.
+# See http://www.apache.org/licenses/LICENSE-2.0 for details.
+
+# Prompt-facing authoring contract for DATUS custom_extensions. This file
+# complements the OSI core spec; the native Dosi parser/compiler is authoritative.
+
+spec:
+  vendor_name: DATUS
+  extension_version: "1.3"
+  minimum_supported_version: "1.0"
+  osi_core_version: 0.2.0.dev0
+
+envelope:
+  shape:
+    vendor_name: DATUS
+    data: JSON string encoding one object
+  keys:
+    v: {type: string, generated_value: "1.3", required_for_generated_payloads: true}
+    requires: {type: "array[string]", required: false}
+  rules:
+    - Use at most one DATUS entry on an OSI object.
+    - A version applies only to its own entry and is not inherited.
+    - Add `requires` only for capability keys whose ignore impact is `silent`.
+    - Put each extension key only on one of its declared carriers below.
+
+carriers:
+  dataset:
+    time_dimension:
+      type: string
+      reference: time field in this dataset
+      rule: The field exists and has dimension.is_time set to true.
+      default: Infer the only time field; zero or multiple time fields remain unresolved.
+
+  field:
+    time_granularity:
+      type: "enum[day, week, month, quarter, year]"
+      rule: The carrying field has dimension.is_time set to true.
+
+  relationship:
+    join_type:
+      type: "enum[left, inner]"
+      default: left
+
+  metric:
+    dataset:
+      type: string
+      purpose: Attribute an otherwise unattributable aggregate such as COUNT(*).
+      rule: It cannot override attribution established by the metric expression.
+    time_dimension:
+      type: string
+      reference: field or qualified dataset.field
+      default: Resolve the unique primary time dimension among the metric datasets.
+    fill_nulls_with:
+      type: finite number
+      default: Bare counts fill with 0; other metrics retain null.
+      rule: Window outputs retain semantic nulls such as a missing comparison bucket.
+    window:
+      type: object
+      schema: structured_window below
+
+  metric_metadata:
+    subject_path: {type: "array[string]"}
+    unit: {type: string}
+    format: {type: string}
+
+structured_window:
+  base_metric:
+    expression: one plain single aggregate over dataset fields
+    examples: [SUM(orders.amount), COUNT(*), AVG(reviews.score)]
+    rules:
+      - A ratio or arithmetic expression metric cannot carry a window.
+      - Time-ordered windows resolve time from metric time_dimension, then dataset primary time.
+      - A covariance or correlation second input names another plain aggregate metric.
+      - Choose one sugar form or exactly one general family among offset, frame, rank, and value.
+
+  enums:
+    granularity: [day, week, month, quarter, year]
+    calculation: [value, delta, percent_change, ratio]
+    one_input_function: [sum, avg, min, max, count, stddev_pop, stddev_samp, var_pop, var_samp]
+    two_input_function: [covar_pop, covar_samp, corr]
+    rank_function: [row_number, rank, dense_rank, ntile, percent_rank, cume_dist]
+    value_function: [first_value, last_value, nth_value]
+    order_by: [time, value]
+    direction: [asc, desc]
+    partition_mode: [query_dimensions, query_dimensions_except, time_bucket, none]
+    frame_units: [rows, range]
+    reset: [week, month, quarter, year]
+
+  forms:
+    offset:
+      shape:
+        offset: {count: integer >= 1, granularity: granularity, direction: back|forward = back}
+        calculation: calculation
+      required: [offset, calculation]
+
+    pop:
+      shape:
+        type: pop
+        offset: "'<positive integer> <granularity>' or offset object"
+        calculation: calculation = percent_change
+      required: [type, offset]
+
+    rolling:
+      shape:
+        type: rolling
+        function: one_input_function
+        periods: integer >= 1, including the current bucket
+        require_full_window: boolean = false
+      required: [type, function, periods]
+
+    cumulative:
+      shape:
+        type: cumulative
+        function: one_input_function
+        reset: reset or absent for no reset
+      required: [type, function]
+
+    frame:
+      shape:
+        frame:
+          function: one_input_function or two_input_function
+          preceding: non-negative integer or unbounded
+          second: metric name, required only for a two_input_function
+          reset: reset
+          require_full_window: boolean = false
+          order: order
+          partition: partition
+          units: frame_units = rows
+      required: [frame.function, frame.preceding]
+      rules:
+        - "`second` is present only for a two-input function."
+        - "`require_full_window` needs finite preceding and units rows."
+        - "`reset` cannot be combined with order.by value."
+        - Units range requires unbounded preceding and order.by value.
+
+    rank:
+      shape:
+        rank:
+          function: rank_function
+          buckets: integer >= 1, required only for ntile
+          order: "order = {by: value, direction: desc}"
+          partition: "partition = {mode: none}"
+      required: [rank.function]
+
+    value:
+      shape:
+        value:
+          function: value_function
+          n: integer >= 1, required only for nth_value
+          order: "order = {by: time, direction: asc}"
+          partition: "partition = {mode: query_dimensions}"
+      required: [value.function]
+
+  shared:
+    order:
+      shape: {by: order_by, direction: direction}
+      defaults: {time: asc, value: desc}
+    partition:
+      shape: {mode: partition_mode, exclude: "array[qualified dataset.field]"}
+      rule: "`exclude` is non-empty only for query_dimensions_except and absent otherwise."
+
+examples:
+  dataset_and_time_field:
+    name: orders
+    source: analytics.orders
+    custom_extensions:
+      - vendor_name: DATUS
+        data: '{"v":"1.3","time_dimension":"order_date"}'
+    fields:
+      - name: order_date
+        expression: {dialects: [{dialect: __OSI_DIALECT__, expression: order_date}]}
+        dimension: {is_time: true}
+        custom_extensions:
+          - vendor_name: DATUS
+            data: '{"v":"1.3","time_granularity":"day"}'
+
+  base_metric:
+    name: order_count
+    expression: {dialects: [{dialect: __OSI_DIALECT__, expression: COUNT(*)}]}
+    custom_extensions:
+      - vendor_name: DATUS
+        data: '{"v":"1.3","dataset":"orders","subject_path":["sales","orders","count"]}'
+
+  window_metric:
+    name: revenue_mom_growth
+    expression: {dialects: [{dialect: __OSI_DIALECT__, expression: SUM(orders.amount)}]}
+    custom_extensions:
+      - vendor_name: DATUS
+        data: '{"v":"1.3","time_dimension":"orders.order_date","window":{"type":"pop","offset":"1 month","calculation":"percent_change"}}'
+
+  additional_window_payloads:
+    - '{"v":"1.3","window":{"offset":{"count":1,"granularity":"month","direction":"forward"},"calculation":"value"}}'
+    - '{"v":"1.3","window":{"frame":{"function":"corr","preceding":"unbounded","second":"quantity_total"}}}'
+    - '{"v":"1.3","window":{"rank":{"function":"rank","partition":{"mode":"query_dimensions_except","exclude":["orders.region"]}}}}'
+    - '{"v":"1.3","window":{"value":{"function":"nth_value","n":2}}}'

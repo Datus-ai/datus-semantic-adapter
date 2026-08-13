@@ -51,6 +51,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Checkout osi-engine main
+        uses: actions/checkout@v4
+        with:
+          repository: Datus-ai/osi-engine
+          ref: main
+          path: external/osi-engine
+          persist-credentials: false
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -62,4 +70,6 @@ jobs:
           enable-cache: true
 
       - name: Build and smoke-check packages
+        env:
+          DOSI_ENGINE_SOURCE: ${{ github.workspace }}/external/osi-engine/crates/dosi-py
         run: ci/run-build.sh

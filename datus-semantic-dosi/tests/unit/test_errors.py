@@ -85,6 +85,18 @@ def test_non_retryable_query_error_is_core_exception(fake_binding):
         raise_mapped(error, fake_binding)
 
 
+def test_dialect_window_rejection_is_structured_for_authoring_retry(fake_binding):
+    error = QueryError(
+        "nth_value is unavailable for this dialect",
+        code="dialect_unsupported_window_function",
+        metrics=["second_revenue"],
+    )
+    with pytest.raises(SemanticValidationException) as exc:
+        raise_mapped(error, fake_binding, requested_metrics=["second_revenue"])
+    assert exc.value.payload.code == "dialect_unsupported_window_function"
+    assert exc.value.payload.metrics == ["second_revenue"]
+
+
 def test_model_error_is_core_exception(fake_binding):
     error = ModelError("model is invalid:", code="invalid_model")
     with pytest.raises(SemanticCoreException) as exc:

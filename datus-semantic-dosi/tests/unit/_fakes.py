@@ -34,6 +34,15 @@ METRIC_ROWS = [
         "time_dimension": "orders.order_date",
         "description": "Total order amount",
     },
+    {
+        "name": "running_revenue",
+        "kind": "aggregate",
+        "datasets": ["orders"],
+        "measures": ["running_revenue"],
+        # Exercise the dataset-level time-dimension fallback.
+        "time_dimension": None,
+        "description": "Running revenue",
+    },
 ]
 
 DIMENSION_ROWS = [
@@ -54,6 +63,7 @@ DATASET_ROWS = [
         "primary_key": ["order_id"],
         "fields": 5,
         "time_dimensions": ["order_date"],
+        "primary_time_dimension": "order_date",
     },
     {
         "name": "customers",
@@ -129,6 +139,7 @@ class FakeEngine:
     """
 
     instances: List["FakeEngine"] = []
+    time_axis_metrics = {"running_revenue"}
 
     def __init__(
         self,
@@ -166,6 +177,24 @@ class FakeEngine:
         )
         if self.fail_with is not None:
             raise self.fail_with
+        group_by = query.get("group_by") or []
+        has_time_axis = any(
+            item.get("grain")
+            and item.get("field") in {"metric_time", "orders.order_date"}
+            for item in group_by
+        )
+        if (
+            any(
+                metric in self.time_axis_metrics
+                for metric in query.get("metrics") or []
+            )
+            and not has_time_axis
+        ):
+            raise QueryError(
+                "window metric requires its time axis in group_by with a grain",
+                code="unknown_dimension",
+                hint="add metric_time:<grain> to group_by",
+            )
         return {"dialect": dialect or "duckdb", "sql": "SELECT 1 AS compiled"}
 
     def explain(self, query) -> str:
@@ -204,6 +233,15 @@ def build_fake_module() -> types.ModuleType:
     module.Engine = FakeEngine
     module.validate = default_validate
     module.SPEC_VERSION = "0.2.0.dev0"
+    module.DATUS_EXT_VERSION = "1.2"
+    module.DATUS_EXT = {
+        "version": "1.2",
+        "keys": [
+            {"key": "time_dimension"},
+            {"key": "time_granularity"},
+            {"key": "window"},
+        ],
+    }
     module.DIALECTS = [
         "duckdb",
         "starrocks",
