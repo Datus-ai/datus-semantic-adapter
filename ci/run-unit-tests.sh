@@ -140,17 +140,12 @@ run_package_tests() {
       # Unit tests inject a fake binding and run directly from the source tree,
       # so this PR can be validated before the first dosi-engine PyPI release.
       # The release-readiness workflow later installs the real dependency.
-      # The OSI package provides the schema-backed authoring contract, without
-      # its optional MetricFlow execution backend.
       uv run --no-project --isolated \
         --with pytest \
         --with pytest-asyncio \
         --with pydantic \
         --with pyyaml \
-        --with sqlglot \
-        --with jsonschema \
         --with-editable ./datus-semantic-core \
-        --with-editable ./datus-semantic-osi \
         env PYTHONPATH=./datus-semantic-dosi \
         pytest "$test_path" \
         -m "not integration" \

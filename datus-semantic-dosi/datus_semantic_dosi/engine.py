@@ -14,15 +14,20 @@ import weakref
 from typing import Any, Optional
 
 import yaml
-
 from datus_semantic_core.exceptions import SemanticCoreException
 
 from datus_semantic_dosi.config import DosiConfig
 from datus_semantic_dosi.dialects import normalize_dialect
+from datus_semantic_dosi.model import (
+    legacy_window_error,
+    legacy_window_findings,
+    load_document,
+)
 
 _INSTALL_HINT = (
     "dosi-engine is missing from the datus-semantic-dosi installation; "
-    "reinstall with `pip install --force-reinstall datus-semantic-dosi`"
+    "for local development install the native checkout with "
+    "`uv pip install -e <osi-engine>/crates/dosi-py`"
 )
 
 
@@ -72,6 +77,20 @@ def load_binding() -> Any:
     except ImportError as exc:  # pragma: no cover - exercised via fake absence
         raise SemanticCoreException(_INSTALL_HINT) from exc
     return dosi_engine
+
+
+def datus_extension_version() -> str:
+    """Return the DATUS extension version implemented by the active engine."""
+    binding = load_binding()
+    capabilities = getattr(binding, "DATUS_EXT", None)
+    version = capabilities.get("version") if isinstance(capabilities, dict) else None
+    if version is None or not str(version).strip():
+        raise SemanticCoreException(
+            "the installed dosi-engine does not expose DATUS_EXT.version; "
+            "install a current dosi-engine build before authoring versioned "
+            "DATUS extensions"
+        )
+    return str(version).strip()
 
 
 class EngineHandle:
@@ -130,6 +149,15 @@ class EngineHandle:
 
     def _build(self, config: DosiConfig, model_file: str) -> Any:
         binding = load_binding()
+        try:
+            findings = legacy_window_findings(load_document(model_file))
+        except (OSError, TypeError, ValueError, yaml.YAMLError):
+            # The native loader owns syntax/schema diagnostics. This preflight
+            # exists only to catch syntactically valid legacy hints that Dosi
+            # would otherwise treat as inert metadata.
+            findings = []
+        if findings:
+            raise SemanticCoreException(legacy_window_error(findings))
         try:
             return binding.Engine(
                 model_path=model_file,

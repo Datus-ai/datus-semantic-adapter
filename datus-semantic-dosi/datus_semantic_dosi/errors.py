@@ -30,6 +30,12 @@ _RETRYABLE_QUERY_CODES = {
     "ambiguous_join_path",
     "fan_out_risk",
     "time_range_needs_dimension",
+    "no_primary_time_dimension",
+    "metric_time_conflict",
+    "grain_too_fine",
+    "window_reset_too_fine",
+    "dialect_unsupported_window_function",
+    "not_implemented",
     "empty_query",
 }
 
@@ -62,6 +68,7 @@ def validation_error_from_query_error(
     *,
     requested_metrics: Optional[List[str]] = None,
     requested_dimensions: Optional[List[str]] = None,
+    requested_time_granularity: Optional[str] = None,
 ) -> SemanticValidationError:
     """Reshape an engine ``QueryError`` into a ``SemanticValidationError``.
 
@@ -72,8 +79,11 @@ def validation_error_from_query_error(
     code = str(getattr(exc, "code", "") or "validation_error")
     candidates = list(getattr(exc, "candidates", ()) or ())
 
-    suggested_retry: Optional[Dict[str, Any]] = None
-    if len(candidates) == 1:
+    raw_retry = getattr(exc, "suggested_retry", None)
+    suggested_retry: Optional[Dict[str, Any]] = (
+        dict(raw_retry) if isinstance(raw_retry, dict) else None
+    )
+    if suggested_retry is None and len(candidates) == 1:
         if code == "unknown_metric":
             suggested_retry = {"metrics": candidates}
         elif code in {"unknown_dimension", "ambiguous_dimension"}:
@@ -81,6 +91,23 @@ def validation_error_from_query_error(
                 "metrics": list(requested_metrics or []),
                 "dimensions": candidates,
             }
+        elif code == "no_primary_time_dimension":
+            dimensions = []
+            replaced = False
+            for dimension in requested_dimensions or []:
+                if dimension == "metric_time":
+                    dimensions.append(candidates[0])
+                    replaced = True
+                else:
+                    dimensions.append(dimension)
+            if not replaced:
+                dimensions.append(candidates[0])
+            suggested_retry = {
+                "metrics": list(requested_metrics or []),
+                "dimensions": dimensions,
+            }
+            if requested_time_granularity:
+                suggested_retry["time_granularity"] = requested_time_granularity
 
     unsupported_dimensions: List[str] = []
     if code in {"unknown_dimension", "ambiguous_dimension"}:
@@ -92,8 +119,14 @@ def validation_error_from_query_error(
 
     return SemanticValidationError(
         code=code,
-        metrics=list(getattr(exc, "metrics", ()) or ()) or list(requested_metrics or []),
+        metrics=list(getattr(exc, "metrics", ()) or ())
+        or list(requested_metrics or []),
         unsupported_dimensions=unsupported_dimensions,
+        required_dimensions=(
+            candidates
+            if code in {"no_primary_time_dimension", "time_range_needs_dimension"}
+            else []
+        ),
         suggested_retry=suggested_retry,
         message=_message_with_context(exc),
     )

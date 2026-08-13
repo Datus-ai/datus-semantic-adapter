@@ -34,6 +34,9 @@ semantic_model:
                   expression: order_date
             dimension:
               is_time: true
+            custom_extensions:
+              - vendor_name: DATUS
+                data: '{"v":"1.2","time_granularity":"day"}'
           - name: status
             expression:
               dialects:
@@ -130,3 +133,48 @@ semantic_model:
           dialects:
             - dialect: ANSI_SQL
               expression: SUM(orders.amount) - SUM(products.unit_cost)
+      - name: running_revenue
+        description: Running revenue by query time bucket
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: SUM(orders.amount)
+        custom_extensions:
+          - vendor_name: DATUS
+            data: '{"v":"1.2","window":{"type":"cumulative","function":"sum"}}'
+      - name: rolling_2m_avg_revenue
+        description: Average monthly revenue over the current and previous month
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: SUM(orders.amount)
+        custom_extensions:
+          - vendor_name: DATUS
+            data: '{"v":"1.2","window":{"type":"rolling","function":"avg","periods":2}}'
+      - name: revenue_mom_growth
+        description: Month-over-month revenue growth rate
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: SUM(orders.amount)
+        custom_extensions:
+          - vendor_name: DATUS
+            data: '{"v":"1.2","window":{"type":"pop","offset":"1 month"}}'
+      - name: monthly_running_revenue
+        description: Running revenue reset each month
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: SUM(orders.amount)
+        custom_extensions:
+          - vendor_name: DATUS
+            data: '{"v":"1.3","window":{"type":"cumulative","function":"sum","reset":"month"}}'
+      - name: monthly_revenue_rank
+        description: Revenue rank partitioned by query time bucket
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: SUM(orders.amount)
+        custom_extensions:
+          - vendor_name: DATUS
+            data: '{"v":"1.3","window":{"rank":{"function":"rank","partition":{"mode":"time_bucket"}}}}'

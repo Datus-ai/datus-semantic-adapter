@@ -92,6 +92,76 @@ async def test_execute_with_time_grain(model_path, seeded_db):
     assert result.metadata["row_count"] > 0
 
 
+async def test_native_structured_window_uses_metric_time_and_exposes_metadata(
+    model_path, seeded_db
+):
+    adapter = _adapter(model_path, seeded_db)
+    metrics = {metric.name: metric for metric in await adapter.list_metrics()}
+    assert metrics["running_revenue"].type == "window"
+    assert metrics["rolling_2m_avg_revenue"].metadata["window"] == {
+        "type": "rolling",
+        "function": "avg",
+        "periods": 2,
+    }
+
+    dimensions = {
+        dimension.name: dimension
+        for dimension in await adapter.get_dimensions("running_revenue")
+    }
+    assert dimensions["orders.order_date"].time_granularities == [
+        "day",
+        "week",
+        "month",
+        "quarter",
+        "year",
+    ]
+
+    result = await adapter.query_metrics(
+        metrics=[
+            "running_revenue",
+            "rolling_2m_avg_revenue",
+            "revenue_mom_growth",
+        ],
+        dimensions=["metric_time"],
+        time_granularity="month",
+        order_by=["metric_time__month"],
+    )
+    assert result.columns == [
+        "metric_time__month",
+        "running_revenue",
+        "rolling_2m_avg_revenue",
+        "revenue_mom_growth",
+    ]
+    assert [row["running_revenue"] for row in result.data] == [150, 380, 450]
+    assert [row["rolling_2m_avg_revenue"] for row in result.data] == [
+        150,
+        190,
+        150,
+    ]
+    assert result.data[0]["revenue_mom_growth"] is None
+    assert result.data[1]["revenue_mom_growth"] == pytest.approx(80 / 150)
+
+
+async def test_window_discovery_uses_native_axis_and_grain_validation(
+    model_path, seeded_db
+):
+    adapter = _adapter(model_path, seeded_db)
+    metrics = {metric.name: metric for metric in await adapter.list_metrics()}
+
+    assert metrics["monthly_revenue_rank"].metadata["requires_time_axis"] is True
+
+    dimensions = {
+        dimension.name: dimension
+        for dimension in await adapter.get_dimensions("monthly_running_revenue")
+    }
+    assert "orders.status" in dimensions
+    assert dimensions["orders.order_date"].time_granularities == [
+        "day",
+        "week",
+        "month",
+    ]
+
+
 async def test_bare_ambiguous_dimension_is_structured(model_path):
     adapter = _adapter(model_path)
     with pytest.raises(SemanticValidationException) as exc:

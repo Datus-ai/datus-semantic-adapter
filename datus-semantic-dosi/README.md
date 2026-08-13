@@ -20,13 +20,25 @@ pip install datus-semantic-dosi
 
 No separate `dosi-engine` installation is required.
 
+For local source development, a release is not required. Install the native
+checkout first, then the adapter into the same environment:
+
+```bash
+uv pip install -e ../osi-engine/crates/dosi-py
+uv pip install -e ./datus-semantic-dosi
+```
+
+Adjust the relative paths to the workspace root. The first command builds the
+Rust/PyO3 extension with maturin and keeps the Python package linked to the
+local checkout.
+
 ## Configure
 
 ```python
 from datus_semantic_dosi.config import DosiConfig
 
 DosiConfig(
-    semantic_model_path="model.yaml",     # OSI model (.yaml/.yml/.json)
+    semantic_model_path="model.yaml",  # OSI model (.yaml/.yml/.json)
     db_config={"type": "duckdb", "uri": "orders.db"},  # or connections_path=...
 )
 ```
@@ -45,9 +57,9 @@ Install the adapter into the same virtualenv as `datus-agent`:
 uv pip install datus-semantic-dosi
 ```
 
-For local development before a PyPI release, install the adapter checkout and a
-locally built `dosi_engine-*.whl` together. Entry-point discovery requires an
-installed distribution; `PYTHONPATH` alone is not sufficient.
+For local development before a registry release, install both checkouts with
+the editable commands above. Entry-point discovery requires an installed
+adapter distribution; `PYTHONPATH` alone is not sufficient.
 
 Then wire it in `agent.yml`. The `semantic_layer` key **must equal the
 `service_type`** (`dosi`); Datus-agent fills `db_config` from the active
@@ -79,20 +91,27 @@ drives `list_metrics` / `query_metrics` through this adapter.
 
 - **`validate_semantic`** delegates to the engine's own validator (structure,
   references, metric compilation) — no separate ossie integration.
-- **`get_dimensions(metric)`** returns every dimension in the model (v1):
-  relationship-reachable dimensions are genuinely queryable, and the planner
-  rejects invalid combinations with structured, retryable errors.
+- **`get_dimensions(metric)`** checks model dimensions against that metric with
+  native compile-only planning and returns only queryable candidates and
+  grains. Window discovery includes the planner-required time axis while
+  testing business dimensions. `list_metrics` leaves metric-level dimensions
+  empty until the engine exposes this catalog relation directly.
 - **Ambiguous / unknown names** surface as `SemanticValidationException` whose
   `payload` carries the engine's `candidates`; single-candidate fixes are
   turned into a concrete `suggested_retry`.
 - **Time granularity** attaches only to time dimensions; supplying it with no
   time dimension raises a `time_grain_required` validation payload.
+- **Native time axis** accepts `metric_time` plus `time_granularity`; a suffixed
+  result column is an output/order key, not a query dimension.
+- **Window discovery** exposes native structured-window metadata and rejects legacy
+  `grain_to_date`, `window_aggregation`, `period_over_period`, and string
+  `window` hints instead of silently executing the base aggregate.
 - The engine instance is rebuilt when the model file's mtime changes.
 
 ## Tests
 
-Unit tests run against a fake binding (no wheel needed):
+Unit tests run against a fake binding (no native build needed):
 `ci/run-unit-tests.sh datus-semantic-dosi`. Integration tests
-(`-m integration`) need the real `dosi-engine` wheel and the `duckdb` CLI used
+(`-m integration`) need the real local or installed `dosi-engine` binding and the `duckdb` CLI used
 to seed the test fixture,
 and use the vendored `tests/fixtures/orders/` copy.

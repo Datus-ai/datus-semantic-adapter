@@ -11,35 +11,304 @@ import os
 
 import pytest
 import yaml
-from _fakes import FakeEngine
-
+from _fakes import FakeEngine, QueryError
 from datus_semantic_dosi.errors import SemanticValidationException
 
 
 async def test_list_metrics_maps_rows_and_slices(make_adapter):
     adapter = make_adapter()
     metrics = await adapter.list_metrics()
-    assert [m.name for m in metrics] == ["order_count", "revenue"]
+    assert [m.name for m in metrics] == [
+        "order_count",
+        "revenue",
+        "running_revenue",
+    ]
     assert metrics[0].type == "aggregate"
     assert metrics[0].measures == ["order_count"]
-    assert metrics[0].metadata == {"datasets": ["orders"]}
-    assert "orders.status" in metrics[0].dimensions
+    assert metrics[0].metadata == {
+        "datasets": ["orders"],
+        "base_kind": "aggregate",
+        "datus_ext_version": "1.2",
+        "time_dimension": "orders.order_date",
+    }
+    assert metrics[0].dimensions == []
 
     assert [m.name for m in await adapter.list_metrics(limit=1)] == ["order_count"]
     assert [m.name for m in await adapter.list_metrics(limit=5, offset=1)] == [
-        "revenue"
+        "revenue",
+        "running_revenue",
     ]
 
 
-async def test_get_dimensions_returns_all_and_flags_time(make_adapter):
+async def test_list_metrics_exposes_native_window_metadata(make_adapter, model_file):
+    model_file.write_text(
+        """
+version: 0.2.0.dev0
+semantic_model:
+  - name: orders_model
+    datasets: []
+    metrics:
+      - name: running_revenue
+        expression:
+          dialects: [{dialect: ANSI_SQL, expression: 'SUM(orders.amount)'}]
+        custom_extensions:
+          - vendor_name: DATUS
+            data: >-
+              {"v":"1.2",
+              "window":{"type":"cumulative","function":"sum"},
+              "subject_path":["sales","revenue"],"unit":"USD"}
+""".lstrip()
+    )
+    metrics = {metric.name: metric for metric in await make_adapter().list_metrics()}
+    running = metrics["running_revenue"]
+    assert running.type == "window"
+    assert running.path == ["sales", "revenue"]
+    assert running.unit == "USD"
+    assert running.metadata["requires_time_axis"] is True
+    assert running.metadata["window"] == {
+        "type": "cumulative",
+        "function": "sum",
+    }
+
+
+async def test_window_axis_probe_uses_configured_target(make_adapter):
+    adapter = make_adapter(dialect="starrocks", connection="warehouse")
+
+    await adapter.get_dimensions("running_revenue")
+
+    calls = FakeEngine.instances[-1].compile_calls
+    assert calls
+    assert {call["dialect"] for call in calls} == {"starrocks"}
+    assert {call["connection"] for call in calls} == {"warehouse"}
+
+
+async def test_list_metrics_exposes_native_window_family_and_axis(
+    make_adapter, model_file, monkeypatch
+):
+    model_file.write_text(
+        """
+version: 0.2.0.dev0
+semantic_model:
+  - name: orders_model
+    datasets: []
+    metrics:
+      - name: order_rank
+        custom_extensions:
+          - vendor_name: DATUS
+            data: '{"v":"1.3","window":{"rank":{"function":"rank"}}}'
+      - name: first_revenue
+        custom_extensions:
+          - vendor_name: DATUS
+            data: '{"v":"1.3","window":{"value":{"function":"first_value"}}}'
+      - name: revenue_range
+        custom_extensions:
+          - vendor_name: DATUS
+            data: >-
+              {"v":"1.3","window":{"frame":{"function":"count",
+              "preceding":"unbounded","units":"range",
+              "order":{"by":"value","direction":"asc"}}}}
+""".lstrip()
+    )
+    rows = [
+        {
+            "name": "order_rank",
+            "kind": "aggregate",
+            "datasets": ["orders"],
+            "measures": ["revenue"],
+            "window_family": "rank",
+            "window_function": "rank",
+        },
+        {
+            "name": "first_revenue",
+            "kind": "aggregate",
+            "datasets": ["orders"],
+            "measures": ["revenue"],
+            "window_family": "value",
+            "window_function": "first_value",
+        },
+        {
+            "name": "revenue_range",
+            "kind": "aggregate",
+            "datasets": ["orders"],
+            "measures": ["revenue"],
+            "window_family": "frame",
+            "window_function": "count",
+        },
+    ]
+    monkeypatch.setattr(FakeEngine, "metrics", lambda self: [dict(row) for row in rows])
+    monkeypatch.setattr(FakeEngine, "time_axis_metrics", {"first_revenue"})
+
+    metrics = {metric.name: metric for metric in await make_adapter().list_metrics()}
+    assert metrics["order_rank"].metadata["window_family"] == "rank"
+    assert metrics["order_rank"].metadata["window_function"] == "rank"
+    assert metrics["order_rank"].metadata["requires_time_axis"] is False
+    assert metrics["first_revenue"].metadata["requires_time_axis"] is True
+    assert metrics["revenue_range"].metadata["requires_time_axis"] is False
+
+
+async def test_get_dimensions_returns_queryable_and_flags_time(make_adapter):
     adapter = make_adapter()
     dims = {d.name: d for d in await adapter.get_dimensions("revenue")}
     assert set(dims) == {"orders.status", "orders.order_date", "customers.region"}
     assert dims["orders.order_date"].type == "time"
     assert dims["orders.order_date"].is_primary_time is True
-    assert dims["orders.order_date"].time_granularities == ["day"]
+    assert dims["orders.order_date"].time_granularities == [
+        "day",
+        "week",
+        "month",
+        "quarter",
+        "year",
+    ]
     assert dims["orders.status"].type is None
     assert dims["orders.status"].is_primary_time is False
+
+
+async def test_get_dimensions_keeps_grains_for_other_time_dimensions(
+    make_adapter, monkeypatch
+):
+    original_dimensions = FakeEngine.dimensions
+
+    def dimensions(self):
+        return original_dimensions(self) + [
+            {
+                "name": "customers.signup_date",
+                "is_time": True,
+                "time_granularity": "month",
+                "description": "Signup month",
+            }
+        ]
+
+    monkeypatch.setattr(FakeEngine, "dimensions", dimensions)
+
+    dims = {d.name: d for d in await make_adapter().get_dimensions("revenue")}
+
+    assert dims["customers.signup_date"].time_granularities == [
+        "month",
+        "quarter",
+        "year",
+    ]
+
+
+async def test_unknown_native_grain_is_left_to_planner_probing(
+    make_adapter, monkeypatch
+):
+    original_dimensions = FakeEngine.dimensions
+
+    def dimensions(self):
+        rows = original_dimensions(self)
+        for row in rows:
+            if row["name"] == "orders.order_date":
+                row["time_granularity"] = "hour"
+        return rows
+
+    monkeypatch.setattr(FakeEngine, "dimensions", dimensions)
+
+    dims = {d.name: d for d in await make_adapter().get_dimensions("revenue")}
+
+    assert dims["orders.order_date"].time_granularities == [
+        "day",
+        "week",
+        "month",
+        "quarter",
+        "year",
+    ]
+
+
+async def test_missing_axis_grains_returns_structured_error(make_adapter, monkeypatch):
+    import datus_semantic_dosi.adapter as adapter_module
+
+    monkeypatch.setattr(adapter_module, "queryable_grains", lambda _grain: [])
+
+    with pytest.raises(SemanticValidationException) as exc:
+        await make_adapter().get_dimensions("running_revenue")
+
+    assert exc.value.payload.code == "no_primary_time_dimension"
+    assert exc.value.payload.metrics == ["running_revenue"]
+
+
+async def test_get_dimensions_returns_only_native_queryable_dimensions(
+    make_adapter, monkeypatch
+):
+    original_compile = FakeEngine.compile
+
+    def compile_query(self, query, dialect=None, connection=None, pretty=False):
+        if query["group_by"] == [{"field": "customers.region"}]:
+            raise QueryError(
+                "multiple relationship paths",
+                code="ambiguous_join_path",
+            )
+        return original_compile(
+            self,
+            query,
+            dialect=dialect,
+            connection=connection,
+            pretty=pretty,
+        )
+
+    monkeypatch.setattr(FakeEngine, "compile", compile_query)
+
+    dimensions = await make_adapter().get_dimensions("revenue")
+
+    assert [dimension.name for dimension in dimensions] == [
+        "orders.status",
+        "orders.order_date",
+    ]
+
+
+async def test_window_dimension_discovery_includes_required_time_axis(make_adapter):
+    dimensions = {
+        dimension.name: dimension
+        for dimension in await make_adapter().get_dimensions("running_revenue")
+    }
+
+    assert "orders.status" in dimensions
+    assert "customers.region" in dimensions
+    assert dimensions["orders.order_date"].time_granularities == [
+        "day",
+        "week",
+        "month",
+        "quarter",
+        "year",
+    ]
+
+
+async def test_window_dimension_discovery_probes_each_grain(make_adapter, monkeypatch):
+    original_compile = FakeEngine.compile
+
+    def compile_query(self, query, dialect=None, connection=None, pretty=False):
+        metric_time = next(
+            (
+                item
+                for item in query.get("group_by") or []
+                if item.get("field") == "metric_time"
+            ),
+            None,
+        )
+        if metric_time and metric_time.get("grain") in {"quarter", "year"}:
+            raise QueryError(
+                "reset is finer than the query grain",
+                code="window_reset_too_fine",
+            )
+        return original_compile(
+            self,
+            query,
+            dialect=dialect,
+            connection=connection,
+            pretty=pretty,
+        )
+
+    monkeypatch.setattr(FakeEngine, "compile", compile_query)
+
+    dimensions = {
+        dimension.name: dimension
+        for dimension in await make_adapter().get_dimensions("running_revenue")
+    }
+
+    assert dimensions["orders.order_date"].time_granularities == [
+        "day",
+        "week",
+        "month",
+    ]
 
 
 async def test_get_dimensions_unknown_metric_is_structured(make_adapter):
@@ -95,6 +364,19 @@ async def test_query_metrics_bare_time_dimension_gets_grain(make_adapter):
     ]
 
 
+async def test_query_metrics_uses_native_metric_time_input(make_adapter):
+    adapter = make_adapter()
+    await adapter.query_metrics(
+        metrics=["running_revenue"],
+        dimensions=["metric_time"],
+        time_granularity="month",
+    )
+    engine = FakeEngine.instances[-1]
+    assert engine.execute_calls[0]["query"]["group_by"] == [
+        {"field": "metric_time", "grain": "month"}
+    ]
+
+
 async def test_bare_ambiguous_dimension_is_forwarded_to_dosi(make_adapter):
     adapter = make_adapter()
 
@@ -120,35 +402,34 @@ async def test_time_range_without_time_grouping_binds_metric_time_dimension(
     assert engine.execute_calls[0]["query"]["time_range"] == {
         "start": "2025-09-01",
         "end": "2025-10-01",
-        "dimension": "orders.order_date",
+        "dimension": "metric_time",
     }
 
 
-def test_time_range_with_ambiguous_time_dimensions_is_structured(make_adapter):
+def test_time_range_with_ambiguous_time_dimensions_delegates_to_metric_time(
+    make_adapter,
+):
     adapter = make_adapter()
-    with pytest.raises(SemanticValidationException) as exc:
-        adapter._build_query(
-            [
-                {"name": "orders.order_date", "is_time": True},
-                {"name": "orders.ship_date", "is_time": True},
-            ],
-            [{"name": "revenue", "datasets": ["orders"]}],
-            metrics=["revenue"],
-            dimensions=[],
-            time_start="2025-09-01",
-            time_end="2025-10-01",
-            time_granularity=None,
-            where=None,
-            limit=None,
-            order_by=None,
-        )
-    payload = exc.value.payload
-    assert payload.code == "time_range_needs_dimension"
-    assert payload.required_dimensions == ["orders.order_date", "orders.ship_date"]
+    query = adapter._build_query(
+        [
+            {"name": "orders.order_date", "is_time": True},
+            {"name": "orders.ship_date", "is_time": True},
+        ],
+        [{"name": "revenue", "datasets": ["orders"]}],
+        metrics=["revenue"],
+        dimensions=[],
+        time_start="2025-09-01",
+        time_end="2025-10-01",
+        time_granularity=None,
+        where=None,
+        limit=None,
+        order_by=None,
+    )
+    assert query["time_range"]["dimension"] == "metric_time"
 
 
-def test_time_range_with_no_reachable_time_dimension_stays_unbound(make_adapter):
-    """No candidate: pass the range through; the engine reports its own error."""
+def test_time_range_with_no_reachable_time_dimension_uses_metric_time(make_adapter):
+    """The engine reports no_primary_time_dimension from its compiled IR."""
     adapter = make_adapter()
     query = adapter._build_query(
         [{"name": "orders.status", "is_time": False}],
@@ -162,7 +443,11 @@ def test_time_range_with_no_reachable_time_dimension_stays_unbound(make_adapter)
         limit=None,
         order_by=None,
     )
-    assert query["time_range"] == {"start": "2025-09-01", "end": "2025-10-01"}
+    assert query["time_range"] == {
+        "start": "2025-09-01",
+        "end": "2025-10-01",
+        "dimension": "metric_time",
+    }
 
 
 async def test_time_granularity_without_time_dimension_is_structured(make_adapter):
@@ -173,10 +458,10 @@ async def test_time_granularity_without_time_dimension_is_structured(make_adapte
         )
     payload = exc.value.payload
     assert payload.code == "time_grain_required"
-    assert payload.required_dimensions == ["orders.order_date"]
+    assert payload.required_dimensions[0] == "metric_time"
     assert payload.suggested_retry == {
         "metrics": ["revenue"],
-        "dimensions": ["orders.status", "orders.order_date"],
+        "dimensions": ["orders.status", "metric_time"],
         "time_granularity": "day",
     }
 
@@ -305,6 +590,42 @@ async def test_validate_semantic_ok(make_adapter):
     result = await adapter.validate_semantic()
     assert result.valid is True
     assert result.issues == []
+
+
+async def test_validate_semantic_returns_structured_invalid_yaml_issue(
+    make_adapter, model_file
+):
+    model_file.write_text("semantic_model: [\n")
+
+    result = await make_adapter().validate_semantic()
+
+    assert result.valid is False
+    assert len(result.issues) == 1
+    assert "invalid_yaml" in result.issues[0].message
+
+
+async def test_validate_semantic_rejects_legacy_window_hints(make_adapter, model_file):
+    model_file.write_text(
+        """
+version: 0.2.0.dev0
+semantic_model:
+  - name: orders_model
+    datasets: []
+    metrics:
+      - name: legacy_revenue
+        expression:
+          dialects: [{dialect: ANSI_SQL, expression: 'SUM(orders.amount)'}]
+        custom_extensions:
+          - vendor_name: DATUS
+            data: '{"grain_to_date":"year","window_aggregation":"sum"}'
+""".lstrip()
+    )
+
+    result = await make_adapter().validate_semantic()
+
+    assert result.valid is False
+    assert len(result.issues) == 1
+    assert "legacy_window_hint" in result.issues[0].message
 
 
 async def test_validate_semantic_supports_targeted_single_model(

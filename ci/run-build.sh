@@ -221,7 +221,17 @@ PY
 
       native_smoke_dir="$(mktemp -d)"
       uv venv --python 3.12 "$native_smoke_dir"
-      uv pip install --python "$native_smoke_dir/bin/python" "$wheel_path"
+      if [ -n "${DOSI_ENGINE_SOURCE:-}" ]; then
+        if [ ! -d "$DOSI_ENGINE_SOURCE" ]; then
+          echo "Dosi engine source directory does not exist: $DOSI_ENGINE_SOURCE" >&2
+          exit 1
+        fi
+        uv pip install --python "$native_smoke_dir/bin/python" \
+          pydantic pyyaml "$core_wheel_path" "$DOSI_ENGINE_SOURCE"
+        uv pip install --python "$native_smoke_dir/bin/python" --no-deps "$wheel_path"
+      else
+        uv pip install --python "$native_smoke_dir/bin/python" "$wheel_path"
+      fi
       DOSI_SMOKE_MODEL="$ROOT_DIR/datus-semantic-dosi/tests/fixtures/orders/model.yaml" \
         "$native_smoke_dir/bin/python" - <<'PY'
 import asyncio
