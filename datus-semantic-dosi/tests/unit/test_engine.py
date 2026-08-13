@@ -21,7 +21,7 @@ def test_datus_extension_version_requires_capability_metadata(
 ):
     monkeypatch.delattr(fake_binding, "DATUS_EXT")
 
-    with pytest.raises(SemanticCoreException, match="DATUS_EXT.version"):
+    with pytest.raises(SemanticCoreException, match=r"DATUS_EXT\.version"):
         datus_extension_version()
 
 

@@ -133,10 +133,12 @@ semantic_model:
     metrics:
       - name: running_revenue
         custom_extensions:
-          - vendor_name: DATUS
+          - vendor_name: " DATUS "
             data: '{"v":"1.3","unit":"USD"}'
-          - vendor_name: DATUS
-            data: '{"v":"1.3","window":{"type":"cumulative","function":"sum"}}'
+          - vendor_name: datus
+            data: >-
+              {"v":"1.3","unit":"EUR",
+              "window":{"type":"cumulative","function":"sum"}}
 """.lstrip()
     )
 
@@ -146,8 +148,8 @@ semantic_model:
         if metric.name == "running_revenue"
     )
 
-    assert metric.type == "aggregate"
-    assert metric.unit == "USD"
+    assert metric.type == "window"
+    assert metric.unit == "EUR"
 
 
 def test_authoring_root_falls_back_to_models_dir(tmp_path, make_adapter):
@@ -170,3 +172,35 @@ def test_datus_extension_authoring_spec_matches_native_version(
     assert f'extension_version: "{version}"' in spec
     assert "dialect: STARROCKS" in spec
     assert "structured_window:" in spec
+
+
+def test_authoring_spec_reports_unrecognized_core_spec_layout(monkeypatch):
+    import re
+
+    from datus_semantic_core.exceptions import SemanticCoreException
+    from datus_semantic_dosi import authoring_spec
+
+    monkeypatch.setattr(authoring_spec, "_DIALECTS_BLOCK_RE", re.compile("absent"))
+
+    with pytest.raises(SemanticCoreException, match="dialects block"):
+        authoring_spec.authoring_spec_text("STARROCKS")
+
+
+def test_missing_extension_spec_uses_semantic_error(monkeypatch, fake_binding):
+    from datus_semantic_core.exceptions import SemanticCoreException
+    from datus_semantic_dosi.authoring_spec import datus_extension_authoring_spec_text
+
+    monkeypatch.setattr(fake_binding, "DATUS_EXT", {"version": "9.9"})
+
+    with pytest.raises(SemanticCoreException, match=r"engine version '9\.9'"):
+        datus_extension_authoring_spec_text("STARROCKS")
+
+
+def test_validation_payload_maps_yaml_serialization_error():
+    from datus_semantic_dosi.authoring import (
+        DosiAuthoringError,
+        dosi_validation_payload,
+    )
+
+    with pytest.raises(DosiAuthoringError, match="cannot serialize OSI document"):
+        dosi_validation_payload({"semantic_model": object()})

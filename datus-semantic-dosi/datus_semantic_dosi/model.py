@@ -105,7 +105,7 @@ def datus_payload(node: dict[str, Any]) -> dict[str, Any]:
     for extension in extensions:
         if not isinstance(extension, dict):
             continue
-        if str(extension.get("vendor_name") or "").strip().upper() != DATUS_VENDOR:
+        if str(extension.get("vendor_name") or "").upper() != DATUS_VENDOR:
             continue
         return decode_extension_data(extension.get("data"))
     return {}
@@ -153,7 +153,7 @@ def queryable_grains(native_grain: Any) -> list[str]:
     if not normalized:
         return list(TIME_GRAINS)
     if normalized not in TIME_GRAINS:
-        return []
+        return list(TIME_GRAINS)
     return list(TIME_GRAINS[TIME_GRAINS.index(normalized) :])
 
 

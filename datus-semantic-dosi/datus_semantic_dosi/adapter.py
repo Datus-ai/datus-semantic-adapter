@@ -96,8 +96,10 @@ class DosiAdapter(BaseSemanticAdapter):
         rows = await asyncio.to_thread(engine.metrics)
         dataset_rows = await asyncio.to_thread(engine.datasets)
         dimension_rows = await asyncio.to_thread(engine.dimensions)
-        payloads = self._metric_payloads()
+        payloads = await asyncio.to_thread(self._metric_payloads)
         binding = await asyncio.to_thread(load_binding)
+        connection = self._handle.profile_name
+        dialect = self._dry_run_dialect(binding, connection)
         metrics = []
         for row in rows:
             hints = payloads.get(str(row.get("name") or ""), {})
@@ -121,6 +123,8 @@ class DosiAdapter(BaseSemanticAdapter):
                     engine,
                     binding,
                     str(row.get("name") or ""),
+                    dialect=dialect,
+                    connection=connection,
                 )
                 metadata.update(
                     {
@@ -194,6 +198,8 @@ class DosiAdapter(BaseSemanticAdapter):
             engine,
             binding,
             metric_name,
+            dialect=dialect,
+            connection=connection,
         )
         primary_time_dimension = self._effective_time_dimension(
             metric_row, dataset_rows, rows
@@ -226,12 +232,24 @@ class DosiAdapter(BaseSemanticAdapter):
                         axis_grains.append(grain)
                     elif axis_error is None:
                         axis_error = error
-                if not axis_grains and axis_error is not None:
-                    raise_mapped(
-                        axis_error,
-                        binding,
-                        requested_metrics=[metric_name],
-                        requested_dimensions=["metric_time"],
+                if not axis_grains:
+                    if axis_error is not None:
+                        raise_mapped(
+                            axis_error,
+                            binding,
+                            requested_metrics=[metric_name],
+                            requested_dimensions=["metric_time"],
+                        )
+                    raise SemanticValidationException(
+                        SemanticValidationError(
+                            code="no_primary_time_dimension",
+                            metrics=[metric_name],
+                            required_dimensions=["metric_time"],
+                            message=(
+                                f"metric {metric_name!r} requires a time axis, but "
+                                "no supported metric_time grain was available"
+                            ),
+                        )
                     )
 
             for row in rows:
@@ -293,12 +311,7 @@ class DosiAdapter(BaseSemanticAdapter):
                 is_primary_time=bool(
                     primary_time_dimension and row.get("name") == primary_time_dimension
                 ),
-                time_granularities=(
-                    grains
-                    if primary_time_dimension
-                    and row.get("name") == primary_time_dimension
-                    else []
-                ),
+                time_granularities=grains if row.get("is_time") else [],
             )
             for row, grains in queryable_rows
             if row.get("name")
@@ -571,7 +584,7 @@ class DosiAdapter(BaseSemanticAdapter):
             )
         except binding.QueryError as exc:
             return exc
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - re-raised by raise_mapped
             raise_mapped(
                 exc,
                 binding,
@@ -588,6 +601,9 @@ class DosiAdapter(BaseSemanticAdapter):
         engine: Any,
         binding: Any,
         metric_name: str,
+        *,
+        dialect: Optional[str],
+        connection: Optional[str],
     ) -> bool:
         """Ask the native planner whether a metric needs a grouped time axis."""
 
@@ -596,8 +612,8 @@ class DosiAdapter(BaseSemanticAdapter):
             binding,
             metric_name,
             [],
-            dialect="duckdb",
-            connection=None,
+            dialect=dialect,
+            connection=connection,
         )
         if without_axis is None:
             return False
@@ -608,8 +624,8 @@ class DosiAdapter(BaseSemanticAdapter):
                     binding,
                     metric_name,
                     [{"field": "metric_time", "grain": grain}],
-                    dialect="duckdb",
-                    connection=None,
+                    dialect=dialect,
+                    connection=connection,
                 )
                 is None
             ):

@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from importlib import resources
 
+from datus_semantic_core.exceptions import SemanticCoreException
+
 _SPEC_RESOURCE = "osi-core-0.2.0.dev0.spec.yaml"
 _DATUS_SPEC_RESOURCE = "datus-extensions-{version}.spec.yaml"
 _SPEC_TITLE_MARKER = "# Apache Ossie - Core Metadata Spec"
@@ -46,9 +48,13 @@ def authoring_spec_text(dialect: str) -> str:
         "dialects:\n"
         f'  - "{dialect}"              # the only dialect executed in this deployment\n'
     )
-    return _DIALECTS_BLOCK_RE.sub(replacement, raw, count=1) + _NATIVE_NOTES.format(
-        dialect=dialect
-    )
+    rendered, substitutions = _DIALECTS_BLOCK_RE.subn(replacement, raw, count=1)
+    if substitutions != 1:
+        raise SemanticCoreException(
+            "the vendored OSI core spec no longer exposes a recognizable "
+            f"dialects block; re-check {_SPEC_RESOURCE!r} after updating it"
+        )
+    return rendered + _NATIVE_NOTES.format(dialect=dialect)
 
 
 def datus_extension_authoring_spec_text(dialect: str) -> str:
@@ -60,8 +66,9 @@ def datus_extension_authoring_spec_text(dialect: str) -> str:
     resource = _DATUS_SPEC_RESOURCE.format(version=version)
     spec_path = resources.files("datus_semantic_dosi.schema").joinpath(resource)
     if not spec_path.is_file():
-        raise RuntimeError(
+        raise SemanticCoreException(
             "DATUS extension authoring specification is unavailable for "
-            f"engine version {version}"
+            f"engine version {version!r}; vendor {resource!r} or install a "
+            "matching dosi-engine build"
         )
     return spec_path.read_text(encoding="utf-8").replace("__OSI_DIALECT__", dialect)

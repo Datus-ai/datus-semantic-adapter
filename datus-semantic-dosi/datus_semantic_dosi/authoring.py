@@ -65,7 +65,11 @@ def dosi_validation_text_payload(model_text: str) -> dict[str, Any]:
 def dosi_validation_payload(document: dict[str, Any]) -> dict[str, Any]:
     """Validate a parsed OSI document through every native-Dosi preflight."""
 
-    return dosi_validation_text_payload(yaml.safe_dump(document, sort_keys=False))
+    try:
+        model_text = yaml.safe_dump(document, sort_keys=False)
+    except yaml.YAMLError as exc:
+        raise DosiAuthoringError(f"cannot serialize OSI document: {exc}") from exc
+    return dosi_validation_text_payload(model_text)
 
 
 def validate_dosi_document(document: dict[str, Any]) -> None:

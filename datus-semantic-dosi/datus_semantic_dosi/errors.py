@@ -83,7 +83,7 @@ def validation_error_from_query_error(
     suggested_retry: Optional[Dict[str, Any]] = (
         dict(raw_retry) if isinstance(raw_retry, dict) else None
     )
-    if len(candidates) == 1:
+    if suggested_retry is None and len(candidates) == 1:
         if code == "unknown_metric":
             suggested_retry = {"metrics": candidates}
         elif code in {"unknown_dimension", "ambiguous_dimension"}:

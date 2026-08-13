@@ -9,7 +9,6 @@ from __future__ import annotations
 import pytest
 from _fakes import ExecuteError, FakeEngine, ModelError, QueryError
 from datus_semantic_core.exceptions import SemanticCoreException
-
 from datus_semantic_dosi.errors import (
     SemanticValidationException,
     raise_mapped,
@@ -77,6 +76,28 @@ def test_unknown_metric_single_candidate_retry():
     payload = validation_error_from_query_error(error, requested_metrics=["revenues"])
     assert payload.suggested_retry == {"metrics": ["revenue"]}
     assert payload.metrics == ["revenues"]
+
+
+def test_engine_suggested_retry_remains_authoritative():
+    suggested_retry = {
+        "metrics": ["revenue"],
+        "dimensions": ["customers.region"],
+        "where": "orders.status = 'paid'",
+    }
+    error = QueryError(
+        'unknown dimension "regionn"',
+        code="unknown_dimension",
+        candidates=["customers.region"],
+        suggested_retry=suggested_retry,
+    )
+
+    payload = validation_error_from_query_error(
+        error,
+        requested_metrics=["revenue"],
+        requested_dimensions=["regionn"],
+    )
+
+    assert payload.suggested_retry == suggested_retry
 
 
 def test_non_retryable_query_error_is_core_exception(fake_binding):

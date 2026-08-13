@@ -17,11 +17,16 @@ envelope:
     data: JSON string encoding one object
   keys:
     v: {type: string, generated_value: "1.3", required_for_generated_payloads: true}
-    requires: {type: "array[string]", required: false}
+    requires:
+      type: "array[string]"
+      required: false
+      purpose: Reject consumers that would silently ignore a listed capability key and return wrong results.
+      generated_value: Omit for version 1.3; none of its capability keys has silent ignore impact.
   rules:
     - Use at most one DATUS entry on an OSI object.
     - A version applies only to its own entry and is not inherited.
-    - Add `requires` only for capability keys whose ignore impact is `silent`.
+    - Ignore impact describes the result of a consumer not honoring a capability key; `silent` means it would return undetectably wrong results.
+    - List a key in `requires` only when its capability metadata declares silent ignore impact.
     - Put each extension key only on one of its declared carriers below.
 
 carriers:

@@ -15,7 +15,7 @@ integration run. Row shapes match the ``dosi::list`` machine contract.
 from __future__ import annotations
 
 import types
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
 METRIC_ROWS = [
     {
@@ -138,8 +138,8 @@ class FakeEngine:
     execute). Every constructed instance is appended to ``instances``.
     """
 
-    instances: List["FakeEngine"] = []
-    time_axis_metrics = {"running_revenue"}
+    instances: ClassVar[List["FakeEngine"]] = []
+    time_axis_metrics: ClassVar[set[str]] = {"running_revenue"}
 
     def __init__(
         self,

@@ -71,6 +71,17 @@ semantic_model:
     }
 
 
+async def test_window_axis_probe_uses_configured_target(make_adapter):
+    adapter = make_adapter(dialect="starrocks", connection="warehouse")
+
+    await adapter.get_dimensions("running_revenue")
+
+    calls = FakeEngine.instances[-1].compile_calls
+    assert calls
+    assert {call["dialect"] for call in calls} == {"starrocks"}
+    assert {call["connection"] for call in calls} == {"warehouse"}
+
+
 async def test_list_metrics_exposes_native_window_family_and_axis(
     make_adapter, model_file, monkeypatch
 ):
@@ -135,7 +146,7 @@ semantic_model:
     assert metrics["revenue_range"].metadata["requires_time_axis"] is False
 
 
-async def test_get_dimensions_returns_all_and_flags_time(make_adapter):
+async def test_get_dimensions_returns_queryable_and_flags_time(make_adapter):
     adapter = make_adapter()
     dims = {d.name: d for d in await adapter.get_dimensions("revenue")}
     assert set(dims) == {"orders.status", "orders.order_date", "customers.region"}
@@ -150,6 +161,69 @@ async def test_get_dimensions_returns_all_and_flags_time(make_adapter):
     ]
     assert dims["orders.status"].type is None
     assert dims["orders.status"].is_primary_time is False
+
+
+async def test_get_dimensions_keeps_grains_for_other_time_dimensions(
+    make_adapter, monkeypatch
+):
+    original_dimensions = FakeEngine.dimensions
+
+    def dimensions(self):
+        return original_dimensions(self) + [
+            {
+                "name": "customers.signup_date",
+                "is_time": True,
+                "time_granularity": "month",
+                "description": "Signup month",
+            }
+        ]
+
+    monkeypatch.setattr(FakeEngine, "dimensions", dimensions)
+
+    dims = {d.name: d for d in await make_adapter().get_dimensions("revenue")}
+
+    assert dims["customers.signup_date"].time_granularities == [
+        "month",
+        "quarter",
+        "year",
+    ]
+
+
+async def test_unknown_native_grain_is_left_to_planner_probing(
+    make_adapter, monkeypatch
+):
+    original_dimensions = FakeEngine.dimensions
+
+    def dimensions(self):
+        rows = original_dimensions(self)
+        for row in rows:
+            if row["name"] == "orders.order_date":
+                row["time_granularity"] = "hour"
+        return rows
+
+    monkeypatch.setattr(FakeEngine, "dimensions", dimensions)
+
+    dims = {d.name: d for d in await make_adapter().get_dimensions("revenue")}
+
+    assert dims["orders.order_date"].time_granularities == [
+        "day",
+        "week",
+        "month",
+        "quarter",
+        "year",
+    ]
+
+
+async def test_missing_axis_grains_returns_structured_error(make_adapter, monkeypatch):
+    import datus_semantic_dosi.adapter as adapter_module
+
+    monkeypatch.setattr(adapter_module, "queryable_grains", lambda _grain: [])
+
+    with pytest.raises(SemanticValidationException) as exc:
+        await make_adapter().get_dimensions("running_revenue")
+
+    assert exc.value.payload.code == "no_primary_time_dimension"
+    assert exc.value.payload.metrics == ["running_revenue"]
 
 
 async def test_get_dimensions_returns_only_native_queryable_dimensions(
