@@ -747,8 +747,8 @@ class DosiAdapter(BaseSemanticAdapter):
     def _catalog(
         self,
     ) -> tuple[tuple[tuple[str, EngineHandle], ...], Dict[str, str], Dict[str, str]]:
-        signature, handles = self._registry.snapshot()
         with self._catalog_lock:
+            signature, handles = self._registry.snapshot()
             if signature == self._catalog_signature:
                 return (
                     self._catalog_handles,
@@ -759,7 +759,13 @@ class DosiAdapter(BaseSemanticAdapter):
             metric_to_path: Dict[str, str] = {}
             model_to_path: Dict[str, str] = {}
             for model_path, handle in handles:
-                for model_name in self._document_model_names(model_path):
+                try:
+                    model_names = self._document_model_names(model_path)
+                except (OSError, TypeError, ValueError, yaml.YAMLError) as exc:
+                    raise SemanticCoreException(
+                        f"cannot read semantic model {model_path!r}: {exc}"
+                    ) from exc
+                for model_name in model_names:
                     owner = model_to_path.get(model_name)
                     if owner and owner != model_path:
                         raise SemanticCoreException(

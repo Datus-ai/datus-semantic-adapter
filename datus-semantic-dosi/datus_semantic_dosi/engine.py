@@ -233,9 +233,11 @@ class EngineRegistry:
         self._handles: dict[str, EngineHandle] = {}
 
     @staticmethod
-    def _file_signature(path: str) -> tuple[str, int, int]:
+    def _file_signature(path: str) -> Optional[tuple[str, int, int]]:
         try:
             stat = Path(path).stat()
+        except FileNotFoundError:
+            return None
         except OSError as exc:
             raise SemanticCoreException(
                 f"cannot read semantic model {path!r}: {exc}"
@@ -247,8 +249,22 @@ class EngineRegistry:
     ) -> tuple[tuple[tuple[str, int, int], ...], tuple[tuple[str, EngineHandle], ...]]:
         """Return a stable file signature and matching engine handles."""
         with self._lock:
-            files = resolve_model_files(self._config)
-            signature = tuple(self._file_signature(path) for path in files)
+            entries = [
+                (path, self._file_signature(path))
+                for path in resolve_model_files(self._config)
+            ]
+            files = [
+                path for path, entry_signature in entries if entry_signature is not None
+            ]
+            if not files:
+                raise SemanticCoreException(
+                    "no readable OSI model file resolved for this datasource"
+                )
+            signature = tuple(
+                entry_signature
+                for _, entry_signature in entries
+                if entry_signature is not None
+            )
             if signature != self._signature:
                 previous = self._handles
                 self._handles = {

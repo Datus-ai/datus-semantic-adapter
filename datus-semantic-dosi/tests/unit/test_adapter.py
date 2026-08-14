@@ -8,12 +8,16 @@ dry-run shape, engine lifecycle, and connections wiring."""
 from __future__ import annotations
 
 import os
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 import yaml
 from _fakes import FakeEngine, QueryError
 from datus_semantic_core.exceptions import SemanticCoreException
+
 from datus_semantic_dosi.errors import SemanticValidationException
 
 
@@ -793,8 +797,58 @@ async def test_semantic_models_path_rejects_duplicate_metric_names(
     _install_file_catalog(monkeypatch, {"orders": ["total"], "users": ["total"]})
     adapter = DosiAdapter(DosiConfig(semantic_models_path=str(tmp_path)))
 
-    with pytest.raises(SemanticCoreException, match="metric 'total'.*must be unique"):
+    with pytest.raises(SemanticCoreException, match=r"metric 'total'.*must be unique"):
         await adapter.list_metrics()
+
+
+async def test_catalog_wraps_malformed_sibling_document(tmp_path, monkeypatch):
+    from datus_semantic_dosi.adapter import DosiAdapter
+    from datus_semantic_dosi.config import DosiConfig
+
+    (tmp_path / "broken.yaml").write_text("semantic_model: [\n")
+    _write_model(tmp_path / "orders.yaml", "orders_model", ["order_count"])
+    _install_file_catalog(monkeypatch, {"orders": ["order_count"]})
+    adapter = DosiAdapter(DosiConfig(semantic_models_path=str(tmp_path)))
+
+    with pytest.raises(
+        SemanticCoreException,
+        match=r"cannot read semantic model .*broken\.yaml",
+    ):
+        await adapter.list_metrics()
+
+
+def test_catalog_serializes_registry_snapshot(tmp_path, monkeypatch):
+    from datus_semantic_dosi.adapter import DosiAdapter
+    from datus_semantic_dosi.config import DosiConfig
+
+    _write_model(tmp_path / "orders.yaml", "orders_model", ["order_count"])
+    _install_file_catalog(monkeypatch, {"orders": ["order_count"]})
+    adapter = DosiAdapter(DosiConfig(semantic_models_path=str(tmp_path)))
+    original_snapshot = adapter._registry.snapshot
+    state_lock = threading.Lock()
+    active_snapshots = 0
+    max_active_snapshots = 0
+
+    def observed_snapshot():
+        nonlocal active_snapshots, max_active_snapshots
+        with state_lock:
+            active_snapshots += 1
+            max_active_snapshots = max(max_active_snapshots, active_snapshots)
+        try:
+            time.sleep(0.02)
+            return original_snapshot()
+        finally:
+            with state_lock:
+                active_snapshots -= 1
+
+    monkeypatch.setattr(adapter._registry, "snapshot", observed_snapshot)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(adapter._catalog) for _ in range(2)]
+        for future in futures:
+            future.result()
+
+    assert max_active_snapshots == 1
 
 
 async def test_semantic_models_path_refreshes_when_file_is_added(tmp_path, monkeypatch):
