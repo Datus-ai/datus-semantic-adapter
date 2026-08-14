@@ -80,12 +80,13 @@ agent:
         # connections_path: /abs/path/to/agent.yml       # reuse a connections file
 ```
 
-Place one OSI model file at `<project>/subject/semantic_models/mydb/model.yaml`
-(Datus's per-datasource convention). The adapter resolves a single file in that
-directory automatically; **if the directory holds several models, set
-`semantic_model_path`** to pick one (the engine loads exactly one model per
-document). Launch with `datus --datasource mydb`; the `ask_metrics` node then
-drives `list_metrics` / `query_metrics` through this adapter.
+Place OSI model files under `<project>/subject/semantic_models/mydb/` (Datus's
+per-datasource convention). The adapter catalogs every top-level YAML/YML/JSON
+file, keeps one native engine per file, and routes each globally unique metric
+name to its owning model. Set `semantic_model_path` only when an authoring flow
+must pin the adapter to one explicit file. Launch with `datus --datasource
+mydb`; the `ask_metrics` node then drives `list_metrics` / `query_metrics`
+through this adapter.
 
 ## Behavior notes
 
@@ -99,6 +100,9 @@ drives `list_metrics` / `query_metrics` through this adapter.
 - **Ambiguous / unknown names** surface as `SemanticValidationException` whose
   `payload` carries the engine's `candidates`; single-candidate fixes are
   turned into a concrete `suggested_retry`.
+- **Multiple model files** are supported for discovery and single-model
+  queries. Metric and semantic-model names must be unique within a datasource;
+  one query cannot combine metrics owned by different files.
 - **Time granularity** attaches only to time dimensions; supplying it with no
   time dimension raises a `time_grain_required` validation payload.
 - **Native time axis** accepts `metric_time` plus `time_granularity`; a suffixed
@@ -106,7 +110,8 @@ drives `list_metrics` / `query_metrics` through this adapter.
 - **Window discovery** exposes native structured-window metadata and rejects legacy
   `grain_to_date`, `window_aggregation`, `period_over_period`, and string
   `window` hints instead of silently executing the base aggregate.
-- The engine instance is rebuilt when the model file's mtime changes.
+- Engine instances and the metric routing catalog refresh when model files are
+  added, removed, or changed.
 
 ## Tests
 

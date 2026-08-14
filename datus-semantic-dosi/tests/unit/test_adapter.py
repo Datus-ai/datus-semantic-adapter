@@ -8,11 +8,69 @@ dry-run shape, engine lifecycle, and connections wiring."""
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 import yaml
 from _fakes import FakeEngine, QueryError
+from datus_semantic_core.exceptions import SemanticCoreException
 from datus_semantic_dosi.errors import SemanticValidationException
+
+
+def _write_model(path: Path, model_name: str, metric_names: list[str]) -> None:
+    metrics = "\n".join(f"      - name: {name}" for name in metric_names)
+    path.write_text(
+        "version: '0.2.0.dev0'\n"
+        "semantic_model:\n"
+        f"  - name: {model_name}\n"
+        "    datasets: []\n"
+        "    metrics:\n"
+        f"{metrics}\n"
+    )
+
+
+def _install_file_catalog(monkeypatch, metrics_by_stem: dict[str, list[str]]) -> None:
+    def metrics(engine):
+        stem = Path(engine.model_path).stem
+        return [
+            {
+                "name": name,
+                "kind": "aggregate",
+                "datasets": [stem],
+                "measures": [name],
+                "time_dimension": f"{stem}.event_date",
+                "description": f"Metric from {stem}",
+            }
+            for name in metrics_by_stem[stem]
+        ]
+
+    def datasets(engine):
+        stem = Path(engine.model_path).stem
+        return [
+            {
+                "name": stem,
+                "source": f"main.{stem}",
+                "primary_key": ["id"],
+                "fields": 2,
+                "time_dimensions": ["event_date"],
+                "primary_time_dimension": "event_date",
+            }
+        ]
+
+    def dimensions(engine):
+        stem = Path(engine.model_path).stem
+        return [
+            {"name": f"{stem}.status", "is_time": False},
+            {
+                "name": f"{stem}.event_date",
+                "is_time": True,
+                "time_granularity": "day",
+            },
+        ]
+
+    monkeypatch.setattr(FakeEngine, "metrics", metrics)
+    monkeypatch.setattr(FakeEngine, "datasets", datasets)
+    monkeypatch.setattr(FakeEngine, "dimensions", dimensions)
 
 
 async def test_list_metrics_maps_rows_and_slices(make_adapter):
@@ -662,13 +720,211 @@ async def test_semantic_models_path_directory_single_file(tmp_path):
     assert FakeEngine.instances[-1].model_path == str(tmp_path / "model.yaml")
 
 
-async def test_semantic_models_path_directory_multiple_is_error(tmp_path):
-    from datus_semantic_core.exceptions import SemanticCoreException
+async def test_semantic_models_path_routes_metrics_across_files(tmp_path, monkeypatch):
     from datus_semantic_dosi.adapter import DosiAdapter
     from datus_semantic_dosi.config import DosiConfig
 
-    (tmp_path / "a.yaml").write_text("version: '0.2.0.dev0'\nsemantic_model: []\n")
-    (tmp_path / "b.yaml").write_text("version: '0.2.0.dev0'\nsemantic_model: []\n")
+    _write_model(tmp_path / "orders.yaml", "orders_model", ["order_count"])
+    _write_model(tmp_path / "users.yml", "users_model", ["active_users"])
+    _install_file_catalog(
+        monkeypatch,
+        {"orders": ["order_count"], "users": ["active_users"]},
+    )
     adapter = DosiAdapter(DosiConfig(semantic_models_path=str(tmp_path)))
-    with pytest.raises(SemanticCoreException, match="set semantic_model_path"):
+
+    assert [metric.name for metric in await adapter.list_metrics()] == [
+        "order_count",
+        "active_users",
+    ]
+    assert [
+        metric.name for metric in await adapter.list_metrics(limit=1, offset=1)
+    ] == ["active_users"]
+    assert {model.name for model in adapter.list_semantic_models()} == {
+        "orders",
+        "users",
+    }
+
+    await adapter.get_dimensions("active_users")
+    users_engine = next(
+        engine
+        for engine in FakeEngine.instances
+        if Path(engine.model_path).name == "users.yml"
+    )
+    assert users_engine.compile_calls
+
+    await adapter.query_metrics(metrics=["order_count"], dry_run=True)
+    orders_engine = next(
+        engine
+        for engine in FakeEngine.instances
+        if Path(engine.model_path).name == "orders.yaml"
+    )
+    assert orders_engine.compile_calls
+
+
+async def test_semantic_models_path_rejects_cross_model_query(tmp_path, monkeypatch):
+    from datus_semantic_dosi.adapter import DosiAdapter
+    from datus_semantic_dosi.config import DosiConfig
+
+    _write_model(tmp_path / "orders.yaml", "orders_model", ["order_count"])
+    _write_model(tmp_path / "users.yaml", "users_model", ["active_users"])
+    _install_file_catalog(
+        monkeypatch,
+        {"orders": ["order_count"], "users": ["active_users"]},
+    )
+    adapter = DosiAdapter(DosiConfig(semantic_models_path=str(tmp_path)))
+
+    with pytest.raises(SemanticValidationException) as exc:
+        await adapter.query_metrics(metrics=["order_count", "active_users"])
+
+    assert exc.value.payload.code == "cross_semantic_model_query_unsupported"
+    assert exc.value.payload.metrics == ["order_count", "active_users"]
+    assert "order_count -> orders_model" in exc.value.payload.message
+    assert "active_users -> users_model" in exc.value.payload.message
+
+
+async def test_semantic_models_path_rejects_duplicate_metric_names(
+    tmp_path, monkeypatch
+):
+    from datus_semantic_dosi.adapter import DosiAdapter
+    from datus_semantic_dosi.config import DosiConfig
+
+    _write_model(tmp_path / "orders.yaml", "orders_model", ["total"])
+    _write_model(tmp_path / "users.yaml", "users_model", ["total"])
+    _install_file_catalog(monkeypatch, {"orders": ["total"], "users": ["total"]})
+    adapter = DosiAdapter(DosiConfig(semantic_models_path=str(tmp_path)))
+
+    with pytest.raises(SemanticCoreException, match="metric 'total'.*must be unique"):
         await adapter.list_metrics()
+
+
+async def test_semantic_models_path_refreshes_when_file_is_added(tmp_path, monkeypatch):
+    from datus_semantic_dosi.adapter import DosiAdapter
+    from datus_semantic_dosi.config import DosiConfig
+
+    metrics_by_stem = {"orders": ["order_count"]}
+    _write_model(tmp_path / "orders.yaml", "orders_model", ["order_count"])
+    _install_file_catalog(monkeypatch, metrics_by_stem)
+    adapter = DosiAdapter(DosiConfig(semantic_models_path=str(tmp_path)))
+    assert [metric.name for metric in await adapter.list_metrics()] == ["order_count"]
+
+    metrics_by_stem["users"] = ["active_users"]
+    _write_model(tmp_path / "users.yaml", "users_model", ["active_users"])
+
+    assert [metric.name for metric in await adapter.list_metrics()] == [
+        "order_count",
+        "active_users",
+    ]
+
+
+async def test_semantic_model_path_remains_an_explicit_single_file_pin(
+    tmp_path, monkeypatch
+):
+    from datus_semantic_dosi.adapter import DosiAdapter
+    from datus_semantic_dosi.config import DosiConfig
+
+    orders = tmp_path / "orders.yaml"
+    _write_model(orders, "orders_model", ["order_count"])
+    _write_model(tmp_path / "users.yaml", "users_model", ["active_users"])
+    _install_file_catalog(
+        monkeypatch,
+        {"orders": ["order_count"], "users": ["active_users"]},
+    )
+    adapter = DosiAdapter(
+        DosiConfig(
+            semantic_model_path=str(orders),
+            semantic_models_path=str(tmp_path),
+        )
+    )
+
+    assert [metric.name for metric in await adapter.list_metrics()] == ["order_count"]
+    with pytest.raises(SemanticValidationException) as exc:
+        await adapter.query_metrics(metrics=["active_users"])
+    assert exc.value.payload.code == "unknown_metric"
+
+
+async def test_validate_semantic_validates_all_files_and_supports_targeting(
+    tmp_path, fake_binding
+):
+    from datus_semantic_dosi.adapter import DosiAdapter
+    from datus_semantic_dosi.config import DosiConfig
+
+    _write_model(tmp_path / "orders.yaml", "orders_model", ["order_count"])
+    _write_model(tmp_path / "users.yaml", "users_model", ["active_users"])
+    validated = []
+
+    def validate(model_text):
+        validated.append(model_text)
+        if "users_model" in model_text:
+            return {
+                "valid": False,
+                "issues": [
+                    {
+                        "severity": "error",
+                        "code": "invalid_users_model",
+                        "location": "semantic_model[0]",
+                        "message": "users model is invalid",
+                    }
+                ],
+                "compile_errors": [],
+            }
+        return {"valid": True, "issues": [], "compile_errors": []}
+
+    fake_binding.validate = validate
+    adapter = DosiAdapter(DosiConfig(semantic_models_path=str(tmp_path)))
+
+    all_models = await adapter.validate_semantic()
+    assert all_models.valid is False
+    assert len(validated) == 2
+    assert "[semantic_model_file=users.yaml]" in all_models.issues[0].message
+
+    validated.clear()
+    orders_only = await adapter.validate_semantic(
+        scope="semantic_model",
+        semantic_model_name="orders_model",
+    )
+    assert orders_only.valid is True
+    assert len(validated) == 1
+    assert "orders_model" in validated[0]
+
+
+async def test_validate_semantic_rejects_cross_file_duplicate_identities(tmp_path):
+    from datus_semantic_dosi.adapter import DosiAdapter
+    from datus_semantic_dosi.config import DosiConfig
+
+    _write_model(tmp_path / "a.yaml", "shared_model", ["shared_metric"])
+    _write_model(tmp_path / "b.yaml", "shared_model", ["shared_metric"])
+    adapter = DosiAdapter(DosiConfig(semantic_models_path=str(tmp_path)))
+
+    result = await adapter.validate_semantic()
+
+    assert result.valid is False
+    messages = [issue.message for issue in result.issues]
+    assert any("duplicate_semantic_model" in message for message in messages)
+    assert any("duplicate_metric" in message for message in messages)
+
+
+async def test_targeted_validation_rejects_duplicate_metric_in_sibling_file(
+    tmp_path,
+):
+    from datus_semantic_dosi.adapter import DosiAdapter
+    from datus_semantic_dosi.config import DosiConfig
+
+    _write_model(tmp_path / "orders.yaml", "orders_model", ["shared_metric"])
+    _write_model(tmp_path / "users.yaml", "users_model", ["shared_metric"])
+    _write_model(tmp_path / "audit.yaml", "audit_model", ["audit_count"])
+    adapter = DosiAdapter(DosiConfig(semantic_models_path=str(tmp_path)))
+
+    result = await adapter.validate_semantic(
+        scope="semantic_model",
+        semantic_model_name="orders_model",
+    )
+
+    assert result.valid is False
+    assert any("duplicate_metric" in issue.message for issue in result.issues)
+
+    unrelated = await adapter.validate_semantic(
+        scope="semantic_model",
+        semantic_model_name="audit_model",
+    )
+    assert unrelated.valid is True
+    assert unrelated.issues == []

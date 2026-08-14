@@ -2,7 +2,7 @@
 # Licensed under the Apache License, Version 2.0.
 # See http://www.apache.org/licenses/LICENSE-2.0 for details.
 
-"""Engine binding lifecycle: lazy import, connections wiring, mtime reload."""
+"""Engine binding lifecycle: lazy import, connections wiring, file reload."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import os
 import tempfile
 import threading
 import weakref
+from pathlib import Path
 from typing import Any, Optional
 
 import yaml
@@ -38,15 +39,16 @@ def _unlink_quietly(path: str) -> None:
         pass
 
 
-def resolve_model_file(config: DosiConfig) -> str:
-    """The OSI model file to load: explicit semantic_model_path, else the sole
-    model file in semantic_models_path (the Datus directory convention).
+def resolve_model_files(config: DosiConfig) -> list[str]:
+    """Resolve every model file available to an adapter configuration.
 
-    Raises SemanticCoreException when nothing resolves, or when a directory
-    holds several models (the engine loads exactly one).
+    ``semantic_model_path`` remains an explicit single-file pin. Directory
+    configurations return every top-level OSI model in deterministic order so
+    the adapter can build a datasource-wide metric catalog over one native
+    engine per file.
     """
     if config.semantic_model_path:
-        return config.semantic_model_path
+        return [config.semantic_model_path]
     models_dir = config.semantic_models_path
     if models_dir:
         candidates = sorted(
@@ -54,20 +56,34 @@ def resolve_model_file(config: DosiConfig) -> str:
             for ext in ("*.yaml", "*.yml", "*.json")
             for path in glob.glob(os.path.join(models_dir, ext))
         )
-        if len(candidates) == 1:
-            return candidates[0]
-        if not candidates:
-            raise SemanticCoreException(
-                f"no OSI model file (*.yaml/*.yml/*.json) in {models_dir!r}"
-            )
+        if candidates:
+            return candidates
         raise SemanticCoreException(
-            f"{len(candidates)} model files in {models_dir!r}; "
-            "set semantic_model_path to select one"
+            f"no OSI model file (*.yaml/*.yml/*.json) in {models_dir!r}"
         )
     raise SemanticCoreException(
         "dosi adapter requires semantic_model_path (an OSI model file) "
         "or semantic_models_path (a directory containing one)"
     )
+
+
+def resolve_model_file(config: DosiConfig) -> str:
+    """The OSI model file to load: explicit semantic_model_path, else the sole
+    model file in semantic_models_path (the Datus directory convention).
+
+    Raises SemanticCoreException when nothing resolves, or when a directory
+    holds several models (the engine loads exactly one).
+    """
+    candidates = resolve_model_files(config)
+    if len(candidates) == 1:
+        return candidates[0]
+    models_dir = config.semantic_models_path
+    if models_dir:
+        raise SemanticCoreException(
+            f"{len(candidates)} model files in {models_dir!r}; "
+            "set semantic_model_path to select one"
+        )
+    raise AssertionError("multiple models cannot resolve from semantic_model_path")
 
 
 def load_binding() -> Any:
@@ -105,7 +121,7 @@ class EngineHandle:
         self._config = config
         self._lock = threading.Lock()
         self._engine: Optional[Any] = None
-        self._model_mtime: Optional[float] = None
+        self._model_signature: Optional[tuple[int, int]] = None
         self._connections_file: Optional[str] = None
 
     @property
@@ -136,15 +152,16 @@ class EngineHandle:
         config = self._config
         model_file = resolve_model_file(config)
         try:
-            mtime = os.path.getmtime(model_file)
+            stat = os.stat(model_file)
         except OSError as exc:
             raise SemanticCoreException(
                 f"cannot read semantic model {model_file!r}: {exc}"
             ) from exc
         with self._lock:
-            if self._engine is None or mtime != self._model_mtime:
+            signature = (stat.st_mtime_ns, stat.st_size)
+            if self._engine is None or signature != self._model_signature:
                 self._engine = self._build(config, model_file)
-                self._model_mtime = mtime
+                self._model_signature = signature
             return self._engine
 
     def _build(self, config: DosiConfig, model_file: str) -> Any:
@@ -204,3 +221,42 @@ class EngineHandle:
         # the process lifetime (relevant when adapters are created per-request).
         weakref.finalize(self, _unlink_quietly, handle.name)
         return handle.name
+
+
+class EngineRegistry:
+    """Directory-aware lifecycle for one native Dosi engine per model file."""
+
+    def __init__(self, config: DosiConfig):
+        self._config = config
+        self._lock = threading.Lock()
+        self._signature: tuple[tuple[str, int, int], ...] = ()
+        self._handles: dict[str, EngineHandle] = {}
+
+    @staticmethod
+    def _file_signature(path: str) -> tuple[str, int, int]:
+        try:
+            stat = Path(path).stat()
+        except OSError as exc:
+            raise SemanticCoreException(
+                f"cannot read semantic model {path!r}: {exc}"
+            ) from exc
+        return path, stat.st_mtime_ns, stat.st_size
+
+    def snapshot(
+        self,
+    ) -> tuple[tuple[tuple[str, int, int], ...], tuple[tuple[str, EngineHandle], ...]]:
+        """Return a stable file signature and matching engine handles."""
+        with self._lock:
+            files = resolve_model_files(self._config)
+            signature = tuple(self._file_signature(path) for path in files)
+            if signature != self._signature:
+                previous = self._handles
+                self._handles = {
+                    path: previous.get(path)
+                    or EngineHandle(
+                        self._config.model_copy(update={"semantic_model_path": path})
+                    )
+                    for path in files
+                }
+                self._signature = signature
+            return self._signature, tuple((path, self._handles[path]) for path in files)

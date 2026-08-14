@@ -9,7 +9,6 @@ from __future__ import annotations
 import shutil
 
 import pytest
-
 from datus_semantic_dosi.adapter import DosiAdapter
 from datus_semantic_dosi.config import DosiConfig
 from datus_semantic_dosi.errors import SemanticValidationException
@@ -190,3 +189,52 @@ async def test_validate_semantic_ok(model_path):
     )
     assert result.valid is True
     assert result.issues == []
+
+
+async def test_directory_routes_metrics_to_their_owning_model(model_path, tmp_path):
+    shutil.copyfile(model_path, tmp_path / "orders.yaml")
+    (tmp_path / "customer_catalog.yaml").write_text(
+        """
+version: "0.2.0.dev0"
+semantic_model:
+  - name: customer_catalog_model
+    datasets:
+      - name: customer_catalog
+        source: main.customers
+        primary_key: [customer_id]
+        fields:
+          - name: customer_id
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: customer_id
+          - name: region
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: region
+    metrics:
+      - name: customer_row_count
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: COUNT(customer_catalog.customer_id)
+""".lstrip()
+    )
+    adapter = DosiAdapter(DosiConfig(semantic_models_path=str(tmp_path)))
+
+    names = {metric.name for metric in await adapter.list_metrics()}
+    assert {"revenue", "customer_row_count"} <= names
+
+    result = await adapter.query_metrics(
+        metrics=["customer_row_count"],
+        dimensions=["customer_catalog.region"],
+        dry_run=True,
+    )
+    assert "main.customers" in result.data[0]["sql"]
+
+    with pytest.raises(SemanticValidationException) as exc:
+        await adapter.query_metrics(
+            metrics=["revenue", "customer_row_count"], dry_run=True
+        )
+    assert exc.value.payload.code == "cross_semantic_model_query_unsupported"
