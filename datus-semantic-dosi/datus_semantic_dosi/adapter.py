@@ -8,13 +8,17 @@ All planning, SQL generation, and execution happen inside the Rust engine;
 this class maps the Datus contract onto the engine API. Engine calls are
 synchronous and GIL-releasing, so they run under ``asyncio.to_thread``.
 
-Scope note: an engine instance serves ONE OSI model file, so the ``path``
-(subject-tree) arguments are accepted and ignored.
+Each native engine instance still serves one OSI model file. Directory-backed
+adapters maintain one engine handle per file and route globally unique metric
+names to their owning model. Subject-tree ``path`` filters apply to discovery;
+metric identity remains name-based.
 """
 
 from __future__ import annotations
 
 import asyncio
+import threading
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
@@ -36,6 +40,7 @@ from datus_semantic_dosi.config import DosiConfig
 from datus_semantic_dosi.dialects import resolve_engine_dialect
 from datus_semantic_dosi.engine import (
     EngineHandle,
+    EngineRegistry,
     datus_extension_version,
     load_binding,
 )
@@ -44,6 +49,7 @@ from datus_semantic_dosi.errors import (
     raise_mapped,
 )
 from datus_semantic_dosi.model import (
+    iter_semantic_models,
     load_document,
     metric_payloads,
     queryable_grains,
@@ -56,7 +62,12 @@ class DosiAdapter(BaseSemanticAdapter):
     def __init__(self, config: DosiConfig):
         super().__init__(config, service_type="dosi")
         self.config: DosiConfig = config
-        self._handle = EngineHandle(config)
+        self._registry = EngineRegistry(config)
+        self._catalog_lock = threading.Lock()
+        self._catalog_signature: tuple[tuple[str, int, int], ...] = ()
+        self._catalog_handles: tuple[tuple[str, EngineHandle], ...] = ()
+        self._metric_to_path: Dict[str, str] = {}
+        self._model_to_path: Dict[str, str] = {}
 
     # ==================== Semantic Model Interface ====================
 
@@ -66,7 +77,12 @@ class DosiAdapter(BaseSemanticAdapter):
         database_name: str = "",
         schema_name: str = "",
     ) -> List[SemanticModelInfo]:
-        return [self._model_info(row) for row in self._engine().datasets()]
+        handles, _, _ = self._catalog()
+        return [
+            self._model_info(row)
+            for _, handle in handles
+            for row in handle.get().datasets()
+        ]
 
     def get_semantic_model(
         self,
@@ -75,12 +91,14 @@ class DosiAdapter(BaseSemanticAdapter):
         database_name: str = "",
         schema_name: str = "",
     ) -> Optional[SemanticModelInfo]:
-        for row in self._engine().datasets():
-            source = str(row.get("source", ""))
-            if table_name in (row.get("name"), source) or source.endswith(
-                f".{table_name}"
-            ):
-                return self._model_info(row)
+        handles, _, _ = self._catalog()
+        for _, handle in handles:
+            for row in handle.get().datasets():
+                source = str(row.get("source", ""))
+                if table_name in (row.get("name"), source) or source.endswith(
+                    f".{table_name}"
+                ):
+                    return self._model_info(row)
         return None
 
     # ==================== Metrics Interface ====================
@@ -92,76 +110,85 @@ class DosiAdapter(BaseSemanticAdapter):
         offset: int = 0,
     ) -> List[MetricDefinition]:
         extension_version = await asyncio.to_thread(datus_extension_version)
-        engine = await asyncio.to_thread(self._engine)
-        rows = await asyncio.to_thread(engine.metrics)
-        dataset_rows = await asyncio.to_thread(engine.datasets)
-        dimension_rows = await asyncio.to_thread(engine.dimensions)
-        payloads = await asyncio.to_thread(self._metric_payloads)
+        handles, _, _ = await asyncio.to_thread(self._catalog)
         binding = await asyncio.to_thread(load_binding)
-        connection = self._handle.profile_name
-        dialect = self._dry_run_dialect(binding, connection)
         metrics = []
-        for row in rows:
-            hints = payloads.get(str(row.get("name") or ""), {})
-            window = hints.get("window")
-            effective_time = self._effective_time_dimension(
-                row, dataset_rows, dimension_rows
-            )
-            metadata: Dict[str, Any] = {
-                "datasets": list(row.get("datasets") or []),
-                "base_kind": row.get("kind"),
-                "datus_ext_version": extension_version,
-            }
-            for key in ("window_family", "window_function"):
-                if row.get(key):
-                    metadata[key] = row[key]
-            if effective_time:
-                metadata["time_dimension"] = effective_time
-            if isinstance(window, dict):
-                requires_time_axis = await asyncio.to_thread(
-                    self._probe_requires_time_axis,
-                    engine,
-                    binding,
-                    str(row.get("name") or ""),
-                    dialect=dialect,
-                    connection=connection,
+        for model_path, handle in handles:
+            engine = await asyncio.to_thread(handle.get)
+            rows = await asyncio.to_thread(engine.metrics)
+            dataset_rows = await asyncio.to_thread(engine.datasets)
+            dimension_rows = await asyncio.to_thread(engine.dimensions)
+            payloads = await asyncio.to_thread(self._metric_payloads, model_path)
+            connection = handle.profile_name
+            dialect = self._dry_run_dialect(binding, connection)
+            for row in rows:
+                hints = payloads.get(str(row.get("name") or ""), {})
+                metric_path = (
+                    [str(item) for item in hints.get("subject_path")]
+                    if isinstance(hints.get("subject_path"), list)
+                    else None
                 )
-                metadata.update(
-                    {
-                        "window": window,
-                        "requires_time_axis": requires_time_axis,
-                    }
+                if path and (metric_path is None or metric_path[: len(path)] != path):
+                    continue
+                window = hints.get("window")
+                effective_time = self._effective_time_dimension(
+                    row, dataset_rows, dimension_rows
                 )
-            if "fill_nulls_with" in hints:
-                metadata["fill_nulls_with"] = hints["fill_nulls_with"]
-            metrics.append(
-                MetricDefinition(
-                    name=row["name"],
-                    description=row.get("description") or None,
-                    type="window" if isinstance(window, dict) else row.get("kind"),
-                    # The native catalog currently exposes model-wide dimensions,
-                    # not the dimensions queryable for this specific metric. Do
-                    # not publish that broader set as metric-level capability;
-                    # callers use get_dimensions(), which verifies each candidate
-                    # through the native planner.
-                    dimensions=[],
-                    measures=list(row.get("measures") or []),
-                    unit=str(hints.get("unit"))
-                    if hints.get("unit") is not None
-                    else None,
-                    format=(
-                        str(hints.get("format"))
-                        if hints.get("format") is not None
-                        else None
-                    ),
-                    path=(
-                        [str(item) for item in hints.get("subject_path")]
-                        if isinstance(hints.get("subject_path"), list)
-                        else None
-                    ),
-                    metadata=metadata,
+                metadata: Dict[str, Any] = {
+                    "datasets": list(row.get("datasets") or []),
+                    "base_kind": row.get("kind"),
+                    "datus_ext_version": extension_version,
+                }
+                for key in ("window_family", "window_function"):
+                    if row.get(key):
+                        metadata[key] = row[key]
+                if effective_time:
+                    metadata["time_dimension"] = effective_time
+                if isinstance(window, dict):
+                    requires_time_axis = await asyncio.to_thread(
+                        self._probe_requires_time_axis,
+                        engine,
+                        binding,
+                        str(row.get("name") or ""),
+                        dialect=dialect,
+                        connection=connection,
+                    )
+                    metadata.update(
+                        {
+                            "window": window,
+                            "requires_time_axis": requires_time_axis,
+                        }
+                    )
+                if "fill_nulls_with" in hints:
+                    metadata["fill_nulls_with"] = hints["fill_nulls_with"]
+                metrics.append(
+                    MetricDefinition(
+                        name=row["name"],
+                        description=row.get("description") or None,
+                        type=(
+                            "window" if isinstance(window, dict) else row.get("kind")
+                        ),
+                        # The native catalog currently exposes model-wide dimensions,
+                        # not the dimensions queryable for this specific metric. Do
+                        # not publish that broader set as metric-level capability;
+                        # callers use get_dimensions(), which verifies each candidate
+                        # through the native planner.
+                        dimensions=[],
+                        measures=list(row.get("measures") or []),
+                        unit=(
+                            str(hints.get("unit"))
+                            if hints.get("unit") is not None
+                            else None
+                        ),
+                        format=(
+                            str(hints.get("format"))
+                            if hints.get("format") is not None
+                            else None
+                        ),
+                        path=metric_path,
+                        metadata=metadata,
+                    )
                 )
-            )
         return metrics[offset : offset + limit]
 
     async def get_dimensions(
@@ -169,20 +196,9 @@ class DosiAdapter(BaseSemanticAdapter):
         metric_name: str,
         path: Optional[List[str]] = None,
     ) -> List[DimensionInfo]:
-        engine = await asyncio.to_thread(self._engine)
+        handle = await asyncio.to_thread(self._handle_for_metric, metric_name)
+        engine = await asyncio.to_thread(handle.get)
         metric_rows = await asyncio.to_thread(engine.metrics)
-        metric_names = [m["name"] for m in metric_rows]
-        if metric_name not in metric_names:
-            raise SemanticValidationException(
-                SemanticValidationError(
-                    code="unknown_metric",
-                    metrics=[metric_name],
-                    message=(
-                        f"unknown metric {metric_name!r} | "
-                        f"candidates: {', '.join(metric_names)}"
-                    ),
-                )
-            )
         # Expose Dosi's canonical discovery names unchanged. Query inputs are
         # deliberately not constrained to this list: Dosi itself accepts a
         # globally unique bare field name and reports structured ambiguity.
@@ -190,7 +206,7 @@ class DosiAdapter(BaseSemanticAdapter):
         dataset_rows = await asyncio.to_thread(engine.datasets)
         binding = await asyncio.to_thread(load_binding)
         rows = await asyncio.to_thread(engine.dimensions)
-        connection = self._handle.profile_name
+        connection = handle.profile_name
         dialect = self._dry_run_dialect(binding, connection)
 
         requires_time_axis = await asyncio.to_thread(
@@ -331,7 +347,8 @@ class DosiAdapter(BaseSemanticAdapter):
         dry_run: bool = False,
     ) -> QueryResult:
         binding = await asyncio.to_thread(load_binding)
-        engine = await asyncio.to_thread(self._engine)
+        handle = await asyncio.to_thread(self._handle_for_metrics, metrics)
+        engine = await asyncio.to_thread(handle.get)
         dimensions = list(dimensions or [])
         # Fetched off the event loop; _build_query stays pure (no engine I/O).
         dimension_rows = await asyncio.to_thread(engine.dimensions)
@@ -349,7 +366,7 @@ class DosiAdapter(BaseSemanticAdapter):
             limit=limit,
             order_by=order_by,
         )
-        connection = self._handle.profile_name
+        connection = handle.profile_name
         try:
             if dry_run:
                 compiled = await asyncio.to_thread(
@@ -403,22 +420,82 @@ class DosiAdapter(BaseSemanticAdapter):
         scope: str = "all",
         semantic_model_name: str = "",
     ) -> ValidationResult:
-        """Validate the configured model, optionally asserting its model name.
+        """Validate one selected model or every model in the datasource."""
+        if scope not in {"all", "semantic_model"}:
+            return ValidationResult(
+                valid=False,
+                issues=[
+                    ValidationIssue(
+                        severity="error",
+                        message="scope must be one of: all, semantic_model",
+                    )
+                ],
+            )
 
-        Dosi v1 compiles exactly one semantic model per document, so validating
-        that document is also a targeted validation once the requested name is
-        confirmed. The optional name keeps the adapter compatible with Datus
-        authoring publish gates without pretending to support multi-model files.
-        """
         try:
-            model_path = self._handle.model_file()
+            _, handles = self._registry.snapshot()
         except SemanticCoreException as exc:
             return ValidationResult(
                 valid=False,
                 issues=[ValidationIssue(severity="error", message=str(exc))],
             )
 
-        def _validate() -> dict[str, Any]:
+        all_model_paths = [path for path, _ in handles]
+        model_paths = list(all_model_paths)
+        if semantic_model_name:
+            selected, available = self._find_model_paths(
+                model_paths, semantic_model_name
+            )
+            if len(model_paths) == 1:
+                selected = model_paths
+            elif not selected:
+                return ValidationResult(
+                    valid=False,
+                    issues=[
+                        ValidationIssue(
+                            severity="error",
+                            message=(
+                                "semantic_model_not_found: semantic model "
+                                f"{semantic_model_name!r} was not found; "
+                                f"available: {', '.join(available) or '(none)'}"
+                            ),
+                            location="semantic_model",
+                        )
+                    ],
+                )
+            elif len(selected) > 1:
+                return ValidationResult(
+                    valid=False,
+                    issues=[
+                        ValidationIssue(
+                            severity="error",
+                            message=(
+                                f"semantic model {semantic_model_name!r} is declared "
+                                f"in multiple files: {', '.join(selected)}"
+                            ),
+                            location="semantic_model",
+                        )
+                    ],
+                )
+            model_paths = selected
+        elif scope == "semantic_model" and len(model_paths) > 1:
+            _, available = self._find_model_paths(model_paths, "")
+            return ValidationResult(
+                valid=False,
+                issues=[
+                    ValidationIssue(
+                        severity="error",
+                        message=(
+                            "semantic_model_name is required for targeted validation "
+                            "when multiple models exist; available: "
+                            f"{', '.join(available) or '(none)'}"
+                        ),
+                        location="semantic_model",
+                    )
+                ],
+            )
+
+        def _validate(model_path: str) -> dict[str, Any]:
             with open(model_path, encoding="utf-8") as fh:
                 model_text = fh.read()
             payload = dosi_validation_text_payload(model_text)
@@ -449,39 +526,65 @@ class DosiAdapter(BaseSemanticAdapter):
                     )
             return payload
 
-        try:
-            payload = await asyncio.to_thread(_validate)
-        except OSError as exc:
-            return ValidationResult(
-                valid=False,
-                issues=[
+        issues: List[ValidationIssue] = []
+        valid = True
+        qualify = len(model_paths) > 1
+        for model_path in model_paths:
+            try:
+                payload = await asyncio.to_thread(_validate, model_path)
+            except OSError as exc:
+                valid = False
+                issues.append(
                     ValidationIssue(
                         severity="error",
                         message=f"cannot read semantic model {model_path!r}: {exc}",
                     )
-                ],
-            )
-
-        issues = [
-            ValidationIssue(
-                severity=issue.get("severity") or "error",
-                message=f"{issue.get('code', 'issue')}: {issue.get('message', '')}",
-                location=issue.get("location") or None,
-            )
-            for issue in payload.get("issues", [])
-        ]
-        for err in payload.get("compile_errors", []):
-            message = f"{err.get('code', 'compile_error')}: {err.get('message', '')}"
-            if err.get("hint"):
-                message = f"{message} | {err['hint']}"
-            issues.append(
-                ValidationIssue(
-                    severity="error",
-                    message=message,
-                    location=err.get("location") or None,
                 )
+                continue
+
+            valid = valid and bool(payload.get("valid"))
+            prefix = (
+                f"[semantic_model_file={Path(model_path).name}] " if qualify else ""
             )
-        return ValidationResult(valid=bool(payload.get("valid")), issues=issues)
+            for issue in payload.get("issues", []):
+                issues.append(
+                    ValidationIssue(
+                        severity=issue.get("severity") or "error",
+                        message=(
+                            f"{prefix}{issue.get('code', 'issue')}: "
+                            f"{issue.get('message', '')}"
+                        ),
+                        location=issue.get("location") or None,
+                    )
+                )
+            for err in payload.get("compile_errors", []):
+                message = (
+                    f"{prefix}{err.get('code', 'compile_error')}: "
+                    f"{err.get('message', '')}"
+                )
+                if err.get("hint"):
+                    message = f"{message} | {err['hint']}"
+                issues.append(
+                    ValidationIssue(
+                        severity="error",
+                        message=message,
+                        location=err.get("location") or None,
+                    )
+                )
+
+        relevant_identity_paths = (
+            set(model_paths)
+            if semantic_model_name or scope == "semantic_model"
+            else None
+        )
+        identity_issues = await asyncio.to_thread(
+            self._cross_file_identity_issues,
+            all_model_paths,
+            relevant_paths=relevant_identity_paths,
+        )
+        issues.extend(identity_issues)
+        valid = valid and not identity_issues
+        return ValidationResult(valid=valid, issues=issues)
 
     # ==================== Authoring Interface ====================
     # Backend/editor surface; not an agent/LLM tool. Dosi authors the same
@@ -548,8 +651,213 @@ class DosiAdapter(BaseSemanticAdapter):
 
     # ==================== Internals ====================
 
-    def _engine(self) -> Any:
-        return self._handle.get()
+    @staticmethod
+    def _document_model_names(model_path: str) -> List[str]:
+        return [
+            str(model.get("name") or "").strip()
+            for model in iter_semantic_models(load_document(model_path))
+            if str(model.get("name") or "").strip()
+        ]
+
+    @classmethod
+    def _find_model_paths(
+        cls, model_paths: List[str], semantic_model_name: str
+    ) -> tuple[List[str], List[str]]:
+        matches: List[str] = []
+        available: List[str] = []
+        for model_path in model_paths:
+            try:
+                names = cls._document_model_names(model_path)
+            except (OSError, TypeError, ValueError, yaml.YAMLError):
+                continue
+            available.extend(names)
+            if semantic_model_name and semantic_model_name in names:
+                matches.append(model_path)
+        return matches, sorted(set(available))
+
+    @classmethod
+    def _cross_file_identity_issues(
+        cls,
+        model_paths: List[str],
+        *,
+        relevant_paths: Optional[set[str]] = None,
+    ) -> List[ValidationIssue]:
+        """Return global identity conflicts relevant to the validation scope.
+
+        Full validation reports every cross-file conflict. Targeted validation
+        passes the selected file paths so it rejects conflicts involving the
+        target without surfacing unrelated conflicts between sibling models.
+        """
+        model_owners: Dict[str, str] = {}
+        metric_owners: Dict[str, str] = {}
+        issues: List[ValidationIssue] = []
+        for model_path in model_paths:
+            try:
+                document = load_document(model_path)
+            except (OSError, TypeError, ValueError, yaml.YAMLError):
+                continue
+            for model in iter_semantic_models(document):
+                model_name = str(model.get("name") or "").strip()
+                if model_name:
+                    owner = model_owners.get(model_name)
+                    if owner and owner != model_path:
+                        if relevant_paths is None or relevant_paths.intersection(
+                            {owner, model_path}
+                        ):
+                            issues.append(
+                                ValidationIssue(
+                                    severity="error",
+                                    message=(
+                                        "duplicate_semantic_model: "
+                                        f"{model_name!r} is declared in {owner!r} "
+                                        f"and {model_path!r}"
+                                    ),
+                                    location="semantic_model",
+                                )
+                            )
+                    else:
+                        model_owners[model_name] = model_path
+                for metric in model.get("metrics") or []:
+                    if not isinstance(metric, dict):
+                        continue
+                    metric_name = str(metric.get("name") or "").strip()
+                    if not metric_name:
+                        continue
+                    owner = metric_owners.get(metric_name)
+                    if owner and owner != model_path:
+                        if relevant_paths is None or relevant_paths.intersection(
+                            {owner, model_path}
+                        ):
+                            issues.append(
+                                ValidationIssue(
+                                    severity="error",
+                                    message=(
+                                        f"duplicate_metric: {metric_name!r} is "
+                                        f"declared in {owner!r} and {model_path!r}; "
+                                        "metric names must be unique within a "
+                                        "datasource"
+                                    ),
+                                    location="metrics",
+                                )
+                            )
+                    else:
+                        metric_owners[metric_name] = model_path
+        return issues
+
+    def _catalog(
+        self,
+    ) -> tuple[tuple[tuple[str, EngineHandle], ...], Dict[str, str], Dict[str, str]]:
+        with self._catalog_lock:
+            signature, handles = self._registry.snapshot()
+            if signature == self._catalog_signature:
+                return (
+                    self._catalog_handles,
+                    dict(self._metric_to_path),
+                    dict(self._model_to_path),
+                )
+
+            metric_to_path: Dict[str, str] = {}
+            model_to_path: Dict[str, str] = {}
+            for model_path, handle in handles:
+                try:
+                    model_names = self._document_model_names(model_path)
+                except (OSError, TypeError, ValueError, yaml.YAMLError) as exc:
+                    raise SemanticCoreException(
+                        f"cannot read semantic model {model_path!r}: {exc}"
+                    ) from exc
+                for model_name in model_names:
+                    owner = model_to_path.get(model_name)
+                    if owner and owner != model_path:
+                        raise SemanticCoreException(
+                            f"semantic model {model_name!r} is declared in "
+                            f"{owner!r} and {model_path!r}"
+                        )
+                    model_to_path[model_name] = model_path
+                for row in handle.get().metrics():
+                    metric_name = str(row.get("name") or "").strip()
+                    if not metric_name:
+                        continue
+                    owner = metric_to_path.get(metric_name)
+                    if owner and owner != model_path:
+                        raise SemanticCoreException(
+                            f"metric {metric_name!r} is declared in {owner!r} "
+                            f"and {model_path!r}; metric names must be unique "
+                            "within a datasource"
+                        )
+                    metric_to_path[metric_name] = model_path
+
+            self._catalog_signature = signature
+            self._catalog_handles = handles
+            self._metric_to_path = metric_to_path
+            self._model_to_path = model_to_path
+            return handles, dict(metric_to_path), dict(model_to_path)
+
+    @staticmethod
+    def _model_label(model_path: str, model_to_path: Dict[str, str]) -> str:
+        names = sorted(
+            name for name, owner in model_to_path.items() if owner == model_path
+        )
+        return names[0] if names else Path(model_path).name
+
+    def _handle_for_metric(self, metric_name: str) -> EngineHandle:
+        handles, metric_to_path, _ = self._catalog()
+        model_path = metric_to_path.get(metric_name)
+        if model_path is None:
+            candidates = ", ".join(sorted(metric_to_path))
+            raise SemanticValidationException(
+                SemanticValidationError(
+                    code="unknown_metric",
+                    metrics=[metric_name],
+                    message=(
+                        f"unknown metric {metric_name!r} | "
+                        f"candidates: {candidates or '(none)'}"
+                    ),
+                )
+            )
+        return dict(handles)[model_path]
+
+    def _handle_for_metrics(self, metrics: List[str]) -> EngineHandle:
+        handles, metric_to_path, model_to_path = self._catalog()
+        unknown = [
+            name for name in dict.fromkeys(metrics) if name not in metric_to_path
+        ]
+        if unknown:
+            candidates = ", ".join(sorted(metric_to_path))
+            raise SemanticValidationException(
+                SemanticValidationError(
+                    code="unknown_metric",
+                    metrics=unknown,
+                    message=(
+                        f"unknown metric(s): {', '.join(unknown)} | "
+                        f"candidates: {candidates or '(none)'}"
+                    ),
+                )
+            )
+        if not metrics:
+            raise SemanticValidationException(
+                SemanticValidationError(
+                    code="empty_query",
+                    metrics=[],
+                    message="at least one metric is required",
+                )
+            )
+        owners = {metric_to_path[name] for name in metrics}
+        if len(owners) > 1:
+            details = ", ".join(
+                f"{name} -> {self._model_label(metric_to_path[name], model_to_path)}"
+                for name in dict.fromkeys(metrics)
+            )
+            raise SemanticValidationException(
+                SemanticValidationError(
+                    code="cross_semantic_model_query_unsupported",
+                    metrics=list(dict.fromkeys(metrics)),
+                    message=(
+                        f"metrics belong to multiple semantic models: {details}; "
+                        "cross-semantic-model queries are not supported"
+                    ),
+                )
+            )
+        return dict(handles)[next(iter(owners))]
 
     def _model_info(self, row: Dict[str, Any]) -> SemanticModelInfo:
         return SemanticModelInfo(
@@ -559,10 +867,11 @@ class DosiAdapter(BaseSemanticAdapter):
             extra={k: v for k, v in row.items() if k not in ("name", "source")},
         )
 
-    def _metric_payloads(self) -> Dict[str, Dict[str, Any]]:
+    @staticmethod
+    def _metric_payloads(model_path: str) -> Dict[str, Dict[str, Any]]:
         """Presentation metadata from the raw model; Dosi still validates it."""
 
-        return metric_payloads(load_document(self._handle.model_file()))
+        return metric_payloads(load_document(model_path))
 
     @staticmethod
     def _probe_compile(
