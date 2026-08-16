@@ -204,6 +204,22 @@ class EngineHandle:
         is marked default so connection-less execution lands on it.
         """
         entry = dict(config.db_config or {})
+        if str(entry.get("type") or "").strip().lower() == "sqlite":
+            # The engine has no SQLite dialect by contract; hand it the DuckDB
+            # companion (views over sqlite_scan) built from the SQLite file.
+            from datus_semantic_dosi.sqlite_bridge import duckdb_companion_for_sqlite
+
+            source = entry.get("uri") or entry.get("path")
+            if not source:
+                raise SemanticCoreException(
+                    "SQLite datasource config has no `uri`/`path`; cannot "
+                    "bridge it into the engine's DuckDB connector"
+                )
+            entry = {
+                "type": "duckdb",
+                "uri": duckdb_companion_for_sqlite(str(source)),
+                "default": bool(entry.get("default", True)),
+            }
         dialect = normalize_dialect(entry.get("type"))
         if dialect:
             entry["type"] = dialect
