@@ -12,9 +12,9 @@ SQLite table through ``sqlite_scan``, so the engine executes against a plain
 DuckDB connection while the data stays in the original SQLite file.
 
 The companion contains views only — no copied data — so it is cheap to
-rebuild and is regenerated whenever the SQLite file's mtime moves past it.
-Reading the views requires DuckDB's ``sqlite`` extension, which current
-DuckDB builds autoinstall/autoload on first use.
+rebuild and is regenerated whenever the SQLite file (or its WAL sidecar)
+moves past it. Reading the views requires DuckDB's ``sqlite`` extension,
+which current DuckDB builds autoinstall/autoload on first use.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ import hashlib
 import os
 import sqlite3
 import tempfile
+import uuid
 from pathlib import Path
 
 from datus_semantic_core.exceptions import SemanticCoreException
@@ -38,13 +39,33 @@ def _quote_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def sqlite_source_mtime(sqlite_path: str) -> float:
+    """Latest mtime across the SQLite file and its WAL/SHM sidecars.
+
+    WAL-mode commits (including schema changes) land in ``<db>-wal`` without
+    necessarily touching the main file's mtime, so freshness checks must
+    consider the sidecars too.
+    """
+    newest = os.path.getmtime(sqlite_path)
+    for suffix in ("-wal", "-shm"):
+        sidecar = sqlite_path + suffix
+        if os.path.exists(sidecar):
+            newest = max(newest, os.path.getmtime(sidecar))
+    return newest
+
+
 def _sqlite_tables(sqlite_path: str) -> list[str]:
-    with sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True) as conn:
-        rows = conn.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' "
-            "ORDER BY name"
-        ).fetchall()
+    try:
+        with sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True) as conn:
+            rows = conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' "
+                "ORDER BY name"
+            ).fetchall()
+    except sqlite3.Error as exc:
+        raise SemanticCoreException(
+            f"cannot read SQLite datasource {sqlite_path!r}: {exc}"
+        ) from exc
     return [row[0] for row in rows]
 
 
@@ -60,9 +81,9 @@ def duckdb_companion_for_sqlite(sqlite_source: str) -> str:
     """Return a DuckDB database path exposing the SQLite file's tables as views.
 
     The companion is cached per absolute SQLite path and rebuilt when it is
-    missing or older than the SQLite file. Raises ``SemanticCoreException``
-    with an actionable message when the SQLite file cannot be read or the
-    ``duckdb`` package is unavailable.
+    missing or older than the SQLite file (WAL/SHM sidecars included).
+    Raises ``SemanticCoreException`` with an actionable message when the
+    SQLite file cannot be read or the ``duckdb`` package is unavailable.
     """
     sqlite_path = os.path.abspath(os.path.expanduser(sqlite_source))
     if not os.path.isfile(sqlite_path):
@@ -71,7 +92,7 @@ def duckdb_companion_for_sqlite(sqlite_source: str) -> str:
         )
 
     companion = _companion_path(sqlite_path)
-    if companion.exists() and companion.stat().st_mtime >= os.path.getmtime(
+    if companion.exists() and companion.stat().st_mtime >= sqlite_source_mtime(
         sqlite_path
     ):
         return str(companion)
@@ -92,9 +113,10 @@ def duckdb_companion_for_sqlite(sqlite_source: str) -> str:
         )
 
     # Build into a sibling temp file, then atomically replace, so a concurrent
-    # reader never observes a half-written companion.
-    scratch = companion.with_name(companion.name + f".tmp{os.getpid()}")
-    scratch.unlink(missing_ok=True)
+    # reader never observes a half-written companion. The scratch name is
+    # unique per build: several adapter instances in one process may race on
+    # a cold cache, and each needs its own scratch file.
+    scratch = companion.with_name(companion.name + f".tmp-{uuid.uuid4().hex}")
     conn = duckdb.connect(str(scratch))
     try:
         for table in tables:

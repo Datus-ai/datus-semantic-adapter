@@ -145,6 +145,7 @@ run_package_tests() {
         --with pytest-asyncio \
         --with pydantic \
         --with pyyaml \
+        --with duckdb \
         --with-editable ./datus-semantic-core \
         env PYTHONPATH=./datus-semantic-dosi \
         pytest "$test_path" \

@@ -134,3 +134,51 @@ def test_connections_file_passes_other_types_through(tmp_path):
     payload = yaml.safe_load(open(handle._write_connections_file(config)))
     assert payload["datasources"]["duck"]["type"] == "duckdb"
     assert payload["datasources"]["duck"]["uri"] == "/tmp/x.duckdb"
+
+
+def test_wal_sidecar_invalidates_companion(sqlite_db):
+    companion = duckdb_companion_for_sqlite(sqlite_db)
+    first_mtime = os.path.getmtime(companion)
+
+    # A WAL-mode commit can advance only the -wal sidecar; the companion must
+    # still be considered stale.
+    wal = sqlite_db + "-wal"
+    with open(wal, "wb"):
+        pass
+    os.utime(wal, (first_mtime + 10, first_mtime + 10))
+
+    rebuilt = duckdb_companion_for_sqlite(sqlite_db)
+    assert rebuilt == companion
+    assert os.path.getmtime(rebuilt) > first_mtime
+
+
+def test_corrupt_sqlite_file_raises_actionable_error(tmp_path):
+    path = tmp_path / "corrupt.sqlite"
+    path.write_bytes(
+        b"this is not a sqlite database, but it is long enough to fool the header check "
+        * 2
+    )
+    with pytest.raises(SemanticCoreException, match="cannot read SQLite datasource"):
+        duckdb_companion_for_sqlite(str(path))
+
+
+def test_engine_rebuilds_when_sqlite_source_changes(
+    fake_binding, model_file, sqlite_db
+):
+    config = DosiConfig(
+        semantic_model_path=str(model_file),
+        db_config={"type": "sqlite", "uri": sqlite_db},
+        datasource="bird_school",
+    )
+    handle = EngineHandle(config)
+
+    first = handle.get()
+    assert handle.get() is first
+
+    # Advance the SQLite file past both the companion and the recorded
+    # signature: the handle must rebuild the engine so its DuckDB connection
+    # reopens the regenerated companion.
+    newer = os.path.getmtime(sqlite_db) + 10
+    os.utime(sqlite_db, (newer, newer))
+
+    assert handle.get() is not first
