@@ -238,3 +238,63 @@ semantic_model:
             metrics=["revenue", "customer_row_count"], dry_run=True
         )
     assert exc.value.payload.code == "cross_semantic_model_query_unsupported"
+
+
+@pytest.fixture(scope="session")
+def seeded_sqlite_db(tmp_path_factory) -> str:
+    """Same orders oracle as ``seeded_db``, materialized as a SQLite file."""
+    import sqlite3
+
+    db = tmp_path_factory.mktemp("osi-sqlite") / "orders.sqlite"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE orders (
+            order_id INTEGER, customer_id INTEGER, product_id INTEGER,
+            order_date DATE, status VARCHAR, amount DOUBLE
+        );
+        INSERT INTO orders VALUES
+            (1, 1, 10, '2024-01-05', 'completed', 100),
+            (2, 1, 11, '2024-01-20', 'completed', 50),
+            (3, 2, 10, '2024-02-10', 'completed', 80),
+            (4, 2, 11, '2024-02-15', 'cancelled', 30),
+            (5, 3, 12, '2024-02-20', 'completed', 120),
+            (6, 1, 12, '2024-03-01', 'cancelled', 70);
+        CREATE TABLE customers (customer_id INTEGER, region VARCHAR, signup_date DATE);
+        INSERT INTO customers VALUES
+            (1, 'east', '2023-12-01'), (2, 'west', '2023-11-15'), (3, 'east', '2024-01-10');
+        CREATE TABLE products (product_id INTEGER, category VARCHAR, unit_cost DOUBLE);
+        INSERT INTO products VALUES (10, 'books', 20), (11, 'toys', 10), (12, 'books', 60);
+        """
+    )
+    conn.commit()
+    conn.close()
+    return str(db)
+
+
+async def test_execute_against_sqlite_datasource(model_path, seeded_sqlite_db):
+    """A `type: sqlite` datasource executes through the DuckDB companion bridge.
+
+    The engine has no SQLite dialect; the adapter rewrites the connection to a
+    DuckDB companion of ``sqlite_scan`` views, so the same oracle numbers must
+    come back as with the native DuckDB seed. Requires DuckDB to autoload its
+    sqlite extension (network on first ever use, then cached).
+    """
+    adapter = DosiAdapter(
+        DosiConfig(
+            semantic_model_path=model_path,
+            db_config={"type": "sqlite", "uri": seeded_sqlite_db},
+            datasource="bird_like_sqlite",
+        )
+    )
+    result = await adapter.query_metrics(
+        metrics=["revenue"],
+        dimensions=["orders.status"],
+        order_by=["-revenue"],
+    )
+    assert result.metadata["row_count"] == 2
+    by_status = {r["status"]: r["revenue"] for r in result.data}
+    assert by_status == {"completed": 350.0, "cancelled": 100.0}
+
+    dims = {d.name for d in await adapter.get_dimensions("revenue")}
+    assert "customers.region" in dims

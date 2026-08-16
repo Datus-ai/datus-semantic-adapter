@@ -110,19 +110,43 @@ def datus_extension_version() -> str:
 
 
 class EngineHandle:
-    """One engine per adapter instance, rebuilt when the model file changes.
+    """One engine per adapter instance, rebuilt when its file inputs change.
 
     Every access re-stats ``semantic_model_path`` (one os.stat, negligible
     next to the call it guards) so edits to the OSI YAML are picked up
-    without restarting the process.
+    without restarting the process. A SQLite-bridged datasource adds the
+    SQLite file to the same signature: a schema change there must rebuild
+    the DuckDB companion and reopen the engine's connection to it.
     """
 
     def __init__(self, config: DosiConfig):
         self._config = config
         self._lock = threading.Lock()
         self._engine: Optional[Any] = None
-        self._model_signature: Optional[tuple[int, int]] = None
+        self._model_signature: Optional[tuple] = None
         self._connections_file: Optional[str] = None
+
+    def _sqlite_source(self) -> Optional[str]:
+        """The SQLite file backing this handle's db_config, if any."""
+        db_config = self._config.db_config or {}
+        if str(db_config.get("type") or "").strip().lower() != "sqlite":
+            return None
+        source = db_config.get("uri") or db_config.get("path")
+        if not source:
+            return None
+        return os.path.abspath(os.path.expanduser(str(source)))
+
+    def _sqlite_signature(self) -> Optional[float]:
+        source = self._sqlite_source()
+        if source is None:
+            return None
+        from datus_semantic_dosi.sqlite_bridge import sqlite_source_mtime
+
+        try:
+            return sqlite_source_mtime(source)
+        except OSError:
+            # Let _write_connections_file raise the actionable error.
+            return None
 
     @property
     def profile_name(self) -> Optional[str]:
@@ -158,8 +182,11 @@ class EngineHandle:
                 f"cannot read semantic model {model_file!r}: {exc}"
             ) from exc
         with self._lock:
-            signature = (stat.st_mtime_ns, stat.st_size)
+            signature = (stat.st_mtime_ns, stat.st_size, self._sqlite_signature())
             if self._engine is None or signature != self._model_signature:
+                # A changed SQLite source must regenerate the companion, so the
+                # connections file is re-written on rebuild.
+                self._connections_file = None
                 self._engine = self._build(config, model_file)
                 self._model_signature = signature
             return self._engine
@@ -204,6 +231,22 @@ class EngineHandle:
         is marked default so connection-less execution lands on it.
         """
         entry = dict(config.db_config or {})
+        if str(entry.get("type") or "").strip().lower() == "sqlite":
+            # The engine has no SQLite dialect by contract; hand it the DuckDB
+            # companion (views over sqlite_scan) built from the SQLite file.
+            from datus_semantic_dosi.sqlite_bridge import duckdb_companion_for_sqlite
+
+            source = entry.get("uri") or entry.get("path")
+            if not source:
+                raise SemanticCoreException(
+                    "SQLite datasource config has no `uri`/`path`; cannot "
+                    "bridge it into the engine's DuckDB connector"
+                )
+            entry = {
+                "type": "duckdb",
+                "uri": duckdb_companion_for_sqlite(str(source)),
+                "default": bool(entry.get("default", True)),
+            }
         dialect = normalize_dialect(entry.get("type"))
         if dialect:
             entry["type"] = dialect
