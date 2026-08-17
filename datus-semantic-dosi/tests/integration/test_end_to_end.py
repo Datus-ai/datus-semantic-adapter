@@ -283,7 +283,9 @@ async def test_execute_against_sqlite_datasource(model_path, seeded_sqlite_db):
     adapter = DosiAdapter(
         DosiConfig(
             semantic_model_path=model_path,
-            db_config={"type": "sqlite", "uri": seeded_sqlite_db},
+            # The scheme-prefixed form is what Datus actually passes:
+            # _parse_single_file_db normalizes bare paths to sqlite:///{path}.
+            db_config={"type": "sqlite", "uri": f"sqlite:///{seeded_sqlite_db}"},
             datasource="bird_like_sqlite",
         )
     )

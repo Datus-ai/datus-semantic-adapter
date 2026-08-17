@@ -134,7 +134,9 @@ class EngineHandle:
         source = db_config.get("uri") or db_config.get("path")
         if not source:
             return None
-        return os.path.abspath(os.path.expanduser(str(source)))
+        from datus_semantic_dosi.sqlite_bridge import normalize_sqlite_source
+
+        return normalize_sqlite_source(str(source))
 
     def _sqlite_signature(self) -> Optional[float]:
         source = self._sqlite_source()

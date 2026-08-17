@@ -182,3 +182,41 @@ def test_engine_rebuilds_when_sqlite_source_changes(
     os.utime(sqlite_db, (newer, newer))
 
     assert handle.get() is not first
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        # Datus normalizes single-file URIs to sqlite:///{expanded absolute
+        # path}, which yields four slashes for an absolute path — the exact
+        # form that reached the bridge in nightly.
+        "sqlite:///{path}",
+        "sqlite://{path}",
+        "sqlite:{path}",
+        "{path}",
+    ],
+)
+def test_companion_accepts_datus_uri_forms(sqlite_db, template):
+    source = template.format(path=sqlite_db)
+    companion = duckdb_companion_for_sqlite(source)
+    conn = duckdb.connect(companion, read_only=True)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM orders").fetchone() == (2,)
+    finally:
+        conn.close()
+
+
+def test_connections_file_rewrites_scheme_prefixed_sqlite_uri(sqlite_db, tmp_path):
+    model = tmp_path / "model.yaml"
+    model.write_text("semantic_model: []\n")
+    config = DosiConfig(
+        semantic_model_path=str(model),
+        db_config={"type": "sqlite", "uri": f"sqlite:///{sqlite_db}", "name": "bird"},
+        datasource="bird_school",
+    )
+    handle = EngineHandle(config)
+
+    payload = yaml.safe_load(open(handle._write_connections_file(config)))
+    entry = payload["datasources"]["bird_school"]
+    assert entry["type"] == "duckdb"
+    assert entry["uri"] == duckdb_companion_for_sqlite(sqlite_db)

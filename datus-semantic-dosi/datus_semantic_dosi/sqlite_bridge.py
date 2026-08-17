@@ -39,6 +39,24 @@ def _quote_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def normalize_sqlite_source(source: str) -> str:
+    """Resolve a Datus SQLite datasource reference to an absolute file path.
+
+    Datus normalizes single-file datasource URIs to ``sqlite:///{expanded
+    path}`` (``agent_config._parse_single_file_db``), so the value reaching
+    the adapter usually carries a scheme: ``sqlite:////abs/path`` or
+    ``sqlite:///abs/path``. Bare paths and ``~`` are accepted too.
+    """
+    text = str(source).strip()
+    if text.lower().startswith("sqlite:"):
+        text = text[len("sqlite:") :]
+        # ``sqlite:`` URIs stack slashes (``sqlite:////abs/path``); collapse
+        # the authority/root slashes down to a single filesystem root.
+        while text.startswith("//"):
+            text = text[1:]
+    return os.path.abspath(os.path.expanduser(text))
+
+
 def sqlite_source_mtime(sqlite_path: str) -> float:
     """Latest mtime across the SQLite file and its WAL/SHM sidecars.
 
@@ -85,10 +103,10 @@ def duckdb_companion_for_sqlite(sqlite_source: str) -> str:
     Raises ``SemanticCoreException`` with an actionable message when the
     SQLite file cannot be read or the ``duckdb`` package is unavailable.
     """
-    sqlite_path = os.path.abspath(os.path.expanduser(sqlite_source))
+    sqlite_path = normalize_sqlite_source(sqlite_source)
     if not os.path.isfile(sqlite_path):
         raise SemanticCoreException(
-            f"SQLite datasource file not found: {sqlite_path!r}"
+            f"SQLite datasource file not found: {sqlite_path!r} (from {str(sqlite_source)!r})"
         )
 
     companion = _companion_path(sqlite_path)
