@@ -273,12 +273,13 @@ def seeded_sqlite_db(tmp_path_factory) -> str:
 
 
 async def test_execute_against_sqlite_datasource(model_path, seeded_sqlite_db):
-    """A `type: sqlite` datasource executes through the DuckDB companion bridge.
+    """A `type: sqlite` datasource executes through engine-managed storage.
 
-    The engine has no SQLite dialect; the adapter rewrites the connection to a
-    DuckDB companion of ``sqlite_scan`` views, so the same oracle numbers must
-    come back as with the native DuckDB seed. Requires DuckDB to autoload its
-    sqlite extension (network on first ever use, then cached).
+    SQLite remains a storage connector rather than a SQL dialect. A capable
+    engine receives the profile directly and opens the file read-only; older
+    bindings use the compatibility companion. Both compile DuckDB SQL and
+    must return the native DuckDB seed's oracle numbers. Requires DuckDB to
+    autoload its sqlite extension (network on first ever use, then cached).
     """
     adapter = DosiAdapter(
         DosiConfig(

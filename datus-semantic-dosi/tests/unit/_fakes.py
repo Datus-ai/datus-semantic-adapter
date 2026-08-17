@@ -256,6 +256,7 @@ def build_fake_module() -> types.ModuleType:
         "databricks",
         "redshift",
     ]
+    module.CONNECTION_TYPES = [*module.DIALECTS, "sqlite"]
     module.OsiError = OsiError
     module.ModelError = ModelError
     module.QueryError = QueryError

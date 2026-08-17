@@ -13,8 +13,8 @@ dependencies = [
     "datus-semantic-core>=0.2.3",
     # Runtime engine: a normal dependency so one adapter install is sufficient.
     "dosi-engine>=0.1.4",
-    # Bridges SQLite datasources into the engine's DuckDB connector
-    # (sqlite_bridge builds companion databases of sqlite_scan views).
+    # Compatibility fallback for dosi-engine releases before native SQLite
+    # storage connections; removable once that engine is the minimum version.
     "duckdb>=1.0.0",
 ]
 
