@@ -228,12 +228,25 @@ class EngineHandle:
         """Materialize `db_config` as a `datasources:` YAML the engine reads.
 
         The engine's connections vocabulary IS the agent.yml datasource
-        vocabulary, so fields pass through verbatim — only the `type` alias
-        is normalized (the engine derives the dialect from it) and the entry
-        is marked default so connection-less execution lands on it.
+        vocabulary, so fields pass through verbatim. Adapter-specific aliases
+        are normalized where the native executor uses a narrower vocabulary;
+        the `type` alias is normalized (the engine derives the dialect from it)
+        and the entry is marked default so connection-less execution lands on
+        it.
         """
         entry = dict(config.db_config or {})
-        if str(entry.get("type") or "").strip().lower() == "sqlite":
+        db_type = str(entry.get("type") or "").strip().lower()
+        if db_type == "oracle":
+            # datus-oracle calls the PDB/service target `service_name` and
+            # accepts `database` as a compatibility alias. The native Dosi
+            # executor uses the shared Connection.database field exclusively,
+            # so preserve the Datus spelling and materialize its native alias.
+            # Match datus-oracle precedence when both aliases are present:
+            # the recommended service_name wins over database.
+            service_name = entry.get("service_name")
+            if service_name:
+                entry["database"] = service_name
+        if db_type == "sqlite":
             # The engine has no SQLite dialect by contract; hand it the DuckDB
             # companion (views over sqlite_scan) built from the SQLite file.
             from datus_semantic_dosi.sqlite_bridge import duckdb_companion_for_sqlite

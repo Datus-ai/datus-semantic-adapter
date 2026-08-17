@@ -588,6 +588,40 @@ async def test_db_config_written_as_datasources_yaml(make_adapter):
     }
 
 
+@pytest.mark.parametrize(
+    ("service_name", "database", "expected_database"),
+    [
+        ("FREEPDB1", None, "FREEPDB1"),
+        (None, "DATABASEPDB", "DATABASEPDB"),
+        ("FREEPDB1", "DATABASEPDB", "FREEPDB1"),
+    ],
+)
+async def test_oracle_service_name_is_mapped_for_native_executor(
+    make_adapter, service_name, database, expected_database
+):
+    db_config = {
+        "type": "oracle",
+        "host": "db.local",
+        "port": 1521,
+    }
+    if service_name:
+        db_config["service_name"] = service_name
+    if database:
+        db_config["database"] = database
+    adapter = make_adapter(db_config=db_config, datasource="oracle_hr")
+
+    await adapter.query_metrics(metrics=["revenue"])
+
+    engine = FakeEngine.instances[-1]
+    with open(engine.connections_path, encoding="utf-8") as fh:
+        datasource = yaml.safe_load(fh)["datasources"]["oracle_hr"]
+    if service_name:
+        assert datasource["service_name"] == service_name
+    else:
+        assert "service_name" not in datasource
+    assert datasource["database"] == expected_database
+
+
 async def test_explicit_connections_path_wins(make_adapter, tmp_path):
     connections = tmp_path / "agent.yml"
     connections.write_text("datasources: {}\n")
