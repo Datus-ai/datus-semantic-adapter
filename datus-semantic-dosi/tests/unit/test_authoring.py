@@ -159,19 +159,43 @@ def test_authoring_root_falls_back_to_models_dir(tmp_path, make_adapter):
     assert adapter.read_metric_source("daily_order_count").name == "daily_order_count"
 
 
+@pytest.mark.parametrize("version", ["1.3", "1.4"])
 def test_datus_extension_authoring_spec_matches_native_version(
-    monkeypatch, fake_binding
+    monkeypatch, fake_binding, version
 ):
     from datus_semantic_dosi.authoring_spec import datus_extension_authoring_spec_text
     from datus_semantic_dosi.engine import datus_extension_version
 
-    monkeypatch.setattr(fake_binding, "DATUS_EXT", {"version": "1.3"})
-    version = datus_extension_version()
+    monkeypatch.setattr(fake_binding, "DATUS_EXT", {"version": version})
+    active_version = datus_extension_version()
     spec = datus_extension_authoring_spec_text("STARROCKS")
 
-    assert f'extension_version: "{version}"' in spec
+    assert active_version == version
+    assert f'extension_version: "{active_version}"' in spec
     assert "dialect: STARROCKS" in spec
     assert "structured_window:" in spec
+
+
+def test_datus_extension_1_4_authoring_contract(monkeypatch, fake_binding):
+    from datus_semantic_dosi.authoring_spec import datus_extension_authoring_spec_text
+
+    monkeypatch.setattr(fake_binding, "DATUS_EXT", {"version": "1.4"})
+    spec = yaml.safe_load(datus_extension_authoring_spec_text("GAUSSDB"))
+
+    assert spec["spec"]["extension_version"] == "1.4"
+    assert spec["envelope"]["keys"]["v"]["generated_value"] == "1.4"
+    assert set(spec["structured_derive"]["families"]) == {"filter", "compose"}
+    assert spec["explicit_measure"]["required"] == ["name"]
+    assert (
+        '"requires":["measure"]'
+        in spec["examples"]["explicitly_named_measure"]["custom_extensions"][0]["data"]
+    )
+    assert (
+        spec["examples"]["dataset_and_time_field"]["fields"][0]["expression"][
+            "dialects"
+        ][0]["dialect"]
+        == "GAUSSDB"
+    )
 
 
 def test_authoring_spec_reports_unrecognized_core_spec_layout(monkeypatch):
