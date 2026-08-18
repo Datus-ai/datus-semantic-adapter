@@ -109,14 +109,25 @@ def datus_extension_version() -> str:
     return str(version).strip()
 
 
+def native_sqlite_supported() -> bool:
+    """Whether the active engine accepts SQLite storage connections.
+
+    This is capability-based rather than version-based so source builds and
+    future backports work without guessing a release number. Older bindings
+    have no ``CONNECTION_TYPES`` export and retain the companion fallback.
+    """
+    connection_types = getattr(load_binding(), "CONNECTION_TYPES", ())
+    return any(str(value).strip().lower() == "sqlite" for value in connection_types)
+
+
 class EngineHandle:
     """One engine per adapter instance, rebuilt when its file inputs change.
 
     Every access re-stats ``semantic_model_path`` (one os.stat, negligible
     next to the call it guards) so edits to the OSI YAML are picked up
-    without restarting the process. A SQLite-bridged datasource adds the
-    SQLite file to the same signature: a schema change there must rebuild
-    the DuckDB companion and reopen the engine's connection to it.
+    without restarting the process. A SQLite datasource adds the source file
+    to the same signature: a schema change there must reopen the native
+    storage connection (or rebuild the companion for an older engine).
     """
 
     def __init__(self, config: DosiConfig):
@@ -186,8 +197,8 @@ class EngineHandle:
         with self._lock:
             signature = (stat.st_mtime_ns, stat.st_size, self._sqlite_signature())
             if self._engine is None or signature != self._model_signature:
-                # A changed SQLite source must regenerate the companion, so the
-                # connections file is re-written on rebuild.
+                # A changed SQLite source must reopen the engine connection;
+                # older engines also need the companion regenerated.
                 self._connections_file = None
                 self._engine = self._build(config, model_file)
                 self._model_signature = signature
@@ -247,21 +258,30 @@ class EngineHandle:
             if service_name:
                 entry["database"] = service_name
         if db_type == "sqlite":
-            # The engine has no SQLite dialect by contract; hand it the DuckDB
-            # companion (views over sqlite_scan) built from the SQLite file.
-            from datus_semantic_dosi.sqlite_bridge import duckdb_companion_for_sqlite
-
             source = entry.get("uri") or entry.get("path")
             if not source:
                 raise SemanticCoreException(
                     "SQLite datasource config has no `uri`/`path`; cannot "
-                    "bridge it into the engine's DuckDB connector"
+                    "configure the engine's SQLite storage connector"
                 )
-            entry = {
-                "type": "duckdb",
-                "uri": duckdb_companion_for_sqlite(str(source)),
-                "default": bool(entry.get("default", True)),
-            }
+            # `path` is a Datus compatibility alias; the native connections
+            # vocabulary uses `uri`. URI spelling itself passes through so the
+            # engine owns the file-path contract.
+            entry["uri"] = source
+            entry.pop("path", None)
+            if not native_sqlite_supported():
+                # Compatibility for dosi-engine releases predating native
+                # SQLite storage connections. Remove once that release is the
+                # adapter's minimum engine version.
+                from datus_semantic_dosi.sqlite_bridge import (
+                    duckdb_companion_for_sqlite,
+                )
+
+                entry = {
+                    "type": "duckdb",
+                    "uri": duckdb_companion_for_sqlite(str(source)),
+                    "default": bool(entry.get("default", True)),
+                }
         dialect = normalize_dialect(entry.get("type"))
         if dialect:
             entry["type"] = dialect

@@ -39,7 +39,7 @@ from datus_semantic_dosi.config import DosiConfig
 
 DosiConfig(
     semantic_model_path="model.yaml",  # OSI model (.yaml/.yml/.json)
-    db_config={"type": "duckdb", "uri": "orders.db"},  # or connections_path=...
+    db_config={"type": "sqlite", "uri": "orders.sqlite"},  # or duckdb / connections_path
 )
 ```
 
@@ -48,6 +48,12 @@ standalone `datasources:` YAML, consumed verbatim by the engine) wins over an
 inline `db_config` (one agent.yml datasource entry, written to a temporary
 connections file). With neither, the engine falls back to its own discovery
 order and, failing that, local DuckDB.
+
+SQLite is a storage connector rather than a SQL dialect: Dosi builds that
+advertise SQLite connection support receive `type: sqlite` unchanged and
+execute DuckDB SQL against the file in read-only mode. For compatibility,
+older installed engine builds still use the adapter's cached DuckDB companion
+bridge.
 
 ## Use with Datus-agent
 

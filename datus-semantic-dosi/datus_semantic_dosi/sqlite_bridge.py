@@ -2,14 +2,14 @@
 # Licensed under the Apache License, Version 2.0.
 # See http://www.apache.org/licenses/LICENSE-2.0 for details.
 
-"""SQLite → DuckDB companion bridge for engine execution.
+"""Legacy SQLite → DuckDB companion bridge for engine execution.
 
-The Dosi engine deliberately has no SQLite dialect ("sqlite is a Datus
-built-in but not an osi dialect; use duckdb"), but Datus projects legitimately
-run on SQLite datasources. This module builds the bridge the engine's own
-hint prescribes: a cached DuckDB companion database whose views expose every
-SQLite table through ``sqlite_scan``, so the engine executes against a plain
-DuckDB connection while the data stays in the original SQLite file.
+SQLite is not a SQL dialect in Dosi. Current engine builds accept it as a
+storage connection and execute DuckDB SQL against the file directly. This
+module remains as a compatibility fallback for older bindings: it builds a
+cached DuckDB companion database whose views expose every SQLite table through
+``sqlite_scan``, so those engines execute against a plain DuckDB connection
+while the data stays in the original SQLite file.
 
 The companion contains views only — no copied data — so it is cheap to
 rebuild and is regenerated whenever the SQLite file (or its WAL sidecar)
