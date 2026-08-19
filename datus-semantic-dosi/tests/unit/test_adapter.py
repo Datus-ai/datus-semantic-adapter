@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from _fakes import FakeEngine, QueryError
+from _fakes import METRIC_ROWS, FakeEngine, QueryError
 from datus_semantic_core.exceptions import SemanticCoreException
 
 from datus_semantic_dosi.errors import SemanticValidationException
@@ -208,6 +208,69 @@ semantic_model:
     assert metrics["revenue_range"].metadata["requires_time_axis"] is False
 
 
+async def test_list_metrics_exposes_derive_discriminators(make_adapter, monkeypatch):
+    rows = [
+        {
+            "name": "new_revenue",
+            "kind": "aggregate",
+            "datasets": ["orders"],
+            "measures": ["revenue"],
+            "derive_family": "filter",
+            "derive_base": "revenue",
+            "subset_of": "revenue",
+            "attribution": "exact",
+        },
+        {
+            "name": "net_revenue",
+            "kind": "aggregate",
+            "datasets": ["orders", "refunds"],
+            "measures": ["revenue", "total_refunds"],
+            "derive_family": "compose",
+            "derive_members": [
+                {"metric": "revenue", "coefficient": 1.0},
+                {"metric": "total_refunds", "coefficient": -1.0},
+            ],
+            "leaf_measures": [
+                {
+                    "measure": "orders_amount_sum",
+                    "dataset": "orders",
+                    "coefficient": 1.0,
+                }
+            ],
+            "conformed_dimensions": ["stores.region"],
+            "attribution": "exact",
+        },
+        {
+            "name": "revenue",
+            "kind": "aggregate",
+            "datasets": ["orders"],
+            "measures": ["revenue"],
+            "derive_family": None,
+            "derive_base": None,
+            "subset_of": None,
+        },
+    ]
+    monkeypatch.setattr(FakeEngine, "metrics", lambda self: [dict(r) for r in rows])
+
+    metrics = {metric.name: metric for metric in await make_adapter().list_metrics()}
+
+    assert metrics["new_revenue"].metadata["derive_family"] == "filter"
+    assert metrics["new_revenue"].metadata["derive_base"] == "revenue"
+    assert metrics["new_revenue"].metadata["subset_of"] == "revenue"
+    assert metrics["net_revenue"].metadata["derive_family"] == "compose"
+    # The structural columns stay off the catalog listing.
+    for heavy in (
+        "derive_members",
+        "leaf_measures",
+        "conformed_dimensions",
+        "attribution",
+    ):
+        assert heavy not in metrics["net_revenue"].metadata
+    # NULL derive columns on a plain metric add no metadata keys.
+    for key in ("derive_family", "derive_base", "subset_of"):
+        assert key not in metrics["revenue"].metadata
+
+
 async def test_get_dimensions_returns_queryable_and_flags_time(make_adapter):
     adapter = make_adapter()
     dims = {d.name: d for d in await adapter.get_dimensions("revenue")}
@@ -315,6 +378,101 @@ async def test_get_dimensions_returns_only_native_queryable_dimensions(
         "orders.status",
         "orders.order_date",
     ]
+
+
+def _rows_with_conformed(conformed) -> list[dict]:
+    rows = [dict(row) for row in METRIC_ROWS]
+    for row in rows:
+        if row["name"] == "revenue":
+            row["derive_family"] = "compose"
+            row["conformed_dimensions"] = conformed
+    return rows
+
+
+async def test_get_dimensions_skips_probes_outside_conformed_set(
+    make_adapter, monkeypatch
+):
+    rows = _rows_with_conformed(["orders.status"])
+    monkeypatch.setattr(FakeEngine, "metrics", lambda self: [dict(r) for r in rows])
+
+    dimensions = await make_adapter().get_dimensions("revenue")
+
+    assert [dimension.name for dimension in dimensions] == ["orders.status"]
+    engine = FakeEngine.instances[-1]
+    probed = {
+        item["field"]
+        for call in engine.compile_calls
+        for item in call["query"].get("group_by") or []
+    }
+    # The doomed probes never ran; the conformed member was still verified.
+    assert "customers.region" not in probed
+    assert "orders.order_date" not in probed
+    assert "orders.status" in probed
+
+
+async def test_get_dimensions_still_probes_conformed_members(make_adapter, monkeypatch):
+    rows = _rows_with_conformed(["orders.status", "customers.region"])
+    monkeypatch.setattr(FakeEngine, "metrics", lambda self: [dict(r) for r in rows])
+    original_compile = FakeEngine.compile
+
+    def compile_query(self, query, dialect=None, connection=None, pretty=False):
+        if query["group_by"] == [{"field": "customers.region"}]:
+            raise QueryError("multiple relationship paths", code="ambiguous_join_path")
+        return original_compile(
+            self, query, dialect=dialect, connection=connection, pretty=pretty
+        )
+
+    monkeypatch.setattr(FakeEngine, "compile", compile_query)
+
+    dimensions = await make_adapter().get_dimensions("revenue")
+
+    assert [dimension.name for dimension in dimensions] == ["orders.status"]
+
+
+async def test_get_dimensions_empty_conformed_set_returns_nothing(
+    make_adapter, monkeypatch
+):
+    rows = _rows_with_conformed([])
+    monkeypatch.setattr(FakeEngine, "metrics", lambda self: [dict(r) for r in rows])
+
+    dimensions = await make_adapter().get_dimensions("revenue")
+
+    assert dimensions == []
+    engine = FakeEngine.instances[-1]
+    dim_probes = [
+        call
+        for call in engine.compile_calls
+        if any(
+            item.get("field") != "metric_time"
+            for item in call["query"].get("group_by") or []
+        )
+    ]
+    assert dim_probes == []
+
+
+async def test_get_dimensions_conformed_filter_exempts_primary_time_axis(
+    make_adapter, monkeypatch
+):
+    # requires_time_axis=True + a conformed set omitting the primary time
+    # dimension's spelling: the axis row must survive the filter, because its
+    # grains were planner-verified through the reserved metric_time key.
+    # Unreachable under DATUS 1.4 (derive and window never co-occur); guards
+    # the planned window.base milestone.
+    rows = [dict(row) for row in METRIC_ROWS]
+    for row in rows:
+        if row["name"] == "running_revenue":
+            row["derive_family"] = "compose"
+            row["conformed_dimensions"] = ["orders.status"]
+    monkeypatch.setattr(FakeEngine, "metrics", lambda self: [dict(r) for r in rows])
+
+    dimensions = {
+        dimension.name: dimension
+        for dimension in await make_adapter().get_dimensions("running_revenue")
+    }
+
+    assert set(dimensions) == {"orders.status", "orders.order_date"}
+    assert dimensions["orders.order_date"].is_primary_time is True
+    assert dimensions["orders.order_date"].time_granularities
 
 
 async def test_window_dimension_discovery_includes_required_time_axis(make_adapter):
