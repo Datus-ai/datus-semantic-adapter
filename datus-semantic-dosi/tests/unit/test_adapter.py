@@ -450,6 +450,31 @@ async def test_get_dimensions_empty_conformed_set_returns_nothing(
     assert dim_probes == []
 
 
+async def test_get_dimensions_conformed_filter_exempts_primary_time_axis(
+    make_adapter, monkeypatch
+):
+    # requires_time_axis=True + a conformed set omitting the primary time
+    # dimension's spelling: the axis row must survive the filter, because its
+    # grains were planner-verified through the reserved metric_time key.
+    # Unreachable under DATUS 1.4 (derive and window never co-occur); guards
+    # the planned window.base milestone.
+    rows = [dict(row) for row in METRIC_ROWS]
+    for row in rows:
+        if row["name"] == "running_revenue":
+            row["derive_family"] = "compose"
+            row["conformed_dimensions"] = ["orders.status"]
+    monkeypatch.setattr(FakeEngine, "metrics", lambda self: [dict(r) for r in rows])
+
+    dimensions = {
+        dimension.name: dimension
+        for dimension in await make_adapter().get_dimensions("running_revenue")
+    }
+
+    assert set(dimensions) == {"orders.status", "orders.order_date"}
+    assert dimensions["orders.order_date"].is_primary_time is True
+    assert dimensions["orders.order_date"].time_granularities
+
+
 async def test_window_dimension_discovery_includes_required_time_axis(make_adapter):
     dimensions = {
         dimension.name: dimension

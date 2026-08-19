@@ -292,7 +292,19 @@ class DosiAdapter(BaseSemanticAdapter):
                 name = str(row.get("name") or "")
                 if not name:
                     continue
-                if conformed_names is not None and name not in conformed_names:
+                # Skip dimensions outside the conformed set (doomed probes,
+                # see above) — except the primary time axis: its grains were
+                # just planner-verified through the reserved metric_time key,
+                # which the conformed gate checks independently of this row's
+                # dataset.field spelling. Dropping the row would un-advertise
+                # an axis the planner accepted. Unreachable under DATUS 1.4
+                # (derive and window are mutually exclusive) but window.base
+                # is a planned D-DERIVE milestone.
+                if (
+                    conformed_names is not None
+                    and name not in conformed_names
+                    and not (requires_time_axis and name == primary_time_dimension)
+                ):
                     continue
                 if row.get("is_time"):
                     if requires_time_axis and name == primary_time_dimension:
