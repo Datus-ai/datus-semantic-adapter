@@ -139,7 +139,19 @@ class DosiAdapter(BaseSemanticAdapter):
                     "base_kind": row.get("kind"),
                     "datus_ext_version": extension_version,
                 }
-                for key in ("window_family", "window_function"):
+                # The D-DERIVE columns stop at the three selection-sized
+                # scalars: they let a caller tell a derived metric from its
+                # base without bloating the catalog. The structural columns
+                # (derive_members, leaf_measures, conformed_dimensions,
+                # attribution) stay off this listing; get_dimensions consumes
+                # conformed_dimensions natively.
+                for key in (
+                    "window_family",
+                    "window_function",
+                    "derive_family",
+                    "derive_base",
+                    "subset_of",
+                ):
                     if row.get(key):
                         metadata[key] = row[key]
                 if effective_time:
@@ -220,6 +232,14 @@ class DosiAdapter(BaseSemanticAdapter):
         primary_time_dimension = self._effective_time_dimension(
             metric_row, dataset_rows, rows
         )
+        # D-DERIVE compose: the planner validates every group-by against this
+        # exact compile-time set, so a non-member dimension can only fail with
+        # unconformed_dimension — its probe is skipped as doomed. Members are
+        # still probed (conformed is not a full-compile guarantee). An empty
+        # list is meaningful (nothing conformed); only absence (pre-derive
+        # engines, filter-family and plain metrics) disables the filter.
+        conformed = metric_row.get("conformed_dimensions")
+        conformed_names = set(conformed) if isinstance(conformed, list) else None
 
         def _queryable_rows() -> List[tuple[Dict[str, Any], List[str]]]:
             queryable: List[tuple[Dict[str, Any], List[str]]] = []
@@ -271,6 +291,8 @@ class DosiAdapter(BaseSemanticAdapter):
             for row in rows:
                 name = str(row.get("name") or "")
                 if not name:
+                    continue
+                if conformed_names is not None and name not in conformed_names:
                     continue
                 if row.get("is_time"):
                     if requires_time_axis and name == primary_time_dimension:
