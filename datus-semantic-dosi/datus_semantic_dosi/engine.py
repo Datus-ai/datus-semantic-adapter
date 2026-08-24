@@ -39,13 +39,27 @@ def _unlink_quietly(path: str) -> None:
         pass
 
 
+# Per-metric fragments, not whole models. Datus excludes this directory from
+# both of its own model walks.
+_METRIC_FRAGMENT_DIR = "metrics"
+
+
 def resolve_model_files(config: DosiConfig) -> list[str]:
     """Resolve every model file available to an adapter configuration.
 
     ``semantic_model_path`` remains an explicit single-file pin. Directory
-    configurations return every top-level OSI model in deterministic order so
-    the adapter can build a datasource-wide metric catalog over one native
-    engine per file.
+    configurations return every OSI model beneath the directory, in
+    deterministic order, so the adapter can build a datasource-wide metric
+    catalog over one native engine per file.
+
+    The walk is recursive because Datus discovers authored models that way:
+    both its authoring inventory and its YAML-to-knowledge-base sync use
+    ``rglob``. Matching only the top level would leave a model that Datus
+    accepts and indexes invisible to every query.
+
+    ``metrics`` is skipped for the same reason those two skip it: it holds
+    per-metric fragments rather than whole models, and loading a fragment as a
+    document fails.
     """
     if config.semantic_model_path:
         return [config.semantic_model_path]
@@ -54,7 +68,9 @@ def resolve_model_files(config: DosiConfig) -> list[str]:
         candidates = sorted(
             path
             for ext in ("*.yaml", "*.yml", "*.json")
-            for path in glob.glob(os.path.join(models_dir, ext))
+            for path in glob.glob(os.path.join(models_dir, "**", ext), recursive=True)
+            if _METRIC_FRAGMENT_DIR
+            not in os.path.relpath(path, models_dir).split(os.sep)
         )
         if candidates:
             return candidates
