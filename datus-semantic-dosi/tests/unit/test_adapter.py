@@ -249,6 +249,15 @@ async def test_list_metrics_exposes_derive_discriminators(make_adapter, monkeypa
             "derive_base": None,
             "subset_of": None,
         },
+        {
+            "name": "falsy_derive_scalar",
+            "kind": "aggregate",
+            "datasets": ["orders"],
+            "measures": ["revenue"],
+            "derive_family": "filter",
+            "derive_base": "revenue",
+            "subset_of": "",
+        },
     ]
     monkeypatch.setattr(FakeEngine, "metrics", lambda self: [dict(r) for r in rows])
 
@@ -258,6 +267,7 @@ async def test_list_metrics_exposes_derive_discriminators(make_adapter, monkeypa
     assert metrics["new_revenue"].metadata["derive_base"] == "revenue"
     assert metrics["new_revenue"].metadata["subset_of"] == "revenue"
     assert metrics["net_revenue"].metadata["derive_family"] == "compose"
+    assert metrics["falsy_derive_scalar"].metadata["subset_of"] == ""
     # The structural columns stay off the catalog listing.
     for heavy in (
         "derive_members",

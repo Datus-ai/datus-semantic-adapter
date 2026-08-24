@@ -145,15 +145,17 @@ class DosiAdapter(BaseSemanticAdapter):
                 # (derive_members, leaf_measures, conformed_dimensions,
                 # attribution) stay off this listing; get_dimensions consumes
                 # conformed_dimensions natively.
+                for key in ("window_family", "window_function"):
+                    if row.get(key):
+                        metadata[key] = row[key]
                 for key in (
-                    "window_family",
-                    "window_function",
                     "derive_family",
                     "derive_base",
                     "subset_of",
                 ):
-                    if row.get(key):
-                        metadata[key] = row[key]
+                    value = row.get(key)
+                    if value is not None:
+                        metadata[key] = value
                 if effective_time:
                     metadata["time_dimension"] = effective_time
                 if isinstance(window, dict):
