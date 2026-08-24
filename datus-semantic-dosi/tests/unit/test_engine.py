@@ -2,6 +2,8 @@
 # Licensed under the Apache License, Version 2.0.
 # See http://www.apache.org/licenses/LICENSE-2.0 for details.
 
+import os
+
 import pytest
 from datus_semantic_core.exceptions import SemanticCoreException
 
@@ -74,3 +76,49 @@ def test_registry_rejects_snapshot_when_every_listed_model_disappears(
 
     with pytest.raises(SemanticCoreException, match="no readable OSI model file"):
         registry.snapshot()
+
+
+def test_resolve_model_files_finds_models_in_subdirectories(tmp_path):
+    """Datus discovers authored models recursively -- its authoring inventory
+    and its YAML-to-KB sync both walk the tree -- so a model it accepts under a
+    subdirectory has to be visible here too, or the same file exists for
+    authoring and for the knowledge base while being absent from queries."""
+    from datus_semantic_dosi.engine import resolve_model_files
+
+    document = "version: '0.2.0.dev0'\nsemantic_model: []\n"
+    (tmp_path / "flat.yaml").write_text(document)
+    nested = tmp_path / "orders"
+    nested.mkdir()
+    (nested / "orders.yml").write_text(document)
+
+    resolved = resolve_model_files(DosiConfig(semantic_models_path=str(tmp_path)))
+
+    assert [os.path.relpath(path, tmp_path) for path in resolved] == [
+        "flat.yaml",
+        os.path.join("orders", "orders.yml"),
+    ]
+
+
+def test_resolve_model_files_skips_the_metric_fragment_directory(tmp_path):
+    """``metrics`` holds per-metric fragments, not whole documents. Datus omits
+    it from both of its own model walks, and loading a fragment as a document
+    fails."""
+    from datus_semantic_dosi.engine import resolve_model_files
+
+    (tmp_path / "flat.yaml").write_text("version: '0.2.0.dev0'\nsemantic_model: []\n")
+    fragments = tmp_path / "metrics"
+    fragments.mkdir()
+    (fragments / "revenue.yml").write_text("name: revenue\n")
+
+    resolved = resolve_model_files(DosiConfig(semantic_models_path=str(tmp_path)))
+
+    assert [os.path.relpath(path, tmp_path) for path in resolved] == ["flat.yaml"]
+
+
+def test_resolve_model_files_still_reports_an_empty_directory(tmp_path):
+    from datus_semantic_dosi.engine import resolve_model_files
+
+    (tmp_path / "notes").mkdir()
+
+    with pytest.raises(SemanticCoreException, match="no OSI model file"):
+        resolve_model_files(DosiConfig(semantic_models_path=str(tmp_path)))
