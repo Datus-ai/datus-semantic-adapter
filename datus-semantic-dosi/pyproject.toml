@@ -12,7 +12,10 @@ dependencies = [
     # Shared adapter contract and file authoring primitives.
     "datus-semantic-core>=0.2.3",
     # Runtime engine: a normal dependency so one adapter install is sufficient.
-    "dosi-engine>=0.1.4",
+    # Pinned exactly: the adapter tracks the engine ABI release-for-release.
+    # 0.1.7 is the first release shipping a macOS arm64 wheel (alongside
+    # manylinux x86_64/aarch64).
+    "dosi-engine==0.1.7",
     # Compatibility fallback for dosi-engine releases before native SQLite
     # storage connections; removable once that engine is the minimum version.
     "duckdb>=1.0.0",
