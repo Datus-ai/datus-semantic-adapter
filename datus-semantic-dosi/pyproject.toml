@@ -1,6 +1,6 @@
 [project]
 name = "datus-semantic-dosi"
-version = "0.1.5"
+version = "0.1.6"
 description = "Datus semantic adapter backed by the native Dosi engine"
 readme = "README.md"
 requires-python = ">=3.12"
