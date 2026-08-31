@@ -154,6 +154,7 @@ class FakeEngine:
         self.pool_size = pool_size
         self.compile_calls: List[Dict[str, Any]] = []
         self.execute_calls: List[Dict[str, Any]] = []
+        self.lineage_calls: List[Dict[str, Any]] = []
         self.fail_with: Optional[Exception] = None
         FakeEngine.instances.append(self)
 
@@ -165,6 +166,25 @@ class FakeEngine:
 
     def dimensions(self) -> List[Dict[str, Any]]:
         return [dict(r) for r in DIMENSION_ROWS]
+
+    def lineage(self, redact_sql: bool = False) -> Dict[str, Any]:
+        """Shape-faithful miniature of the dosi lineage graph contract v2."""
+        self.lineage_calls.append({"redact_sql": redact_sql})
+        source = "<redacted>" if redact_sql else "main.orders"
+        return {
+            "version": 2,
+            "model": "fake_model",
+            "mode": "datus",
+            "layers": [],
+            "nodes": [
+                {
+                    "id": "dataset:orders",
+                    "kind": "dataset",
+                    "detail": {"source": source},
+                }
+            ],
+            "edges": [],
+        }
 
     def compile(self, query, dialect=None, connection=None, pretty=False):
         self.compile_calls.append(

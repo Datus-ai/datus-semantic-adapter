@@ -1275,3 +1275,61 @@ async def test_targeted_validation_rejects_duplicate_metric_in_sibling_file(
     )
     assert unrelated.valid is True
     assert unrelated.issues == []
+
+
+# ---------------------------------------------------------------------------
+# lineage_graph passthrough
+# ---------------------------------------------------------------------------
+
+
+async def test_lineage_graph_passes_through_engine_payload(make_adapter):
+    adapter = make_adapter()
+    graphs = await adapter.lineage_graph()
+    assert len(graphs) == 1
+    assert graphs[0]["version"] == 2
+    assert FakeEngine.instances[-1].lineage_calls == [{"redact_sql": False}]
+
+
+async def test_lineage_graph_forwards_redact_sql(make_adapter):
+    adapter = make_adapter()
+    graphs = await adapter.lineage_graph(redact_sql=True)
+    assert graphs[0]["nodes"][0]["detail"]["source"] == "<redacted>"
+    assert FakeEngine.instances[-1].lineage_calls == [{"redact_sql": True}]
+
+
+async def test_lineage_graph_model_filter_selects_owning_file(tmp_path, monkeypatch):
+    from datus_semantic_dosi.adapter import DosiAdapter
+    from datus_semantic_dosi.config import DosiConfig
+
+    _write_model(tmp_path / "orders.yaml", "orders_model", ["order_count"])
+    _write_model(tmp_path / "users.yml", "users_model", ["active_users"])
+    _install_file_catalog(
+        monkeypatch,
+        {"orders": ["order_count"], "users": ["active_users"]},
+    )
+    adapter = DosiAdapter(DosiConfig(semantic_models_path=str(tmp_path)))
+
+    graphs = await adapter.lineage_graph(model="users_model")
+
+    assert len(graphs) == 1
+    called = [e for e in FakeEngine.instances if e.lineage_calls]
+    assert [Path(e.model_path).name for e in called] == ["users.yml"]
+
+
+async def test_lineage_graph_unknown_model_lists_candidates(tmp_path, monkeypatch):
+    from datus_semantic_dosi.adapter import DosiAdapter
+    from datus_semantic_dosi.config import DosiConfig
+
+    _write_model(tmp_path / "orders.yaml", "orders_model", ["order_count"])
+    _install_file_catalog(monkeypatch, {"orders": ["order_count"]})
+    adapter = DosiAdapter(DosiConfig(semantic_models_path=str(tmp_path)))
+
+    with pytest.raises(SemanticCoreException, match=r"'nope' not found.*orders_model"):
+        await adapter.lineage_graph(model="nope")
+
+
+async def test_lineage_graph_rejects_pre_lineage_binding(make_adapter, monkeypatch):
+    adapter = make_adapter()
+    monkeypatch.delattr(FakeEngine, "lineage")
+    with pytest.raises(SemanticCoreException, match=r"dosi-engine>=0\.1\.9"):
+        await adapter.lineage_graph()

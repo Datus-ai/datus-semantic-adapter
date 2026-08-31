@@ -374,6 +374,42 @@ class DosiAdapter(BaseSemanticAdapter):
             if row.get("name")
         ]
 
+    async def lineage_graph(
+        self,
+        *,
+        model: Optional[str] = None,
+        redact_sql: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Metric lineage DAGs (dosi graph contract v2), one per model file.
+
+        A pure projection of the compiled model — four lanes (physical table
+        → dataset → atomic metric → derived metric), seven edge kinds; no SQL
+        executes. ``model`` narrows the result to the file declaring that
+        semantic model; ``redact_sql`` replaces every SQL text and opaque
+        custom-extension ``data`` value in the payload with ``"<redacted>"``
+        while keeping the graph shape intact.
+        """
+        handles, _, model_to_path = await asyncio.to_thread(self._catalog)
+        if model is not None:
+            path = model_to_path.get(model)
+            if path is None:
+                known = ", ".join(sorted(model_to_path)) or "<none>"
+                raise SemanticCoreException(
+                    f"semantic model {model!r} not found (known models: {known})"
+                )
+            handles = tuple((p, h) for p, h in handles if p == path)
+        graphs: List[Dict[str, Any]] = []
+        for _, handle in handles:
+            engine = await asyncio.to_thread(handle.get)
+            lineage = getattr(engine, "lineage", None)
+            if lineage is None:
+                raise SemanticCoreException(
+                    "the installed dosi-engine binding predates the lineage "
+                    "API; upgrade to dosi-engine>=0.1.9"
+                )
+            graphs.append(await asyncio.to_thread(lineage, redact_sql=redact_sql))
+        return graphs
+
     async def query_metrics(
         self,
         metrics: List[str],
