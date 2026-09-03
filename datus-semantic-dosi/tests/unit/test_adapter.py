@@ -732,6 +732,28 @@ async def test_dry_run_returns_sql_contract(make_adapter):
     assert not engine.execute_calls
 
 
+async def test_query_metrics_preserves_positional_dry_run(make_adapter):
+    adapter = make_adapter(db_config={"type": "postgresql"})
+
+    result = await adapter.query_metrics(
+        ["revenue"],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        True,
+    )
+
+    assert result.metadata["dry_run"] is True
+    engine = FakeEngine.instances[-1]
+    assert engine.compile_calls
+    assert not engine.execute_calls
+
+
 async def test_execute_result_maps_to_query_result(make_adapter):
     adapter = make_adapter()
     result = await adapter.query_metrics(
@@ -967,6 +989,22 @@ async def test_validate_semantic_supports_targeted_single_model(
     assert missing.valid is False
     assert len(missing.issues) == 1
     assert "semantic_model_not_found" in missing.issues[0].message
+
+
+async def test_validate_semantic_preserves_positional_model_name(
+    make_adapter, model_file
+):
+    model_file.write_text(
+        "version: '0.2.0.dev0'\nsemantic_model:\n  - name: activity_management\n"
+    )
+
+    result = await make_adapter().validate_semantic(
+        "semantic_model",
+        "activity_management",
+        metric_names=[],
+    )
+
+    assert result.valid is True
 
 
 async def test_semantic_models_path_directory_single_file(tmp_path):

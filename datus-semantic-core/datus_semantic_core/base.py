@@ -95,8 +95,9 @@ class BaseSemanticAdapter(ABC):
         where: Optional[str] = None,
         limit: Optional[int] = None,
         order_by: Optional[List[str]] = None,
-        params: Optional[Dict[str, Any]] = None,
         dry_run: bool = False,
+        *,
+        params: Optional[Dict[str, Any]] = None,
     ) -> QueryResult:
         """Execute a metric query or explain the execution plan."""
         raise NotImplementedError()
@@ -105,6 +106,7 @@ class BaseSemanticAdapter(ABC):
     async def validate_semantic(
         self,
         scope: str = "all",
+        *,
         metric_names: Optional[List[str]] = None,
     ) -> ValidationResult:
         """Validate the semantic layer configuration files."""

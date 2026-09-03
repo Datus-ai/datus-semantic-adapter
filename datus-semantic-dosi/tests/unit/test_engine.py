@@ -82,9 +82,18 @@ def test_datus_authoring_contract_rejects_osi_version_mismatch(
         datus_authoring_contract()
 
 
-def test_datus_authoring_contract_digest_requires_sha256(fake_binding, monkeypatch):
+@pytest.mark.parametrize(
+    "digest",
+    [
+        "md5:nope",
+        "sha256:" + "g" * 64,
+    ],
+)
+def test_datus_authoring_contract_digest_requires_sha256(
+    digest, fake_binding, monkeypatch
+):
     monkeypatch.setattr(
-        fake_binding, "DATUS_AUTHORING_CONTRACT_DIGEST", "md5:nope", raising=False
+        fake_binding, "DATUS_AUTHORING_CONTRACT_DIGEST", digest, raising=False
     )
 
     with pytest.raises(SemanticCoreException, match="valid"):

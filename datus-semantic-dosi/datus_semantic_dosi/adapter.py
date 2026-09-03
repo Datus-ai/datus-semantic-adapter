@@ -385,8 +385,9 @@ class DosiAdapter(BaseSemanticAdapter):
         where: Optional[str] = None,
         limit: Optional[int] = None,
         order_by: Optional[List[str]] = None,
-        params: Optional[Dict[str, Any]] = None,
         dry_run: bool = False,
+        *,
+        params: Optional[Dict[str, Any]] = None,
     ) -> QueryResult:
         binding = await asyncio.to_thread(load_binding)
         handle = await asyncio.to_thread(self._handle_for_metrics, metrics)
@@ -472,6 +473,7 @@ class DosiAdapter(BaseSemanticAdapter):
         self,
         scope: str = "all",
         semantic_model_name: str = "",
+        *,
         metric_names: Optional[List[str]] = None,
     ) -> ValidationResult:
         """Validate one selected model or every model in the datasource."""

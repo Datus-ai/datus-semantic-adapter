@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import glob
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Any, Optional
@@ -152,7 +153,7 @@ def datus_authoring_contract_digest() -> str:
     digest = str(
         getattr(load_binding(), "DATUS_AUTHORING_CONTRACT_DIGEST", "") or ""
     ).strip()
-    if not digest.startswith("sha256:") or len(digest) != len("sha256:") + 64:
+    if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest):
         raise SemanticCoreException(
             "the installed dosi-engine does not expose a valid "
             "DATUS_AUTHORING_CONTRACT_DIGEST; install a current dosi-engine build"
