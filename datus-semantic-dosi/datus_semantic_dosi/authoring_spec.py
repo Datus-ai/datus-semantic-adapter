@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import re
+from hashlib import sha256
 from importlib import resources
 
 from datus_semantic_core.exceptions import SemanticCoreException
@@ -57,8 +58,8 @@ def authoring_spec_text(dialect: str) -> str:
     return rendered + _NATIVE_NOTES.format(dialect=dialect)
 
 
-def datus_extension_authoring_spec_text(dialect: str) -> str:
-    """Render the extension spec matching the active native engine version."""
+def _legacy_datus_extension_authoring_spec_text(dialect: str) -> str:
+    """Render the adapter-vendored spec used by older engine bindings."""
 
     from .engine import datus_extension_version
 
@@ -72,3 +73,36 @@ def datus_extension_authoring_spec_text(dialect: str) -> str:
             "matching dosi-engine build"
         )
     return spec_path.read_text(encoding="utf-8").replace("__OSI_DIALECT__", dialect)
+
+
+def datus_extension_authoring_spec_text(dialect: str = "<osi_dialect>") -> str:
+    """Return the active engine's dialect-neutral DATUS authoring contract.
+
+    ``dialect`` remains accepted for compatibility with callers using an older
+    adapter API. Current engines own this contract and do not interpolate SQL
+    dialect into it; the agent supplies the active dialect separately.
+    """
+
+    from .engine import load_binding
+
+    renderer = getattr(load_binding(), "render_datus_authoring_spec", None)
+    if callable(renderer):
+        rendered = renderer()
+        if not isinstance(rendered, str) or not rendered.strip():
+            raise SemanticCoreException(
+                "the installed dosi-engine returned an empty DATUS authoring contract"
+            )
+        return rendered
+    return _legacy_datus_extension_authoring_spec_text(dialect)
+
+
+def datus_extension_authoring_spec_digest() -> str:
+    """Return a cache key for the active engine's authoring contract."""
+
+    from .engine import datus_authoring_contract_digest, load_binding
+
+    if callable(getattr(load_binding(), "render_datus_authoring_spec", None)):
+        return datus_authoring_contract_digest()
+
+    legacy = _legacy_datus_extension_authoring_spec_text("__OSI_DIALECT__")
+    return f"sha256:{sha256(legacy.encode('utf-8')).hexdigest()}"

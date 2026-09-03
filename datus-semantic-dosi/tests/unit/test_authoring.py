@@ -202,6 +202,7 @@ def test_authoring_spec_reports_unrecognized_core_spec_layout(monkeypatch):
     import re
 
     from datus_semantic_core.exceptions import SemanticCoreException
+
     from datus_semantic_dosi import authoring_spec
 
     monkeypatch.setattr(authoring_spec, "_DIALECTS_BLOCK_RE", re.compile("absent"))
@@ -212,12 +213,64 @@ def test_authoring_spec_reports_unrecognized_core_spec_layout(monkeypatch):
 
 def test_missing_extension_spec_uses_semantic_error(monkeypatch, fake_binding):
     from datus_semantic_core.exceptions import SemanticCoreException
+
     from datus_semantic_dosi.authoring_spec import datus_extension_authoring_spec_text
 
     monkeypatch.setattr(fake_binding, "DATUS_EXT", {"version": "9.9"})
 
     with pytest.raises(SemanticCoreException, match=r"engine version '9\.9'"):
         datus_extension_authoring_spec_text("STARROCKS")
+
+
+def test_native_extension_spec_takes_precedence_over_vendored_versions(
+    monkeypatch, fake_binding
+):
+    from datus_semantic_dosi.authoring_spec import datus_extension_authoring_spec_text
+
+    monkeypatch.setattr(fake_binding, "DATUS_EXT", {"version": "9.9"})
+    monkeypatch.setattr(
+        fake_binding,
+        "render_datus_authoring_spec",
+        lambda: "schema_version: 1\nextension_version: '9.9'\n",
+        raising=False,
+    )
+
+    rendered = datus_extension_authoring_spec_text("STARROCKS")
+
+    assert "extension_version: '9.9'" in rendered
+    assert "STARROCKS" not in rendered
+
+
+def test_native_extension_spec_digest_is_passed_through(monkeypatch, fake_binding):
+    from datus_semantic_dosi.authoring_spec import (
+        datus_extension_authoring_spec_digest,
+    )
+
+    expected = "sha256:" + "a" * 64
+    monkeypatch.setattr(
+        fake_binding, "render_datus_authoring_spec", lambda: "spec", raising=False
+    )
+    monkeypatch.setattr(
+        fake_binding, "DATUS_AUTHORING_CONTRACT_DIGEST", expected, raising=False
+    )
+
+    assert datus_extension_authoring_spec_digest() == expected
+
+
+def test_legacy_extension_spec_digest_is_dialect_independent(monkeypatch, fake_binding):
+    from datus_semantic_dosi.authoring_spec import (
+        datus_extension_authoring_spec_digest,
+        datus_extension_authoring_spec_text,
+    )
+
+    monkeypatch.setattr(fake_binding, "DATUS_EXT", {"version": "1.4"})
+
+    digest = datus_extension_authoring_spec_digest()
+
+    assert digest.startswith("sha256:")
+    assert datus_extension_authoring_spec_text(
+        "DWS"
+    ) != datus_extension_authoring_spec_text("STARROCKS")
 
 
 def test_validation_payload_maps_yaml_serialization_error():

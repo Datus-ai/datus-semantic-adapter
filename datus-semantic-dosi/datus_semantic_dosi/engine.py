@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import copy
 import glob
 import os
 import tempfile
@@ -123,6 +124,49 @@ def datus_extension_version() -> str:
             "DATUS extensions"
         )
     return str(version).strip()
+
+
+def datus_authoring_contract() -> dict[str, Any]:
+    """Return a defensive copy of the active engine's authoring contract."""
+
+    contract = getattr(load_binding(), "DATUS_AUTHORING_CONTRACT", None)
+    if not isinstance(contract, dict):
+        raise SemanticCoreException(
+            "the installed dosi-engine does not expose "
+            "DATUS_AUTHORING_CONTRACT; install a current dosi-engine build"
+        )
+
+    contract_version = str(contract.get("extension_version") or "").strip()
+    engine_version = datus_extension_version()
+    if contract_version != engine_version:
+        raise SemanticCoreException(
+            "the installed dosi-engine exposes inconsistent DATUS authoring "
+            f"metadata: contract version {contract_version!r}, engine version "
+            f"{engine_version!r}"
+        )
+    contract_osi_version = str(contract.get("osi_spec_version") or "").strip()
+    engine_osi_version = str(getattr(load_binding(), "SPEC_VERSION", "") or "").strip()
+    if contract_osi_version != engine_osi_version:
+        raise SemanticCoreException(
+            "the installed dosi-engine exposes inconsistent OSI authoring "
+            f"metadata: contract version {contract_osi_version!r}, engine version "
+            f"{engine_osi_version!r}"
+        )
+    return copy.deepcopy(contract)
+
+
+def datus_authoring_contract_digest() -> str:
+    """Return the stable digest for the active engine's authoring contract."""
+
+    digest = str(
+        getattr(load_binding(), "DATUS_AUTHORING_CONTRACT_DIGEST", "") or ""
+    ).strip()
+    if not digest.startswith("sha256:") or len(digest) != len("sha256:") + 64:
+        raise SemanticCoreException(
+            "the installed dosi-engine does not expose a valid "
+            "DATUS_AUTHORING_CONTRACT_DIGEST; install a current dosi-engine build"
+        )
+    return digest
 
 
 def native_sqlite_supported() -> bool:

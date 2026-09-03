@@ -55,6 +55,14 @@ execute DuckDB SQL against the file in read-only mode. For compatibility,
 older installed engine builds still use the adapter's cached DuckDB companion
 bridge.
 
+## Authoring contract
+
+`datus_extension_authoring_spec_text()` reads the dialect-neutral authoring
+contract from the active `dosi-engine` Python binding. The adapter keeps its
+vendored versioned specifications only as a compatibility fallback for older
+engine builds. `datus_extension_authoring_spec_digest()` exposes a stable
+prompt-cache key, while the datasource dialect remains a separate Agent input.
+
 ## Use with Datus-agent
 
 Install the adapter into the same virtualenv as `datus-agent`:
