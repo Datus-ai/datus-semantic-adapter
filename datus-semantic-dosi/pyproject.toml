@@ -14,7 +14,8 @@ dependencies = [
     # Runtime engine: a normal dependency so one adapter install is sufficient.
     # Pinned exactly: the adapter tracks the engine ABI release-for-release.
     # 0.1.9 provides the in-memory connections, authoring-contract, parameter,
-    # and compile-evidence APIs consumed by this adapter release.
+    # compile-evidence and Engine.lineage() (metric lineage DAG) APIs consumed
+    # by this adapter release.
     "dosi-engine==0.1.9",
     # Retained for the standalone SQLite companion utility.
     "duckdb>=1.0.0",
