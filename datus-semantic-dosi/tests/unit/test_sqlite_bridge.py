@@ -7,17 +7,10 @@ import sqlite3
 
 import duckdb
 import pytest
-import yaml
 from datus_semantic_core.exceptions import SemanticCoreException
-
 from datus_semantic_dosi.config import DosiConfig
 from datus_semantic_dosi.engine import EngineHandle
 from datus_semantic_dosi.sqlite_bridge import duckdb_companion_for_sqlite
-
-
-def load_yaml(path):
-    with open(path, encoding="utf-8") as stream:
-        return yaml.safe_load(stream)
 
 
 @pytest.fixture
@@ -93,7 +86,7 @@ def test_empty_sqlite_file_raises_actionable_error(tmp_path):
         duckdb_companion_for_sqlite(str(path))
 
 
-def test_connections_file_passes_sqlite_to_native_connector(sqlite_db, tmp_path):
+def test_runtime_connections_pass_sqlite_to_native_connector(sqlite_db, tmp_path):
     model = tmp_path / "model.yaml"
     model.write_text("semantic_model: []\n")
     config = DosiConfig(
@@ -103,9 +96,7 @@ def test_connections_file_passes_sqlite_to_native_connector(sqlite_db, tmp_path)
     )
     handle = EngineHandle(config)
 
-    connections = handle._write_connections_file(config)
-    payload = load_yaml(connections)
-    entry = payload["datasources"]["bird_school"]
+    entry = handle._runtime_connections(config)["bird_school"]
 
     assert entry["type"] == "sqlite"
     assert entry["default"] is True
@@ -114,27 +105,7 @@ def test_connections_file_passes_sqlite_to_native_connector(sqlite_db, tmp_path)
     assert "path" not in entry
 
 
-def test_connections_file_falls_back_for_older_engine(
-    sqlite_db, tmp_path, fake_binding, monkeypatch
-):
-    monkeypatch.delattr(fake_binding, "CONNECTION_TYPES")
-    model = tmp_path / "model.yaml"
-    model.write_text("semantic_model: []\n")
-    config = DosiConfig(
-        semantic_model_path=str(model),
-        db_config={"type": "sqlite", "path": sqlite_db},
-        datasource="bird_school",
-    )
-    handle = EngineHandle(config)
-
-    payload = load_yaml(handle._write_connections_file(config))
-    entry = payload["datasources"]["bird_school"]
-    assert entry["type"] == "duckdb"
-    assert entry["uri"] == duckdb_companion_for_sqlite(sqlite_db)
-    assert "path" not in entry
-
-
-def test_connections_file_requires_sqlite_uri(tmp_path):
+def test_runtime_connections_require_sqlite_uri(tmp_path):
     model = tmp_path / "model.yaml"
     model.write_text("semantic_model: []\n")
     config = DosiConfig(
@@ -145,10 +116,10 @@ def test_connections_file_requires_sqlite_uri(tmp_path):
     handle = EngineHandle(config)
 
     with pytest.raises(SemanticCoreException, match="uri"):
-        handle._write_connections_file(config)
+        handle._runtime_connections(config)
 
 
-def test_connections_file_passes_other_types_through(tmp_path):
+def test_runtime_connections_pass_other_types_through(tmp_path):
     model = tmp_path / "model.yaml"
     model.write_text("semantic_model: []\n")
     config = DosiConfig(
@@ -158,9 +129,9 @@ def test_connections_file_passes_other_types_through(tmp_path):
     )
     handle = EngineHandle(config)
 
-    payload = load_yaml(handle._write_connections_file(config))
-    assert payload["datasources"]["duck"]["type"] == "duckdb"
-    assert payload["datasources"]["duck"]["uri"] == "/tmp/x.duckdb"
+    entry = handle._runtime_connections(config)["duck"]
+    assert entry["type"] == "duckdb"
+    assert entry["uri"] == "/tmp/x.duckdb"
 
 
 def test_wal_sidecar_invalidates_companion(sqlite_db):
@@ -232,7 +203,7 @@ def test_companion_accepts_datus_uri_forms(sqlite_db, template):
         conn.close()
 
 
-def test_connections_file_preserves_scheme_prefixed_sqlite_uri(sqlite_db, tmp_path):
+def test_runtime_connections_preserve_scheme_prefixed_sqlite_uri(sqlite_db, tmp_path):
     model = tmp_path / "model.yaml"
     model.write_text("semantic_model: []\n")
     config = DosiConfig(
@@ -242,7 +213,6 @@ def test_connections_file_preserves_scheme_prefixed_sqlite_uri(sqlite_db, tmp_pa
     )
     handle = EngineHandle(config)
 
-    payload = load_yaml(handle._write_connections_file(config))
-    entry = payload["datasources"]["bird_school"]
+    entry = handle._runtime_connections(config)["bird_school"]
     assert entry["type"] == "sqlite"
     assert entry["uri"] == f"sqlite:///{sqlite_db}"

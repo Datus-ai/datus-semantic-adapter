@@ -76,15 +76,21 @@ carriers:
     format: {type: string}
 
 structured_window:
+  base:
+    shape: {base: metric name}
+    required: false
+    rules:
+      - The base may reference a plain leaf metric or a filter-derived metric in the same semantic model.
+      - A window metric is invalid as a base; a compose base is not implemented.
+      - With base, the metric expression is the closest basic-mode approximation and may diverge from Datus-mode window semantics.
   base_metric:
     expression: one plain single aggregate over dataset fields
     examples: [SUM(orders.amount), COUNT(*), AVG(reviews.score)]
     rules:
-      - A ratio or arithmetic expression metric cannot carry a window.
+      - Without base, a ratio or arithmetic expression metric cannot carry a window.
       - Time-ordered windows resolve time from metric time_dimension, then dataset primary time.
       - A covariance or correlation second input names another plain aggregate metric.
       - Choose one sugar form or exactly one general family among offset, frame, rank, and value.
-      - The window.base form is reserved for a later D-DERIVE milestone and must not be authored in version 1.4.
 
   enums:
     granularity: [day, week, month, quarter, year]
@@ -176,11 +182,13 @@ structured_derive:
   purpose: Describe a metric derived from other metrics in the same semantic model.
   expression_contract:
     - Keep a legal OSI expression as a basic-mode fallback.
-    - The fallback expression must be semantically equivalent to the derive expansion; native compilation rejects a mismatch.
+    - Filter and compose over leaf/filter members are flatten-tier forms; their fallback expression must be semantically equivalent to the derive expansion.
+    - Window.base and compose with window members are stage-tier forms; their fallback expression is the closest basic-mode approximation and may diverge after DATUS extensions are ignored.
     - Treat the fallback expression as tool-maintained output rather than editing it independently.
   common_rules:
     - Version 1.4 supports only filter and compose.
-    - References are single-hop; every referenced metric must be plain, non-derived, window-free, and from the same semantic model.
+    - Filter base references are single-hop and must name a plain non-derived metric in the same semantic model.
+    - Compose members may be leaves, filters, or windows in the same semantic model, but never another compose.
     - Cycles among metric references are invalid.
     - The reserved reagg family must not be authored until its later milestone is implemented.
   families:
@@ -204,6 +212,7 @@ structured_derive:
       rules:
         - Every identifier in expr resolves strictly to a metric name; it never falls back to a field name.
         - The expression must reference at least one metric and cannot contain aggregate functions.
+        - A compose containing window members runs over window outputs and requires one shared time axis.
         - fill applies to each aligned member value after branch alignment and before arithmetic; without it, null propagates.
         - Query dimensions must be conformed across every member branch.
 
@@ -259,6 +268,20 @@ examples:
     custom_extensions:
       - vendor_name: DATUS
         data: '{"v":"1.4","derive":{"type":"compose","expr":"revenue - total_refunds","fill":0}}'
+
+  window_over_filter_metric:
+    name: new_user_revenue_cumulative
+    expression: {dialects: [{dialect: __OSI_DIALECT__, expression: "SUM(CASE WHEN orders.is_new THEN orders.amount END)"}]}
+    custom_extensions:
+      - vendor_name: DATUS
+        data: '{"v":"1.4","window":{"type":"cumulative","function":"sum","base":"new_user_revenue"}}'
+
+  composed_window_metric:
+    name: cumulative_average_order_value
+    expression: {dialects: [{dialect: __OSI_DIALECT__, expression: "SUM(orders.amount) / COUNT(orders.order_id)"}]}
+    custom_extensions:
+      - vendor_name: DATUS
+        data: '{"v":"1.4","derive":{"type":"compose","expr":"revenue_cumulative / order_count_cumulative"}}'
 
   explicitly_named_measure:
     name: new_product_revenue

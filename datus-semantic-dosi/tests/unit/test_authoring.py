@@ -186,6 +186,15 @@ def test_datus_extension_1_4_authoring_contract(monkeypatch, fake_binding):
     assert spec["envelope"]["keys"]["v"]["generated_value"] == "1.4"
     assert set(spec["structured_derive"]["families"]) == {"filter", "compose"}
     assert spec["explicit_measure"]["required"] == ["name"]
+    assert spec["structured_window"]["base"]["required"] is False
+    assert any(
+        "leaves, filters, or windows" in rule
+        for rule in spec["structured_derive"]["common_rules"]
+    )
+    assert (
+        '"base":"new_user_revenue"'
+        in spec["examples"]["window_over_filter_metric"]["custom_extensions"][0]["data"]
+    )
     assert (
         '"requires":["measure"]'
         in spec["examples"]["explicitly_named_measure"]["custom_extensions"][0]["data"]

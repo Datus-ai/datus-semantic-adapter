@@ -16,8 +16,8 @@ dependencies = [
     # 0.1.7 is the first release shipping a macOS arm64 wheel (alongside
     # manylinux x86_64/aarch64).
     "dosi-engine==0.1.7",
-    # Compatibility fallback for dosi-engine releases before native SQLite
-    # storage connections; removable once that engine is the minimum version.
+    # Retained for the standalone SQLite companion utility and compatibility
+    # with released dosi-engine builds until the coordinated version bump.
     "duckdb>=1.0.0",
 ]
 

@@ -3,7 +3,7 @@
 # See http://www.apache.org/licenses/LICENSE-2.0 for details.
 
 from abc import ABC, abstractmethod
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .authoring import AuthoringNotSupportedError, MetricMutationResult, MetricSource
 from .models import (
@@ -95,13 +95,18 @@ class BaseSemanticAdapter(ABC):
         where: Optional[str] = None,
         limit: Optional[int] = None,
         order_by: Optional[List[str]] = None,
+        params: Optional[Dict[str, Any]] = None,
         dry_run: bool = False,
     ) -> QueryResult:
         """Execute a metric query or explain the execution plan."""
         raise NotImplementedError()
 
     @abstractmethod
-    async def validate_semantic(self, scope: str = "all") -> ValidationResult:
+    async def validate_semantic(
+        self,
+        scope: str = "all",
+        metric_names: Optional[List[str]] = None,
+    ) -> ValidationResult:
         """Validate the semantic layer configuration files."""
         raise NotImplementedError()
 

@@ -17,6 +17,7 @@ metric identity remains name-based.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -139,6 +140,10 @@ class DosiAdapter(BaseSemanticAdapter):
                     "base_kind": row.get("kind"),
                     "datus_ext_version": extension_version,
                 }
+                for key in ("params", "param_schema"):
+                    value = row.get(key)
+                    if value:
+                        metadata[key] = value
                 # The D-DERIVE columns stop at the three selection-sized
                 # scalars: they let a caller tell a derived metric from its
                 # base without bloating the catalog. The structural columns
@@ -380,6 +385,7 @@ class DosiAdapter(BaseSemanticAdapter):
         where: Optional[str] = None,
         limit: Optional[int] = None,
         order_by: Optional[List[str]] = None,
+        params: Optional[Dict[str, Any]] = None,
         dry_run: bool = False,
     ) -> QueryResult:
         binding = await asyncio.to_thread(load_binding)
@@ -401,6 +407,7 @@ class DosiAdapter(BaseSemanticAdapter):
             where=where,
             limit=limit,
             order_by=order_by,
+            params=params,
         )
         connection = handle.profile_name
         try:
@@ -422,6 +429,11 @@ class DosiAdapter(BaseSemanticAdapter):
                         "dialect": compiled["dialect"],
                         "dry_run": True,
                         "explain": True,
+                        **(
+                            {"outputs": compiled["outputs"]}
+                            if compiled.get("outputs") is not None
+                            else {}
+                        ),
                     },
                 )
             result = await asyncio.to_thread(
@@ -437,6 +449,11 @@ class DosiAdapter(BaseSemanticAdapter):
                     "sql": result["sql"],
                     "dialect": result["dialect"],
                     "row_count": result["row_count"],
+                    **(
+                        {"outputs": result["outputs"]}
+                        if result.get("outputs") is not None
+                        else {}
+                    ),
                 },
             )
         except Exception as exc:  # noqa: BLE001 - mapped to typed errors below
@@ -455,6 +472,7 @@ class DosiAdapter(BaseSemanticAdapter):
         self,
         scope: str = "all",
         semantic_model_name: str = "",
+        metric_names: Optional[List[str]] = None,
     ) -> ValidationResult:
         """Validate one selected model or every model in the datasource."""
         if scope not in {"all", "semantic_model"}:
@@ -531,10 +549,13 @@ class DosiAdapter(BaseSemanticAdapter):
                 ],
             )
 
-        def _validate(model_path: str) -> dict[str, Any]:
+        def _validate(model_path: str) -> tuple[dict[str, Any], str]:
             with open(model_path, encoding="utf-8") as fh:
                 model_text = fh.read()
-            payload = dosi_validation_text_payload(model_text)
+            payload = dosi_validation_text_payload(
+                model_text,
+                metric_names=metric_names,
+            )
             if payload.get("valid") and semantic_model_name:
                 document = yaml.safe_load(model_text) or {}
                 names = (
@@ -560,14 +581,23 @@ class DosiAdapter(BaseSemanticAdapter):
                             ),
                         }
                     )
-            return payload
+            artifact_digest = (
+                "sha256:" + hashlib.sha256(model_text.encode("utf-8")).hexdigest()
+            )
+            return payload, artifact_digest
 
         issues: List[ValidationIssue] = []
         valid = True
         qualify = len(model_paths) > 1
+        contract_digests: set[str] = set()
+        compiled_metrics: List[Dict[str, Any]] = []
+        compiled_metric_digests: Dict[str, str] = {}
+        artifact_digests: Dict[str, str] = {}
         for model_path in model_paths:
             try:
-                payload = await asyncio.to_thread(_validate, model_path)
+                payload, artifact_digest = await asyncio.to_thread(
+                    _validate, model_path
+                )
             except OSError as exc:
                 valid = False
                 issues.append(
@@ -578,7 +608,16 @@ class DosiAdapter(BaseSemanticAdapter):
                 )
                 continue
 
+            artifact_digests[str(Path(model_path).resolve())] = artifact_digest
             valid = valid and bool(payload.get("valid"))
+            contract_digest = str(payload.get("contract_digest") or "").strip()
+            if contract_digest:
+                contract_digests.add(contract_digest)
+            if payload.get("valid"):
+                compiled_metrics.extend(payload.get("compiled_metrics") or [])
+                compiled_metric_digests.update(
+                    payload.get("compiled_metric_digests") or {}
+                )
             prefix = (
                 f"[semantic_model_file={Path(model_path).name}] " if qualify else ""
             )
@@ -620,7 +659,50 @@ class DosiAdapter(BaseSemanticAdapter):
         )
         issues.extend(identity_issues)
         valid = valid and not identity_issues
-        return ValidationResult(valid=valid, issues=issues)
+        if len(contract_digests) > 1:
+            valid = False
+            issues.append(
+                ValidationIssue(
+                    severity="error",
+                    message=(
+                        "engine_contract_mismatch: validation returned multiple "
+                        "authoring contract digests"
+                    ),
+                )
+            )
+
+        requested_metrics = list(dict.fromkeys(metric_names or []))
+        compiled_names = {
+            str(metric.get("name") or "")
+            for metric in compiled_metrics
+            if isinstance(metric, dict)
+        }
+        missing_metrics = [
+            name for name in requested_metrics if name not in compiled_names
+        ]
+        if missing_metrics:
+            valid = False
+            issues.append(
+                ValidationIssue(
+                    severity="error",
+                    message=(
+                        "compiled_metric_not_found: validation did not compile "
+                        f"requested metrics: {', '.join(missing_metrics)}"
+                    ),
+                    location="metrics",
+                )
+            )
+
+        metadata: Dict[str, Any] = {}
+        if valid:
+            metadata = {
+                "contract_digest": next(iter(contract_digests), ""),
+                "compiled_metrics": compiled_metrics,
+                "compiled_metric_digests": compiled_metric_digests,
+                "artifact_sha256": artifact_digests,
+                "metric_names": requested_metrics,
+            }
+        return ValidationResult(valid=valid, issues=issues, metadata=metadata)
 
     # ==================== Authoring Interface ====================
     # Backend/editor surface; not an agent/LLM tool. Dosi authors the same
@@ -1063,6 +1145,7 @@ class DosiAdapter(BaseSemanticAdapter):
         where: Optional[str],
         limit: Optional[int],
         order_by: Optional[List[str]],
+        params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Assemble the engine's MetricQuery dict. Pure: no engine I/O."""
         del metric_rows  # Kept for backward-compatible direct-call tests/callers.
@@ -1113,6 +1196,8 @@ class DosiAdapter(BaseSemanticAdapter):
             )
 
         query: Dict[str, Any] = {"metrics": list(metrics), "group_by": group_by}
+        if params:
+            query["params"] = dict(params)
         if where:
             query["where_sql"] = where
         if time_start or time_end:

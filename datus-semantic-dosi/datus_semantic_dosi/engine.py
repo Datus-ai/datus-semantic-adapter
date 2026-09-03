@@ -2,16 +2,14 @@
 # Licensed under the Apache License, Version 2.0.
 # See http://www.apache.org/licenses/LICENSE-2.0 for details.
 
-"""Engine binding lifecycle: lazy import, connections wiring, file reload."""
+"""Engine binding lifecycle: lazy import, in-memory connections, file reload."""
 
 from __future__ import annotations
 
 import copy
 import glob
 import os
-import tempfile
 import threading
-import weakref
 from pathlib import Path
 from typing import Any, Optional
 
@@ -31,13 +29,6 @@ _INSTALL_HINT = (
     "for local development install the native checkout with "
     "`uv pip install -e <osi-engine>/crates/dosi-py`"
 )
-
-
-def _unlink_quietly(path: str) -> None:
-    try:
-        os.unlink(path)
-    except OSError:
-        pass
 
 
 # Per-metric fragments, not whole models. Datus excludes this directory from
@@ -169,17 +160,6 @@ def datus_authoring_contract_digest() -> str:
     return digest
 
 
-def native_sqlite_supported() -> bool:
-    """Whether the active engine accepts SQLite storage connections.
-
-    This is capability-based rather than version-based so source builds and
-    future backports work without guessing a release number. Older bindings
-    have no ``CONNECTION_TYPES`` export and retain the companion fallback.
-    """
-    connection_types = getattr(load_binding(), "CONNECTION_TYPES", ())
-    return any(str(value).strip().lower() == "sqlite" for value in connection_types)
-
-
 class EngineHandle:
     """One engine per adapter instance, rebuilt when its file inputs change.
 
@@ -195,7 +175,6 @@ class EngineHandle:
         self._lock = threading.Lock()
         self._engine: Optional[Any] = None
         self._model_signature: Optional[tuple] = None
-        self._connections_file: Optional[str] = None
 
     def _sqlite_source(self) -> Optional[str]:
         """The SQLite file backing this handle's db_config, if any."""
@@ -218,25 +197,19 @@ class EngineHandle:
         try:
             return sqlite_source_mtime(source)
         except OSError:
-            # Let _write_connections_file raise the actionable error.
+            # Let _runtime_connections raise the actionable error.
             return None
 
     @property
     def profile_name(self) -> Optional[str]:
         """The connection profile to execute on, when one is configured.
 
-        Precedence mirrors _resolve_connections: an explicit connections_path
-        is authoritative over db_config, so it is checked first — otherwise
-        the name here (from db_config) would not exist in the file actually
-        used.
+        ``connection`` is an explicit profile selection. Otherwise the inline
+        datasource name is used, falling back to ``default``.
         """
         config = self._config
         if config.connection:
             return config.connection
-        if config.connections_path:
-            # A bare `datasource` name is looked up in the connections file;
-            # None lets the engine pick the file's default profile.
-            return config.datasource
         if config.db_config:
             return config.datasource or "default"
         return None
@@ -257,9 +230,7 @@ class EngineHandle:
         with self._lock:
             signature = (stat.st_mtime_ns, stat.st_size, self._sqlite_signature())
             if self._engine is None or signature != self._model_signature:
-                # A changed SQLite source must reopen the engine connection;
-                # older engines also need the companion regenerated.
-                self._connections_file = None
+                # A changed SQLite source must reopen the engine connection.
                 self._engine = self._build(config, model_file)
                 self._model_signature = signature
             return self._engine
@@ -278,7 +249,7 @@ class EngineHandle:
         try:
             return binding.Engine(
                 model_path=model_file,
-                connections_path=self._resolve_connections(config),
+                connections=self._runtime_connections(config),
                 pool_size=config.pool_size,
             )
         except binding.OsiError as exc:
@@ -286,17 +257,10 @@ class EngineHandle:
                 f"Dosi failed to load model {model_file!r}: {exc}"
             ) from exc
 
-    def _resolve_connections(self, config: DosiConfig) -> Optional[str]:
-        if config.connections_path:
-            return config.connections_path
-        if not config.db_config:
-            return None
-        if self._connections_file is None:
-            self._connections_file = self._write_connections_file(config)
-        return self._connections_file
-
-    def _write_connections_file(self, config: DosiConfig) -> str:
-        """Materialize `db_config` as a `datasources:` YAML the engine reads.
+    def _runtime_connections(
+        self, config: DosiConfig
+    ) -> Optional[dict[str, dict[str, Any]]]:
+        """Normalize ``db_config`` into the engine's in-memory mapping.
 
         The engine's connections vocabulary IS the agent.yml datasource
         vocabulary, so fields pass through verbatim. Adapter-specific aliases
@@ -305,6 +269,8 @@ class EngineHandle:
         and the entry is marked default so connection-less execution lands on
         it.
         """
+        if not config.db_config:
+            return None
         entry = dict(config.db_config or {})
         db_type = str(entry.get("type") or "").strip().lower()
         if db_type == "oracle":
@@ -329,36 +295,11 @@ class EngineHandle:
             # engine owns the file-path contract.
             entry["uri"] = source
             entry.pop("path", None)
-            if not native_sqlite_supported():
-                # Compatibility for dosi-engine releases predating native
-                # SQLite storage connections. Remove once that release is the
-                # adapter's minimum engine version.
-                from datus_semantic_dosi.sqlite_bridge import (
-                    duckdb_companion_for_sqlite,
-                )
-
-                entry = {
-                    "type": "duckdb",
-                    "uri": duckdb_companion_for_sqlite(str(source)),
-                    "default": bool(entry.get("default", True)),
-                }
         dialect = normalize_dialect(entry.get("type"))
         if dialect:
             entry["type"] = dialect
         entry.setdefault("default", True)
-        payload = {"datasources": {self.profile_name or "default": entry}}
-        handle = tempfile.NamedTemporaryFile(
-            mode="w",
-            suffix=".yaml",
-            prefix="dosi-connections-",
-            delete=False,
-        )
-        with handle:
-            yaml.safe_dump(payload, handle, default_flow_style=False)
-        # Tie the temp file's lifetime to this handle so it doesn't leak for
-        # the process lifetime (relevant when adapters are created per-request).
-        weakref.finalize(self, _unlink_quietly, handle.name)
-        return handle.name
+        return {self.profile_name or "default": entry}
 
 
 class EngineRegistry:

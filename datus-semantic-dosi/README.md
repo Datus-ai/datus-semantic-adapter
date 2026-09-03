@@ -39,21 +39,17 @@ from datus_semantic_dosi.config import DosiConfig
 
 DosiConfig(
     semantic_model_path="model.yaml",  # OSI model (.yaml/.yml/.json)
-    db_config={"type": "sqlite", "uri": "orders.sqlite"},  # or duckdb / connections_path
+    db_config={"type": "sqlite", "uri": "orders.sqlite"},  # or duckdb
 )
 ```
 
-Connection precedence: an explicit `connections_path` (agent.yml or a
-standalone `datasources:` YAML, consumed verbatim by the engine) wins over an
-inline `db_config` (one agent.yml datasource entry, written to a temporary
-connections file). With neither, the engine falls back to its own discovery
-order and, failing that, local DuckDB.
+The adapter passes `db_config` to the Python engine entirely in memory. The
+Rust CLI and server retain connections-file discovery; the embedded Python
+surface does not read or write connection files.
 
-SQLite is a storage connector rather than a SQL dialect: Dosi builds that
-advertise SQLite connection support receive `type: sqlite` unchanged and
-execute DuckDB SQL against the file in read-only mode. For compatibility,
-older installed engine builds still use the adapter's cached DuckDB companion
-bridge.
+SQLite is a storage connector rather than a SQL dialect: Dosi receives
+`type: sqlite` unchanged and executes DuckDB SQL against the file in read-only
+mode.
 
 ## Authoring contract
 
@@ -91,7 +87,6 @@ agent:
       dosi:                 # key MUST be the service_type
         # both optional; either overrides the auto-derived directory:
         # semantic_model_path: /abs/path/to/model.yaml   # explicit single file
-        # connections_path: /abs/path/to/agent.yml       # reuse a connections file
 ```
 
 Place OSI model files under `<project>/subject/semantic_models/mydb/` (Datus's
