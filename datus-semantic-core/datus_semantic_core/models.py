@@ -128,6 +128,10 @@ class ValidationResult(BaseModel):
     issues: List[ValidationIssue] = Field(
         default_factory=list, description="List of validation issues"
     )
+    metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Adapter-private validation evidence and diagnostics",
+    )
 
 
 class SemanticValidationError(BaseModel):

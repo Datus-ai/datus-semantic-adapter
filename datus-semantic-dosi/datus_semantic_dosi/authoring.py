@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 import yaml
 from datus_semantic_core.exceptions import SemanticCoreException
@@ -39,7 +39,10 @@ def _invalid_document_payload(code: str, message: str) -> dict[str, Any]:
     }
 
 
-def dosi_validation_text_payload(model_text: str) -> dict[str, Any]:
+def dosi_validation_text_payload(
+    model_text: str,
+    metric_names: Optional[list[str]] = None,
+) -> dict[str, Any]:
     """Validate source text and always return structured document issues."""
 
     try:
@@ -59,7 +62,9 @@ def dosi_validation_text_payload(model_text: str) -> dict[str, Any]:
             legacy_window_error(findings),
         )
 
-    return dict(load_binding().validate(model_text))
+    if metric_names is None:
+        return dict(load_binding().validate(model_text))
+    return dict(load_binding().validate(model_text, metric_names=metric_names))
 
 
 def dosi_validation_payload(document: dict[str, Any]) -> dict[str, Any]:

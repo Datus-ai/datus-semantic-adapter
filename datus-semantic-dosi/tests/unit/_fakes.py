@@ -145,12 +145,12 @@ class FakeEngine:
         self,
         model_path: Optional[str] = None,
         model_text: Optional[str] = None,
-        connections_path: Optional[str] = None,
+        connections: Optional[Dict[str, Dict[str, Any]]] = None,
         pool_size: int = 8,
     ) -> None:
         self.model_path = model_path
         self.model_text = model_text
-        self.connections_path = connections_path
+        self.connections = connections
         self.pool_size = pool_size
         self.compile_calls: List[Dict[str, Any]] = []
         self.execute_calls: List[Dict[str, Any]] = []
@@ -195,7 +195,14 @@ class FakeEngine:
                 code="unknown_dimension",
                 hint="add metric_time:<grain> to group_by",
             )
-        return {"dialect": dialect or "duckdb", "sql": "SELECT 1 AS compiled"}
+        return {
+            "dialect": dialect or "duckdb",
+            "sql": "SELECT 1 AS compiled",
+            "outputs": [
+                {"name": metric, "type": "metric"}
+                for metric in query.get("metrics") or []
+            ],
+        }
 
     def explain(self, query) -> str:
         return "ScanDataset orders"
@@ -214,11 +221,30 @@ class FakeEngine:
         )
         if self.fail_with is not None:
             raise self.fail_with
-        return dict(EXECUTE_RESULT)
+        return {
+            **EXECUTE_RESULT,
+            "outputs": [
+                {"name": metric, "type": "metric"}
+                for metric in query.get("metrics") or []
+            ],
+        }
 
 
-def default_validate(model_text: str) -> Dict[str, Any]:
-    return {"valid": True, "issues": [], "compile_errors": []}
+def default_validate(
+    model_text: str, metric_names: Optional[List[str]] = None
+) -> Dict[str, Any]:
+    names = metric_names or [row["name"] for row in METRIC_ROWS]
+    compiled_metrics = [dict(row) for row in METRIC_ROWS if row["name"] in names]
+    return {
+        "valid": True,
+        "issues": [],
+        "compile_errors": [],
+        "compiled_metrics": compiled_metrics,
+        "compiled_metric_digests": {
+            row["name"]: f"sha256:{row['name']}" for row in compiled_metrics
+        },
+        "contract_digest": "sha256:" + "a" * 64,
+    }
 
 
 def build_fake_module() -> types.ModuleType:

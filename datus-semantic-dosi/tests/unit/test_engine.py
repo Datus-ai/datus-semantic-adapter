@@ -11,6 +11,8 @@ from datus_semantic_dosi.config import DosiConfig
 from datus_semantic_dosi.engine import (
     EngineHandle,
     EngineRegistry,
+    datus_authoring_contract,
+    datus_authoring_contract_digest,
     datus_extension_version,
 )
 
@@ -30,6 +32,72 @@ def test_datus_extension_version_requires_capability_metadata(
 
     with pytest.raises(SemanticCoreException, match=r"DATUS_EXT\.version"):
         datus_extension_version()
+
+
+def test_datus_authoring_contract_is_copied_and_version_checked(
+    fake_binding, monkeypatch
+):
+    source = {
+        "extension_version": "7.3",
+        "osi_spec_version": fake_binding.SPEC_VERSION,
+        "capabilities": {"window": {}},
+    }
+    monkeypatch.setattr(fake_binding, "DATUS_EXT", {"version": "7.3"})
+    monkeypatch.setattr(fake_binding, "DATUS_AUTHORING_CONTRACT", source, raising=False)
+
+    contract = datus_authoring_contract()
+    contract["capabilities"]["window"]["changed"] = True
+
+    assert source == {
+        "extension_version": "7.3",
+        "osi_spec_version": fake_binding.SPEC_VERSION,
+        "capabilities": {"window": {}},
+    }
+
+
+def test_datus_authoring_contract_rejects_version_mismatch(fake_binding, monkeypatch):
+    monkeypatch.setattr(fake_binding, "DATUS_EXT", {"version": "1.5"})
+    monkeypatch.setattr(
+        fake_binding,
+        "DATUS_AUTHORING_CONTRACT",
+        {"extension_version": "1.4", "osi_spec_version": fake_binding.SPEC_VERSION},
+        raising=False,
+    )
+
+    with pytest.raises(SemanticCoreException, match="inconsistent"):
+        datus_authoring_contract()
+
+
+def test_datus_authoring_contract_rejects_osi_version_mismatch(
+    fake_binding, monkeypatch
+):
+    monkeypatch.setattr(
+        fake_binding,
+        "DATUS_AUTHORING_CONTRACT",
+        {"extension_version": "1.2", "osi_spec_version": "future"},
+        raising=False,
+    )
+
+    with pytest.raises(SemanticCoreException, match="inconsistent OSI"):
+        datus_authoring_contract()
+
+
+@pytest.mark.parametrize(
+    "digest",
+    [
+        "md5:nope",
+        "sha256:" + "g" * 64,
+    ],
+)
+def test_datus_authoring_contract_digest_requires_sha256(
+    digest, fake_binding, monkeypatch
+):
+    monkeypatch.setattr(
+        fake_binding, "DATUS_AUTHORING_CONTRACT_DIGEST", digest, raising=False
+    )
+
+    with pytest.raises(SemanticCoreException, match="valid"):
+        datus_authoring_contract_digest()
 
 
 def test_non_object_model_root_is_mapped_by_native_loader(

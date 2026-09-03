@@ -14,11 +14,9 @@ from datus_semantic_core.config import SemanticAdapterConfig
 class DosiConfig(SemanticAdapterConfig):
     """Adapter configuration.
 
-    Connection precedence: an explicit ``connections_path`` (agent.yml or a
-    standalone ``datasources:`` YAML, consumed verbatim by the engine) wins
-    over an inline ``db_config`` (one agent.yml datasource entry, written to
-    a temporary connections file). With neither, the engine falls back to
-    its own discovery order and, failing that, local DuckDB.
+    The adapter passes ``db_config`` to the Python engine as an in-memory
+    datasource mapping. Connections-file discovery belongs to the Rust CLI and
+    server surfaces, not this embedded adapter path.
     """
 
     service_type: str = "dosi"
@@ -29,8 +27,6 @@ class DosiConfig(SemanticAdapterConfig):
     # <datasource>). Used when semantic_model_path is unset: discovery and
     # queries route across every top-level YAML/YML/JSON model in the directory.
     semantic_models_path: Optional[str] = None
-    # Connections file passed to the engine verbatim (agent.yml vocabulary).
-    connections_path: Optional[str] = None
     # Named connection profile; falls back to the base-class `datasource`.
     connection: Optional[str] = None
     # Inline datasource entry (agent.yml vocabulary: type/host/port/...).

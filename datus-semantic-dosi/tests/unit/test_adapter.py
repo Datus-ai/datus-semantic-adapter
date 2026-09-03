@@ -14,10 +14,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
-import yaml
 from _fakes import METRIC_ROWS, FakeEngine, QueryError
 from datus_semantic_core.exceptions import SemanticCoreException
-
 from datus_semantic_dosi.errors import SemanticValidationException
 
 
@@ -100,6 +98,28 @@ async def test_list_metrics_maps_rows_and_slices(make_adapter):
         "revenue",
         "running_revenue",
     ]
+
+
+async def test_list_metrics_exposes_parameter_schema(make_adapter, monkeypatch):
+    rows = [
+        {
+            **METRIC_ROWS[0],
+            "params": {"status": "paid"},
+            "param_schema": {
+                "status": {
+                    "type": "string",
+                    "required": False,
+                    "default": "paid",
+                }
+            },
+        }
+    ]
+    monkeypatch.setattr(FakeEngine, "metrics", lambda self: rows)
+
+    (metric,) = await make_adapter().list_metrics()
+
+    assert metric.metadata["params"] == {"status": "paid"}
+    assert metric.metadata["param_schema"]["status"]["type"] == "string"
 
 
 async def test_list_metrics_exposes_native_window_metadata(make_adapter, model_file):
@@ -703,11 +723,34 @@ async def test_dry_run_returns_sql_contract(make_adapter):
     assert result.data == [{"sql": "SELECT 1 AS compiled"}]
     assert result.metadata["dry_run"] is True
     assert result.metadata["sql"] == "SELECT 1 AS compiled"
+    assert result.metadata["outputs"] == [{"name": "revenue", "type": "metric"}]
     engine = FakeEngine.instances[-1]
     (call,) = engine.compile_calls
     # postgresql (Datus vocabulary) normalized to postgres (engine dialect)
     assert call["dialect"] == "postgres"
     assert call["pretty"] is True
+    assert not engine.execute_calls
+
+
+async def test_query_metrics_preserves_positional_dry_run(make_adapter):
+    adapter = make_adapter(db_config={"type": "postgresql"})
+
+    result = await adapter.query_metrics(
+        ["revenue"],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        True,
+    )
+
+    assert result.metadata["dry_run"] is True
+    engine = FakeEngine.instances[-1]
+    assert engine.compile_calls
     assert not engine.execute_calls
 
 
@@ -720,6 +763,23 @@ async def test_execute_result_maps_to_query_result(make_adapter):
     assert result.data == [{"status": "paid", "order_count": 2}]
     assert result.metadata["row_count"] == 1
     assert "sql" in result.metadata
+    assert result.metadata["outputs"] == [{"name": "order_count", "type": "metric"}]
+
+
+async def test_query_metrics_passes_scalar_and_list_params(make_adapter):
+    adapter = make_adapter()
+
+    await adapter.query_metrics(
+        metrics=["revenue"],
+        params={"region": ["APAC", "EMEA"], "threshold": 100},
+        dry_run=True,
+    )
+
+    query = FakeEngine.instances[-1].compile_calls[0]["query"]
+    assert query["params"] == {
+        "region": ["APAC", "EMEA"],
+        "threshold": 100,
+    }
 
 
 async def test_engine_rebuilds_on_model_mtime_change(make_adapter, model_file):
@@ -734,7 +794,7 @@ async def test_engine_rebuilds_on_model_mtime_change(make_adapter, model_file):
     assert len(FakeEngine.instances) == 2
 
 
-async def test_db_config_written_as_datasources_yaml(make_adapter):
+async def test_db_config_passed_as_runtime_datasources(make_adapter):
     adapter = make_adapter(
         db_config={"type": "postgresql", "host": "db.local", "port": 5432},
         datasource="warehouse",
@@ -742,16 +802,12 @@ async def test_db_config_written_as_datasources_yaml(make_adapter):
     await adapter.query_metrics(metrics=["revenue"])
     engine = FakeEngine.instances[-1]
     assert engine.execute_calls[0]["connection"] == "warehouse"
-    with open(engine.connections_path, encoding="utf-8") as fh:
-        payload = yaml.safe_load(fh)
-    assert payload == {
-        "datasources": {
-            "warehouse": {
-                "type": "postgres",
-                "host": "db.local",
-                "port": 5432,
-                "default": True,
-            }
+    assert engine.connections == {
+        "warehouse": {
+            "type": "postgres",
+            "host": "db.local",
+            "port": 5432,
+            "default": True,
         }
     }
 
@@ -781,8 +837,7 @@ async def test_oracle_service_name_is_mapped_for_native_executor(
     await adapter.query_metrics(metrics=["revenue"])
 
     engine = FakeEngine.instances[-1]
-    with open(engine.connections_path, encoding="utf-8") as fh:
-        datasource = yaml.safe_load(fh)["datasources"]["oracle_hr"]
+    datasource = engine.connections["oracle_hr"]
     if service_name:
         assert datasource["service_name"] == service_name
     else:
@@ -790,17 +845,14 @@ async def test_oracle_service_name_is_mapped_for_native_executor(
     assert datasource["database"] == expected_database
 
 
-async def test_explicit_connections_path_wins(make_adapter, tmp_path):
-    connections = tmp_path / "agent.yml"
-    connections.write_text("datasources: {}\n")
+async def test_explicit_connection_selects_inline_profile(make_adapter):
     adapter = make_adapter(
-        connections_path=str(connections),
         db_config={"type": "mysql"},
         connection="prod",
     )
     await adapter.query_metrics(metrics=["revenue"])
     engine = FakeEngine.instances[-1]
-    assert engine.connections_path == str(connections)
+    assert engine.connections == {"prod": {"type": "mysql", "default": True}}
     assert engine.execute_calls[0]["connection"] == "prod"
 
 
@@ -854,6 +906,29 @@ async def test_validate_semantic_ok(make_adapter):
     result = await adapter.validate_semantic()
     assert result.valid is True
     assert result.issues == []
+
+
+async def test_validate_semantic_returns_same_compile_evidence(
+    make_adapter, model_file
+):
+    adapter = make_adapter()
+
+    result = await adapter.validate_semantic(metric_names=["revenue"])
+
+    assert result.valid is True
+    assert [row["name"] for row in result.metadata["compiled_metrics"]] == ["revenue"]
+    assert result.metadata["compiled_metric_digests"] == {"revenue": "sha256:revenue"}
+    assert result.metadata["contract_digest"] == "sha256:" + "a" * 64
+    assert result.metadata["metric_names"] == ["revenue"]
+    assert list(result.metadata["artifact_sha256"]) == [str(model_file.resolve())]
+
+
+async def test_validate_semantic_rejects_missing_requested_metric(make_adapter):
+    result = await make_adapter().validate_semantic(metric_names=["missing"])
+
+    assert result.valid is False
+    assert result.metadata == {}
+    assert "compiled_metric_not_found" in result.issues[-1].message
 
 
 async def test_validate_semantic_returns_structured_invalid_yaml_issue(
@@ -914,6 +989,22 @@ async def test_validate_semantic_supports_targeted_single_model(
     assert missing.valid is False
     assert len(missing.issues) == 1
     assert "semantic_model_not_found" in missing.issues[0].message
+
+
+async def test_validate_semantic_preserves_positional_model_name(
+    make_adapter, model_file
+):
+    model_file.write_text(
+        "version: '0.2.0.dev0'\nsemantic_model:\n  - name: activity_management\n"
+    )
+
+    result = await make_adapter().validate_semantic(
+        "semantic_model",
+        "activity_management",
+        metric_names=[],
+    )
+
+    assert result.valid is True
 
 
 async def test_semantic_models_path_directory_single_file(tmp_path):
