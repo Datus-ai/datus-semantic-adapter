@@ -10,7 +10,7 @@ authors = [
 dependencies = [
     "pydantic>=2.0.0",
     "datus-metricflow[snowflake]>=0.2.8",
-    "datus-semantic-core>=0.2.3",
+    "datus-semantic-core>=0.2.4",
 ]
 
 [tool.uv.sources]
