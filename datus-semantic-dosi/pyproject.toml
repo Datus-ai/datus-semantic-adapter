@@ -12,11 +12,12 @@ dependencies = [
     # Shared adapter contract and file authoring primitives.
     "datus-semantic-core>=0.2.4",
     # Runtime engine: a normal dependency so one adapter install is sufficient.
-    # Pinned exactly: the adapter tracks the engine ABI release-for-release.
-    # 0.1.9 provides the in-memory connections, authoring-contract, parameter,
-    # compile-evidence and Engine.lineage() (metric lineage DAG) APIs consumed
-    # by this adapter release.
-    "dosi-engine==0.1.9",
+    # Pinned exactly so each published adapter release selects the engine build
+    # validated against its runtime API and authoring contract.
+    # 0.1.10 adds the D-FORMAT 1.6 contract, OSI datatype support, nested-compose
+    # execution and non-ASCII parameter handling used through the existing
+    # adapter surface; its detail-select APIs are intentionally not exposed.
+    "dosi-engine==0.1.10",
     # Retained for the standalone SQLite companion utility.
     "duckdb>=1.0.0",
 ]

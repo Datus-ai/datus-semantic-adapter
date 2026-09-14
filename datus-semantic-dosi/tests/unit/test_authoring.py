@@ -159,6 +159,35 @@ def test_authoring_root_falls_back_to_models_dir(tmp_path, make_adapter):
     assert adapter.read_metric_source("daily_order_count").name == "daily_order_count"
 
 
+def test_osi_core_authoring_spec_tracks_official_datatypes():
+    from datus_semantic_dosi.authoring_spec import authoring_spec_text
+
+    documents = [
+        document
+        for document in yaml.safe_load_all(authoring_spec_text("STARROCKS"))
+        if document
+    ]
+    enums = next(document for document in documents if "datatypes" in document)
+    fields = next(document for document in documents if "fields" in document)
+    metrics = next(document for document in documents if "metrics" in document)
+
+    assert enums["dialects"] == ["STARROCKS"]
+    assert enums["datatypes"] == [
+        "String",
+        "Integer",
+        "Decimal",
+        "Float",
+        "Boolean",
+        "Date",
+        "Time",
+        "DateTime",
+        "DateTimeTz",
+        "Opaque",
+    ]
+    assert fields["fields"][0]["datatype"] == "string"
+    assert metrics["metrics"][0]["datatype"] == "string"
+
+
 @pytest.mark.parametrize("version", ["1.3", "1.4"])
 def test_datus_extension_authoring_spec_matches_native_version(
     monkeypatch, fake_binding, version
