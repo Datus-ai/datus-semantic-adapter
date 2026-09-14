@@ -38,6 +38,35 @@ async def test_query_error_becomes_validation_exception(make_adapter):
     assert "customers.region" in payload.message
 
 
+@pytest.mark.parametrize(
+    "code",
+    ["unknown_relationship", "invalid_relationship_path"],
+)
+async def test_relationship_path_error_becomes_validation_exception(make_adapter, code):
+    adapter = make_adapter()
+    await adapter.list_metrics()
+    error = QueryError(
+        "invalid relationship-prefixed dimension",
+        code=code,
+        candidates=["orders_to_customers"],
+        hint="use a relationship that leaves the current dataset",
+    )
+    FakeEngine.instances[-1].fail_with = error
+
+    with pytest.raises(SemanticValidationException) as exc:
+        await adapter.query_metrics(
+            metrics=["revenue"], dimensions=["bad_relationship.region"]
+        )
+
+    payload = exc.value.payload
+    assert payload.code == code
+    assert payload.metrics == ["revenue"]
+    assert payload.unsupported_dimensions == []
+    assert payload.suggested_retry is None
+    assert "orders_to_customers" in payload.message
+    assert "use a relationship that leaves the current dataset" in payload.message
+
+
 async def test_execute_error_becomes_core_exception(make_adapter):
     adapter = make_adapter()
     await adapter.list_metrics()

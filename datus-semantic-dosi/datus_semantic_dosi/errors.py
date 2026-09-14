@@ -28,6 +28,8 @@ _RETRYABLE_QUERY_CODES = {
     "aggregate_in_where",
     "no_join_path",
     "ambiguous_join_path",
+    "unknown_relationship",
+    "invalid_relationship_path",
     "fan_out_risk",
     "time_range_needs_dimension",
     "no_primary_time_dimension",
