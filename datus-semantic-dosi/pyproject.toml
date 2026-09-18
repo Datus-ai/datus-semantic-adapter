@@ -14,10 +14,10 @@ dependencies = [
     # Runtime engine: a normal dependency so one adapter install is sufficient.
     # Pinned exactly so each published adapter release selects the engine build
     # validated against its runtime API and authoring contract.
-    # 0.1.10 adds the D-FORMAT 1.6 contract, OSI datatype support, nested-compose
-    # execution and non-ASCII parameter handling used through the existing
-    # adapter surface; its detail-select APIs are intentionally not exposed.
-    "dosi-engine==0.1.10",
+    # 0.1.11 adds the D-DIM and D-CONFORM contracts, metric-aware dimension
+    # metadata, and ontology-backed lineage while preserving the existing
+    # adapter runtime surface.
+    "dosi-engine==0.1.11",
     # Retained for the standalone SQLite companion utility.
     "duckdb>=1.0.0",
 ]
