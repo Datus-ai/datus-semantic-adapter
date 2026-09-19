@@ -7,7 +7,13 @@
 from __future__ import annotations
 
 import pytest
-from _fakes import ExecuteError, FakeEngine, ModelError, QueryError
+from _fakes import (
+    ExecuteError,
+    FakeEngine,
+    ModelError,
+    NotComputableError,
+    QueryError,
+)
 from datus_semantic_core.exceptions import SemanticCoreException
 from datus_semantic_dosi.errors import (
     SemanticValidationException,
@@ -78,6 +84,32 @@ async def test_execute_error_becomes_core_exception(make_adapter):
     message = str(exc.value)
     assert "ExecuteError" in message and "connection refused" in message
     assert "is the warehouse up?" in message
+
+
+@pytest.mark.parametrize("code", ["dimensions_required", "param_out_of_domain"])
+def test_attribution_query_error_becomes_validation_exception(fake_binding, code):
+    error = QueryError("revise the attribution request", code=code)
+
+    with pytest.raises(SemanticValidationException) as exc_info:
+        raise_mapped(error, fake_binding, requested_metrics=["revenue"])
+
+    assert exc_info.value.payload.code == code
+    assert exc_info.value.payload.metrics == ["revenue"]
+
+
+def test_not_computable_error_becomes_validation_exception(fake_binding):
+    error = NotComputableError(
+        "the ratio denominator is nonpositive in the baseline window",
+        code="denominator_nonpositive",
+    )
+
+    with pytest.raises(SemanticValidationException) as exc_info:
+        raise_mapped(error, fake_binding, requested_metrics=["avg_order_value"])
+
+    payload = exc_info.value.payload
+    assert payload.code == "denominator_nonpositive"
+    assert payload.metrics == ["avg_order_value"]
+    assert "baseline window" in payload.message
 
 
 def test_ambiguous_dimension_multiple_candidates_no_retry():

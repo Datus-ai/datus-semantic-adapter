@@ -27,6 +27,8 @@ from datus_semantic_core.authoring import MetricMutationResult, MetricSource
 from datus_semantic_core.base import BaseSemanticAdapter
 from datus_semantic_core.exceptions import SemanticCoreException
 from datus_semantic_core.models import (
+    AttributionRequest,
+    AttributionResult,
     DimensionInfo,
     MetricDefinition,
     QueryResult,
@@ -502,6 +504,54 @@ class DosiAdapter(BaseSemanticAdapter):
                 requested_metrics=metrics,
                 requested_dimensions=dimensions,
                 requested_time_granularity=time_granularity,
+            )
+            raise  # unreachable; raise_mapped always raises
+
+    async def attribute(self, request: AttributionRequest) -> AttributionResult:
+        """Delegate attribution to the native engine that owns the metric."""
+        dimensions = list(
+            dict.fromkeys(
+                dimension.strip()
+                for dimension in request.dimensions
+                if dimension.strip()
+            )
+        )
+        if not dimensions:
+            raise SemanticValidationException(
+                SemanticValidationError(
+                    code="dimensions_required",
+                    metrics=[request.metric],
+                    message=(
+                        "Attribution requires at least one candidate dimension; "
+                        "call get_dimensions and retry with the selected dimensions."
+                    ),
+                )
+            )
+        binding = await asyncio.to_thread(load_binding)
+        handle = await asyncio.to_thread(self._handle_for_metric, request.metric)
+        engine = await asyncio.to_thread(handle.get)
+        native_request = request.model_dump(
+            mode="python",
+            exclude_none=True,
+            exclude={"path"},
+        )
+        native_request["dimensions"] = dimensions
+        try:
+            result = await asyncio.to_thread(
+                engine.attribute,
+                native_request,
+                connection=handle.profile_name,
+                timeout_secs=float(self.config.timeout_seconds),
+            )
+            return AttributionResult.model_validate(
+                {**result, "implementation": "dosi"}
+            )
+        except Exception as exc:  # noqa: BLE001 - mapped to typed errors below
+            raise_mapped(
+                exc,
+                binding,
+                requested_metrics=[request.metric],
+                requested_dimensions=dimensions,
             )
             raise  # unreachable; raise_mapped always raises
 

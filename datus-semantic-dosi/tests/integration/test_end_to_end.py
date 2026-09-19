@@ -9,6 +9,7 @@ from __future__ import annotations
 import shutil
 
 import pytest
+from datus_semantic_core.models import AttributionRequest, AttributionWindow
 from datus_semantic_dosi.adapter import DosiAdapter
 from datus_semantic_dosi.config import DosiConfig
 from datus_semantic_dosi.errors import SemanticValidationException
@@ -78,6 +79,81 @@ async def test_execute_returns_rows(model_path, seeded_db):
     # Oracle from the seed: completed=350, cancelled=100.
     assert by_status["completed"] == 350
     assert by_status["cancelled"] == 100
+
+
+async def test_attribute_uses_native_term_wise_strategy(model_path, seeded_db):
+    adapter = _adapter(model_path, seeded_db)
+
+    result = await adapter.attribute(
+        AttributionRequest(
+            metric="revenue",
+            dimensions=["orders.status"],
+            baseline=AttributionWindow(start="2024-01-01", end="2024-02-01"),
+            current=AttributionWindow(start="2024-02-01", end="2024-03-01"),
+        )
+    )
+
+    assert result.implementation == "dosi"
+    assert result.strategy == "term_wise"
+    assert result.total_change is not None
+    assert result.total_change.delta == 80
+    assert (
+        sum(item.delta for item in result.per_dimension["orders.status"].values) == 80
+    )
+
+
+async def test_attribute_uses_native_mix_shift_strategy(model_path, seeded_db):
+    adapter = _adapter(model_path, seeded_db)
+
+    result = await adapter.attribute(
+        AttributionRequest(
+            metric="avg_order_value",
+            dimensions=["orders.status"],
+            baseline=AttributionWindow(start="2024-01-01", end="2024-02-01"),
+            current=AttributionWindow(start="2024-02-01", end="2024-03-01"),
+        )
+    )
+
+    assert result.strategy == "mix_shift"
+    assert result.factor_totals is not None
+    assert result.factor_totals.residual == pytest.approx(0)
+
+
+async def test_attribute_uses_native_factor_shapley_strategy(model_path, seeded_db):
+    adapter = _adapter(model_path, seeded_db)
+
+    result = await adapter.attribute(
+        AttributionRequest(
+            metric="revenue_scale",
+            dimensions=["orders.status"],
+            baseline=AttributionWindow(start="2024-01-01", end="2024-02-01"),
+            current=AttributionWindow(start="2024-02-01", end="2024-03-01"),
+        )
+    )
+
+    assert result.strategy == "factor_shapley"
+    assert result.factors is not None
+    assert len(result.factors) == 3
+    assert sum(factor.effect for factor in result.factors) == pytest.approx(
+        result.total_change.delta
+    )
+
+
+async def test_attribute_returns_native_unsupported_result(model_path, seeded_db):
+    adapter = _adapter(model_path, seeded_db)
+
+    result = await adapter.attribute(
+        AttributionRequest(
+            metric="unique_customers",
+            dimensions=["orders.status"],
+            baseline=AttributionWindow(start="2024-01-01", end="2024-02-01"),
+            current=AttributionWindow(start="2024-02-01", end="2024-03-01"),
+        )
+    )
+
+    assert result.strategy == "unsupported"
+    assert result.unsupported_reason is not None
+    assert result.unsupported_reason.code == "non_sum_tier_measure"
 
 
 async def test_execute_with_time_grain(model_path, seeded_db):

@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 from _fakes import METRIC_ROWS, FakeEngine, QueryError
 from datus_semantic_core.exceptions import SemanticCoreException
+from datus_semantic_core.models import AttributionRequest, AttributionWindow
 from datus_semantic_dosi.errors import SemanticValidationException
 
 
@@ -73,6 +74,56 @@ def _install_file_catalog(monkeypatch, metrics_by_stem: dict[str, list[str]]) ->
     monkeypatch.setattr(FakeEngine, "metrics", metrics)
     monkeypatch.setattr(FakeEngine, "datasets", datasets)
     monkeypatch.setattr(FakeEngine, "dimensions", dimensions)
+
+
+async def test_attribute_delegates_to_native_engine(make_adapter):
+    adapter = make_adapter(connection="warehouse", timeout_seconds=42)
+    request = AttributionRequest(
+        metric="revenue",
+        dimensions=[" orders.status ", "orders.status"],
+        baseline=AttributionWindow(start="2026-01-01", end="2026-01-08"),
+        current=AttributionWindow(start="2026-01-08", end="2026-01-15"),
+        where_sql="orders.status IS NOT NULL",
+        top_n_dimensions=2,
+        top_n_values=5,
+        path=["Finance"],
+    )
+
+    result = await adapter.attribute(request)
+
+    assert result.implementation == "dosi"
+    assert result.strategy == "term_wise"
+    assert result.total_change is not None
+    assert result.total_change.delta == 50
+    call = FakeEngine.instances[-1].attribute_calls[-1]
+    assert call["connection"] == "warehouse"
+    assert call["timeout_secs"] == 42.0
+    assert call["request"]["metric"] == "revenue"
+    assert call["request"]["dimensions"] == ["orders.status"]
+    assert call["request"]["baseline"] == {
+        "start": "2026-01-01",
+        "end": "2026-01-08",
+    }
+    assert "path" not in call["request"]
+
+
+async def test_attribute_rejects_missing_dimensions_with_structured_error(
+    make_adapter,
+):
+    adapter = make_adapter()
+    request = AttributionRequest(
+        metric="revenue",
+        dimensions=["", "  "],
+        baseline=AttributionWindow(start="2026-01-01", end="2026-01-08"),
+        current=AttributionWindow(start="2026-01-08", end="2026-01-15"),
+    )
+
+    with pytest.raises(SemanticValidationException) as exc_info:
+        await adapter.attribute(request)
+
+    assert exc_info.value.payload.code == "dimensions_required"
+    assert exc_info.value.payload.metrics == ["revenue"]
+    assert "get_dimensions" in exc_info.value.payload.message
 
 
 async def test_list_metrics_maps_rows_and_slices(make_adapter):

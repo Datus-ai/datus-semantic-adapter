@@ -133,6 +133,12 @@ semantic_model:
           dialects:
             - dialect: ANSI_SQL
               expression: SUM(orders.amount) - SUM(products.unit_cost)
+      - name: revenue_scale
+        description: Composite revenue scale over order volume and customer-weighted volume
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: SUM(orders.amount) * COUNT(orders.order_id) / SUM(orders.customer_id)
       - name: running_revenue
         description: Running revenue by query time bucket
         expression:
