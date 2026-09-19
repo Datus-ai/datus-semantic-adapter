@@ -14,6 +14,7 @@ integration run. Row shapes match the ``dosi::list`` machine contract.
 
 from __future__ import annotations
 
+import copy
 import types
 from typing import Any, ClassVar, Dict, List, Optional
 
@@ -82,6 +83,72 @@ EXECUTE_RESULT = {
     "row_count": 1,
 }
 
+ATTRIBUTE_RESULT = {
+    "metric": "revenue",
+    "strategy": "term_wise",
+    "total_change": {
+        "baseline_value": 100.0,
+        "current_value": 150.0,
+        "delta": 50.0,
+        "pct_change": 50.0,
+    },
+    "dimension_ranking": [
+        {
+            "dimension": "orders.status",
+            "score": 1.0,
+            "non_additive": False,
+            "truncated": False,
+        }
+    ],
+    "selected_dimensions": ["orders.status"],
+    "top_dimension_values": [
+        {
+            "dimension": "orders.status",
+            "value": "paid",
+            "baseline_value": 100.0,
+            "current_value": 150.0,
+            "delta": 50.0,
+            "contribution_pct": 100.0,
+            "segment_kind": "normal",
+            "drill_down": {"where_sql": "orders.status = 'paid'"},
+        }
+    ],
+    "per_dimension": {
+        "orders.status": {
+            "values": [
+                {
+                    "dimension": "orders.status",
+                    "value": "paid",
+                    "baseline_value": 100.0,
+                    "current_value": 150.0,
+                    "delta": 50.0,
+                    "contribution_pct": 100.0,
+                    "segment_kind": "normal",
+                    "drill_down": {"where_sql": "orders.status = 'paid'"},
+                }
+            ],
+            "score": 1.0,
+            "non_additive": False,
+            "truncated": False,
+            "reconciliation": {
+                "baseline_residual": 0.0,
+                "current_residual": 0.0,
+                "passed": True,
+            },
+        }
+    },
+    "comparison_metadata": {
+        "baseline": {"start": "2026-01-01", "end": "2026-01-08"},
+        "current": {"start": "2026-01-08", "end": "2026-01-15"},
+        "baseline_days": 7,
+        "current_days": 7,
+        "equal_length_windows": True,
+        "time_dimension": "orders.order_date",
+        "queries_executed": 2,
+    },
+    "warnings": [],
+}
+
 
 class OsiError(Exception):
     def __init__(
@@ -127,6 +194,10 @@ class QueryError(OsiError):
     pass
 
 
+class NotComputableError(OsiError):
+    pass
+
+
 class ExecuteError(OsiError):
     pass
 
@@ -154,6 +225,7 @@ class FakeEngine:
         self.pool_size = pool_size
         self.compile_calls: List[Dict[str, Any]] = []
         self.execute_calls: List[Dict[str, Any]] = []
+        self.attribute_calls: List[Dict[str, Any]] = []
         self.lineage_calls: List[Dict[str, Any]] = []
         self.fail_with: Optional[Exception] = None
         FakeEngine.instances.append(self)
@@ -249,6 +321,27 @@ class FakeEngine:
             ],
         }
 
+    def attribute(
+        self,
+        request,
+        dialect=None,
+        connection=None,
+        timeout_secs=None,
+        db_path=None,
+    ):
+        self.attribute_calls.append(
+            {
+                "request": request,
+                "dialect": dialect,
+                "connection": connection,
+                "timeout_secs": timeout_secs,
+                "db_path": db_path,
+            }
+        )
+        if self.fail_with is not None:
+            raise self.fail_with
+        return copy.deepcopy(ATTRIBUTE_RESULT)
+
 
 def default_validate(
     model_text: str, metric_names: Optional[List[str]] = None
@@ -306,5 +399,6 @@ def build_fake_module() -> types.ModuleType:
     module.OsiError = OsiError
     module.ModelError = ModelError
     module.QueryError = QueryError
+    module.NotComputableError = NotComputableError
     module.ExecuteError = ExecuteError
     return module

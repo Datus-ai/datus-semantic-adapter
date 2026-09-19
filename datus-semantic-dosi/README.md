@@ -99,6 +99,9 @@ through this adapter.
 
 ## Behavior notes
 
+- **`attribute`** delegates to the native engine and returns the shared
+  attribution contract with `term_wise`, `mix_shift`, `factor_shapley`, or a
+  structured `unsupported` result.
 - **`validate_semantic`** delegates to the engine's own validator (structure,
   references, metric compilation) — no separate ossie integration.
 - **`get_dimensions(metric)`** checks model dimensions against that metric with

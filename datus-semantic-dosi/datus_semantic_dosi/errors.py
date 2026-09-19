@@ -37,7 +37,9 @@ _RETRYABLE_QUERY_CODES = {
     "grain_too_fine",
     "window_reset_too_fine",
     "dialect_unsupported_window_function",
+    "dimensions_required",
     "not_implemented",
+    "param_out_of_domain",
     "empty_query",
 }
 
@@ -143,6 +145,15 @@ def raise_mapped(exc: Any, binding: Any, **request_context: Any) -> None:
     if isinstance(exc, binding.QueryError) and exc.code in _RETRYABLE_QUERY_CODES:
         raise SemanticValidationException(
             validation_error_from_query_error(exc, **request_context)
+        ) from exc
+    not_computable_error = getattr(binding, "NotComputableError", None)
+    if not_computable_error is not None and isinstance(exc, not_computable_error):
+        raise SemanticValidationException(
+            SemanticValidationError(
+                code=str(getattr(exc, "code", "") or "not_computable"),
+                metrics=list(request_context.get("requested_metrics") or []),
+                message=_message_with_context(exc),
+            )
         ) from exc
     if isinstance(exc, binding.OsiError):
         raise SemanticCoreException(
