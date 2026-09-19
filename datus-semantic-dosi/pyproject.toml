@@ -10,7 +10,7 @@ dependencies = [
     "pydantic>=2.0.0",
     "pyyaml>=6.0",
     # Shared adapter contract and file authoring primitives.
-    "datus-semantic-core>=0.2.4",
+    "datus-semantic-core>=0.2.5",
     # Runtime engine: a normal dependency so one adapter install is sufficient.
     # Pinned exactly so each published adapter release selects the engine build
     # validated against its runtime API and authoring contract.
