@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from datus_semantic_core.base import BaseSemanticAdapter
+from datus_semantic_core.models import AttributionRequest, AttributionWindow
 
 
 class _ConcreteAdapter(BaseSemanticAdapter):
@@ -71,6 +72,18 @@ class TestDefaultMethods:
     def test_list_semantic_models_returns_empty(self):
         adapter = _ConcreteAdapter(config=MagicMock(), service_type="test")
         assert adapter.list_semantic_models() == []
+
+    @pytest.mark.asyncio
+    async def test_attribute_returns_none(self):
+        adapter = _ConcreteAdapter(config=MagicMock(), service_type="test")
+        request = AttributionRequest(
+            metric="revenue",
+            dimensions=["region"],
+            baseline=AttributionWindow(start="2026-01-01", end="2026-01-08"),
+            current=AttributionWindow(start="2026-01-08", end="2026-01-15"),
+        )
+
+        assert await adapter.attribute(request) is None
 
 
 class TestAbstractEnforcement:

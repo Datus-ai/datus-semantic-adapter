@@ -109,6 +109,188 @@ class QueryResult(BaseModel):
     )
 
 
+AttributionStrategy = Literal[
+    "term_wise",
+    "mix_shift",
+    "factor_shapley",
+    "unsupported",
+]
+
+
+class AttributionWindow(BaseModel):
+    """One half-open ``[start, end)`` attribution window."""
+
+    start: str
+    end: str
+
+
+class AttributionRequest(BaseModel):
+    """Backend-neutral request for explaining a metric change."""
+
+    metric: str
+    dimensions: List[str] = Field(default_factory=list)
+    baseline: AttributionWindow
+    current: AttributionWindow
+    where_sql: Optional[str] = None
+    time_dimension: Optional[str] = None
+    max_values_per_dimension: Optional[int] = Field(None, ge=0)
+    top_n_dimensions: Optional[int] = Field(None, ge=0)
+    top_n_values: Optional[int] = Field(None, ge=0)
+    params: Dict[str, Any] = Field(default_factory=dict)
+    path: Optional[List[str]] = Field(
+        None,
+        description="Adapter routing context; native engines may ignore it",
+    )
+
+
+class AttributionUnsupportedInfo(BaseModel):
+    """Stable reason why a metric cannot be attributed."""
+
+    code: str
+    message: str
+    measure: Optional[str] = None
+    agg: Optional[str] = None
+    distinct: Optional[bool] = None
+    side: Optional[str] = None
+    count: Optional[int] = None
+    max: Optional[int] = None
+
+
+class AttributionTotalChange(BaseModel):
+    baseline_value: float
+    current_value: float
+    delta: float
+    pct_change: Optional[float] = None
+
+
+class AttributionDrillDown(BaseModel):
+    where_sql: str
+
+
+class AttributionValueContribution(BaseModel):
+    dimension: str
+    value: str
+    baseline_value: float
+    current_value: float
+    delta: float
+    contribution_pct: Optional[float] = None
+    segment_kind: Literal["normal", "entered", "exited", "fallback"] = "normal"
+    mix_effect: Optional[float] = None
+    rate_effect: Optional[float] = None
+    baseline_rate: Optional[float] = None
+    current_rate: Optional[float] = None
+    baseline_share: Optional[float] = None
+    current_share: Optional[float] = None
+    drill_down: AttributionDrillDown
+
+
+class AttributionReconciliation(BaseModel):
+    baseline_residual: float
+    current_residual: float
+    passed: bool
+
+
+class AttributionDimensionDetail(BaseModel):
+    values: List[AttributionValueContribution] = Field(default_factory=list)
+    score: Optional[float] = None
+    non_additive: bool = False
+    truncated: bool = False
+    reconciliation: Optional[AttributionReconciliation] = None
+
+
+class AttributionDimensionScore(BaseModel):
+    dimension: str
+    score: Optional[float] = None
+    non_additive: bool = False
+    truncated: bool = False
+
+
+class AttributionFactorTotals(BaseModel):
+    mix_effect: float
+    rate_effect: float
+    entered: float
+    exited: float
+    fallback: float
+    residual: float
+
+
+class AttributionFactorEffect(BaseModel):
+    factor: str
+    baseline_value: float
+    current_value: float
+    delta: float
+    effect: float
+
+
+class AttributionMemberDelta(BaseModel):
+    metric: str
+    coefficient: float
+    baseline_value: float
+    current_value: float
+    delta: float
+    weighted_delta: float
+
+
+class AttributionWindowMapping(BaseModel):
+    family: str
+    calc: str
+    note: str
+
+
+class AttributionBreakdownSeries(BaseModel):
+    baseline_value: float
+    current_value: float
+    delta: float
+
+
+class AttributionFilterBreakdown(BaseModel):
+    base_metric: str
+    base: AttributionBreakdownSeries
+    filtered: AttributionBreakdownSeries
+    complement: AttributionBreakdownSeries
+
+
+class AttributionComparisonMetadata(BaseModel):
+    baseline: AttributionWindow
+    current: AttributionWindow
+    baseline_days: int
+    current_days: int
+    equal_length_windows: bool
+    time_dimension: Optional[str] = None
+    queries_executed: int
+    params: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AttributionWarning(BaseModel):
+    code: str
+    message: str
+    dimension: Optional[str] = None
+
+
+class AttributionResult(BaseModel):
+    """Unified attribution result returned by native and generic implementations."""
+
+    metric: str
+    implementation: Literal["dosi", "generic"]
+    strategy: AttributionStrategy
+    unsupported_reason: Optional[AttributionUnsupportedInfo] = None
+    total_change: Optional[AttributionTotalChange] = None
+    factor_totals: Optional[AttributionFactorTotals] = None
+    dimension_ranking: List[AttributionDimensionScore] = Field(default_factory=list)
+    selected_dimensions: List[str] = Field(default_factory=list)
+    top_dimension_values: List[AttributionValueContribution] = Field(
+        default_factory=list
+    )
+    per_dimension: Dict[str, AttributionDimensionDetail] = Field(default_factory=dict)
+    member_breakdown: Optional[List[AttributionMemberDelta]] = None
+    factors: Optional[List[AttributionFactorEffect]] = None
+    affine_constant: Optional[float] = None
+    window_mapping: Optional[AttributionWindowMapping] = None
+    filter_breakdown: Optional[AttributionFilterBreakdown] = None
+    comparison_metadata: AttributionComparisonMetadata
+    warnings: List[AttributionWarning] = Field(default_factory=list)
+
+
 class ValidationIssue(BaseModel):
     """A single validation issue."""
 
