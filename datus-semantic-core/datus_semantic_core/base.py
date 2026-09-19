@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Optional
 
 from .authoring import AuthoringNotSupportedError, MetricMutationResult, MetricSource
 from .models import (
+    AttributionRequest,
+    AttributionResult,
     DimensionInfo,
     MetricDefinition,
     QueryResult,
@@ -101,6 +103,13 @@ class BaseSemanticAdapter(ABC):
     ) -> QueryResult:
         """Execute a metric query or explain the execution plan."""
         raise NotImplementedError()
+
+    async def attribute(
+        self,
+        request: AttributionRequest,
+    ) -> Optional[AttributionResult]:
+        """Explain a metric change, or return ``None`` when unsupported natively."""
+        return None
 
     @abstractmethod
     async def validate_semantic(

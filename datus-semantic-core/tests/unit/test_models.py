@@ -8,6 +8,9 @@ from pydantic import ValidationError
 
 from datus_semantic_core.models import (
     AnomalyContext,
+    AttributionRequest,
+    AttributionResult,
+    AttributionWindow,
     DimensionInfo,
     MetricDefinition,
     QueryResult,
@@ -15,6 +18,53 @@ from datus_semantic_core.models import (
     ValidationIssue,
     ValidationResult,
 )
+
+
+def test_attribution_result_roundtrip_uses_new_contract_only():
+    result = AttributionResult.model_validate(
+        {
+            "metric": "revenue",
+            "implementation": "dosi",
+            "strategy": "term_wise",
+            "total_change": {
+                "baseline_value": 100,
+                "current_value": 150,
+                "delta": 50,
+                "pct_change": 50,
+            },
+            "dimension_ranking": [],
+            "selected_dimensions": [],
+            "top_dimension_values": [],
+            "per_dimension": {},
+            "comparison_metadata": {
+                "baseline": {"start": "2026-01-01", "end": "2026-01-08"},
+                "current": {"start": "2026-01-08", "end": "2026-01-15"},
+                "baseline_days": 7,
+                "current_days": 7,
+                "equal_length_windows": True,
+                "queries_executed": 1,
+            },
+            "warnings": [],
+        }
+    )
+
+    payload = result.model_dump(exclude_none=True)
+    assert payload["metric"] == "revenue"
+    assert payload["total_change"]["delta"] == 50
+    assert "metric_name" not in payload
+    assert "total_delta" not in payload["comparison_metadata"]
+
+
+def test_attribution_request_keeps_path_outside_native_contract():
+    request = AttributionRequest(
+        metric="revenue",
+        dimensions=["region"],
+        baseline=AttributionWindow(start="2026-01-01", end="2026-01-08"),
+        current=AttributionWindow(start="2026-01-08", end="2026-01-15"),
+        path=["Finance"],
+    )
+
+    assert request.path == ["Finance"]
 
 
 class TestDimensionInfo:

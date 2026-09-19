@@ -2,7 +2,7 @@
 
 Semantic layer adapters for the Datus platform.
 
-This repository contains adapters that integrate various semantic layer backends with Datus, providing a unified interface for metric discovery, querying, and validation.
+This repository contains adapters that integrate various semantic layer backends with Datus, providing a unified interface for metric discovery, querying, attribution, and validation.
 
 ## Available Adapters
 
@@ -20,6 +20,7 @@ All adapters implement the `BaseSemanticAdapter` interface from
 - Metric listing and discovery
 - Dimension querying
 - Metric query execution
+- Optional native metric attribution (`attribute` returns `None` when unsupported)
 - Configuration validation
 
 ## Installation
