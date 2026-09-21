@@ -44,13 +44,38 @@ def _adapter(model_path: str, seeded_db: str | None = None) -> DosiAdapter:
 
 
 async def test_list_metrics_and_dimensions(model_path):
+    import dosi_engine
+
     adapter = _adapter(model_path)
     names = {m.name for m in await adapter.list_metrics()}
     assert {"revenue", "order_count", "unique_customers"} <= names
 
-    dims = {d.name: d for d in await adapter.get_dimensions("revenue")}
+    dimensions = await adapter.get_dimensions("revenue")
+    native_dimensions = dosi_engine.Engine(model_path=model_path).dimensions("revenue")
+    assert [
+        (dimension.name, dimension.recommended, dimension.recommendation_source)
+        for dimension in dimensions
+    ] == [
+        (row["name"], row["is_dimension"], row["source"]) for row in native_dimensions
+    ]
+
+    dims = {dimension.name: dimension for dimension in dimensions}
+    assert dims["metric_time"].is_primary_time is True
     assert "orders.order_date" in dims and dims["orders.order_date"].type == "time"
     assert "customers.region" in dims
+    assert dims["orders.amount"].recommended is False
+    assert dims["orders.amount"].recommendation_source == "inferred:measure"
+
+
+async def test_non_recommended_dimension_remains_queryable(model_path):
+    adapter = _adapter(model_path)
+
+    result = await adapter.query_metrics(
+        metrics=["revenue"], dimensions=["orders.amount"], dry_run=True
+    )
+
+    assert "GROUP BY" in result.data[0]["sql"]
+    assert "orders.amount" in result.data[0]["sql"]
 
 
 async def test_dry_run_emits_sql(model_path):
