@@ -251,6 +251,7 @@ class DosiAdapter(BaseSemanticAdapter):
             dataset_rows,
             [row for row in rows if row.get("name") != "metric_time"],
         )
+        has_metric_time = any(row.get("name") == "metric_time" for row in rows)
 
         def _time_grains() -> Dict[str, List[str]]:
             supported: Dict[str, List[str]] = {}
@@ -281,7 +282,11 @@ class DosiAdapter(BaseSemanticAdapter):
                         metric_time_error = error
                 supported[name] = grains
 
-            if requires_time_axis and not supported.get("metric_time"):
+            has_supported_axis = bool(
+                supported.get("metric_time")
+                or (not has_metric_time and supported.get(physical_time_dimension))
+            )
+            if requires_time_axis and not has_supported_axis:
                 if metric_time_error is not None:
                     raise_mapped(
                         metric_time_error,
@@ -303,7 +308,6 @@ class DosiAdapter(BaseSemanticAdapter):
             return supported
 
         grains_by_name = await asyncio.to_thread(_time_grains)
-        has_metric_time = any(row.get("name") == "metric_time" for row in rows)
         return [
             DimensionInfo(
                 name=str(row.get("name") or ""),

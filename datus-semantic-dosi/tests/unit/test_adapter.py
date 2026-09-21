@@ -525,6 +525,36 @@ async def test_window_dimension_discovery_includes_required_time_axis(make_adapt
     ]
 
 
+async def test_window_dimension_discovery_falls_back_to_physical_time_axis(
+    make_adapter, monkeypatch
+):
+    original_dimensions = FakeEngine.dimensions
+
+    def dimensions(self, metric=None):
+        return [
+            row
+            for row in original_dimensions(self, metric)
+            if row["name"] != "metric_time"
+        ]
+
+    monkeypatch.setattr(FakeEngine, "dimensions", dimensions)
+
+    result = {
+        dimension.name: dimension
+        for dimension in await make_adapter().get_dimensions("running_revenue")
+    }
+
+    assert "metric_time" not in result
+    assert result["orders.order_date"].is_primary_time is True
+    assert result["orders.order_date"].time_granularities == [
+        "day",
+        "week",
+        "month",
+        "quarter",
+        "year",
+    ]
+
+
 async def test_window_dimension_discovery_probes_each_grain(make_adapter, monkeypatch):
     original_compile = FakeEngine.compile
 
