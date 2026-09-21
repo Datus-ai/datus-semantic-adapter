@@ -319,3 +319,69 @@ def test_validation_payload_maps_yaml_serialization_error():
 
     with pytest.raises(DosiAuthoringError, match="cannot serialize OSI document"):
         dosi_validation_payload({"semantic_model": object()})
+
+
+def test_document_validation_only_exposes_blocking_errors(monkeypatch, fake_binding):
+    from datus_semantic_dosi.authoring import (
+        DosiAuthoringError,
+        validate_dosi_document,
+    )
+
+    monkeypatch.setattr(
+        fake_binding,
+        "validate",
+        lambda _text: {
+            "valid": False,
+            "issues": [
+                {
+                    "severity": "warning",
+                    "code": "relationship_target_not_unique",
+                    "message": "relationship may fan out",
+                },
+                {
+                    "severity": "error",
+                    "code": "unknown_dataset",
+                    "message": "dataset does not exist",
+                },
+            ],
+            "compile_errors": [
+                {
+                    "code": "derive_expression_mismatch",
+                    "message": "derive fallback differs",
+                    "hint": "regenerate the fallback",
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(DosiAuthoringError) as exc_info:
+        validate_dosi_document({"version": "0.2.0.dev0"})
+
+    message = str(exc_info.value)
+    assert "unknown_dataset: dataset does not exist" in message
+    assert "derive_expression_mismatch: derive fallback differs" in message
+    assert "regenerate the fallback" in message
+    assert "relationship_target_not_unique" not in message
+    assert "relationship may fan out" not in message
+
+
+def test_document_validation_accepts_warning_only_payload(monkeypatch, fake_binding):
+    from datus_semantic_dosi.authoring import validate_dosi_document
+
+    monkeypatch.setattr(
+        fake_binding,
+        "validate",
+        lambda _text: {
+            "valid": True,
+            "issues": [
+                {
+                    "severity": "warning",
+                    "code": "relationship_target_not_unique",
+                    "message": "relationship may fan out",
+                }
+            ],
+            "compile_errors": [],
+        },
+    )
+
+    validate_dosi_document({"version": "0.2.0.dev0"})

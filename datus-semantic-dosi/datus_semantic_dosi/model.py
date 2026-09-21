@@ -158,11 +158,11 @@ def queryable_grains(native_grain: Any) -> list[str]:
 
 
 def validation_messages(payload: dict[str, Any]) -> list[str]:
-    """Flatten native validation issues into stable human-readable messages."""
+    """Flatten blocking validation issues into stable human-readable messages."""
 
     messages: list[str] = []
     for issue in payload.get("issues") or []:
-        if isinstance(issue, dict):
+        if isinstance(issue, dict) and issue.get("severity") == "error":
             messages.append(f"{issue.get('code', 'issue')}: {issue.get('message', '')}")
     for issue in payload.get("compile_errors") or []:
         if isinstance(issue, dict):
