@@ -189,11 +189,9 @@ class DosiAdapter(BaseSemanticAdapter):
                         type=(
                             "window" if isinstance(window, dict) else row.get("kind")
                         ),
-                        # The native catalog currently exposes model-wide dimensions,
-                        # not the dimensions queryable for this specific metric. Do
-                        # not publish that broader set as metric-level capability;
-                        # callers use get_dimensions(), which verifies each candidate
-                        # through the native planner.
+                        # Metric-level dimension discovery belongs to
+                        # get_dimensions(), which delegates candidate selection and
+                        # recommendation to Dosi's metric-scoped catalog.
                         dimensions=[],
                         measures=list(row.get("measures") or []),
                         unit=(
@@ -219,14 +217,24 @@ class DosiAdapter(BaseSemanticAdapter):
     ) -> List[DimensionInfo]:
         handle = await asyncio.to_thread(self._handle_for_metric, metric_name)
         engine = await asyncio.to_thread(handle.get)
-        metric_rows = await asyncio.to_thread(engine.metrics)
-        # Expose Dosi's canonical discovery names unchanged. Query inputs are
-        # deliberately not constrained to this list: Dosi itself accepts a
-        # globally unique bare field name and reports structured ambiguity.
-        metric_row = next(row for row in metric_rows if row.get("name") == metric_name)
-        dataset_rows = await asyncio.to_thread(engine.datasets)
         binding = await asyncio.to_thread(load_binding)
-        rows = await asyncio.to_thread(engine.dimensions)
+        # Dosi owns the metric-scoped candidate set, D-DIM recommendation,
+        # conformance filtering, and ordering. Keep those semantics in one
+        # place; the adapter only enriches native time rows with the grains that
+        # compile for this metric and target.
+        try:
+            rows = await asyncio.to_thread(engine.dimensions, metric_name)
+        except Exception as exc:  # noqa: BLE001 - mapped to typed errors below
+            raise_mapped(
+                exc,
+                binding,
+                requested_metrics=[metric_name],
+                requested_dimensions=[],
+            )
+            raise  # unreachable; raise_mapped always raises
+        metric_rows = await asyncio.to_thread(engine.metrics)
+        dataset_rows = await asyncio.to_thread(engine.datasets)
+        metric_row = next(row for row in metric_rows if row.get("name") == metric_name)
         connection = handle.profile_name
         dialect = self._dry_run_dialect(binding, connection)
 
@@ -238,141 +246,89 @@ class DosiAdapter(BaseSemanticAdapter):
             dialect=dialect,
             connection=connection,
         )
-        primary_time_dimension = self._effective_time_dimension(
-            metric_row, dataset_rows, rows
+        physical_time_dimension = self._effective_time_dimension(
+            metric_row,
+            dataset_rows,
+            [row for row in rows if row.get("name") != "metric_time"],
         )
-        # D-DERIVE compose: the planner validates every group-by against this
-        # exact compile-time set, so a non-member dimension can only fail with
-        # unconformed_dimension — its probe is skipped as doomed. Members are
-        # still probed (conformed is not a full-compile guarantee). An empty
-        # list is meaningful (nothing conformed); only absence (pre-derive
-        # engines, filter-family and plain metrics) disables the filter.
-        conformed = metric_row.get("conformed_dimensions")
-        conformed_names = set(conformed) if isinstance(conformed, list) else None
+        has_metric_time = any(row.get("name") == "metric_time" for row in rows)
 
-        def _queryable_rows() -> List[tuple[Dict[str, Any], List[str]]]:
-            queryable: List[tuple[Dict[str, Any], List[str]]] = []
-            axis_grains: List[str] = []
-            axis_error: Any = None
-            if requires_time_axis:
-                for grain in queryable_grains(
-                    next(
-                        (
-                            row.get("time_granularity")
-                            for row in rows
-                            if row.get("name") == primary_time_dimension
-                        ),
-                        None,
-                    )
-                ):
+        def _time_grains() -> Dict[str, List[str]]:
+            supported: Dict[str, List[str]] = {}
+            metric_time_error: Any = None
+            for row in rows:
+                name = str(row.get("name") or "")
+                if not name or not row.get("is_time"):
+                    continue
+                grains: List[str] = []
+                for grain in queryable_grains(row.get("time_granularity")):
+                    group_by = [{"field": name, "grain": grain}]
+                    if requires_time_axis and name not in {
+                        "metric_time",
+                        physical_time_dimension,
+                    }:
+                        group_by.append({"field": "metric_time", "grain": grain})
                     error = self._probe_compile(
                         engine,
                         binding,
                         metric_name,
-                        [{"field": "metric_time", "grain": grain}],
+                        group_by,
                         dialect=dialect,
                         connection=connection,
                     )
                     if error is None:
-                        axis_grains.append(grain)
-                    elif axis_error is None:
-                        axis_error = error
-                if not axis_grains:
-                    if axis_error is not None:
-                        raise_mapped(
-                            axis_error,
-                            binding,
-                            requested_metrics=[metric_name],
-                            requested_dimensions=["metric_time"],
-                        )
-                    raise SemanticValidationException(
-                        SemanticValidationError(
-                            code="no_primary_time_dimension",
-                            metrics=[metric_name],
-                            required_dimensions=["metric_time"],
-                            message=(
-                                f"metric {metric_name!r} requires a time axis, but "
-                                "no supported metric_time grain was available"
-                            ),
-                        )
-                    )
+                        grains.append(grain)
+                    elif name == "metric_time" and metric_time_error is None:
+                        metric_time_error = error
+                supported[name] = grains
 
-            for row in rows:
-                name = str(row.get("name") or "")
-                if not name:
-                    continue
-                # Skip dimensions outside the conformed set (doomed probes,
-                # see above) — except the primary time axis: its grains were
-                # just planner-verified through the reserved metric_time key,
-                # which the conformed gate checks independently of this row's
-                # dataset.field spelling. Dropping the row would un-advertise
-                # an axis the planner accepted. Unreachable under DATUS 1.4
-                # (derive and window are mutually exclusive) but window.base
-                # is a planned D-DERIVE milestone.
-                if (
-                    conformed_names is not None
-                    and name not in conformed_names
-                    and not (requires_time_axis and name == primary_time_dimension)
-                ):
-                    continue
-                if row.get("is_time"):
-                    if requires_time_axis and name == primary_time_dimension:
-                        grains = list(axis_grains)
-                    else:
-                        grains = []
-                        for grain in queryable_grains(row.get("time_granularity")):
-                            group_by = [{"field": name, "grain": grain}]
-                            if requires_time_axis:
-                                group_by.append(
-                                    {
-                                        "field": "metric_time",
-                                        "grain": axis_grains[0],
-                                    }
-                                )
-                            error = self._probe_compile(
-                                engine,
-                                binding,
-                                metric_name,
-                                group_by,
-                                dialect=dialect,
-                                connection=connection,
-                            )
-                            if error is None:
-                                grains.append(grain)
-                    if grains:
-                        queryable.append((row, grains))
-                    continue
-
-                group_by = [{"field": name}]
-                if requires_time_axis:
-                    group_by.insert(
-                        0,
-                        {"field": "metric_time", "grain": axis_grains[0]},
+            has_supported_axis = bool(
+                supported.get("metric_time")
+                or (not has_metric_time and supported.get(physical_time_dimension))
+            )
+            if requires_time_axis and not has_supported_axis:
+                if metric_time_error is not None:
+                    raise_mapped(
+                        metric_time_error,
+                        binding,
+                        requested_metrics=[metric_name],
+                        requested_dimensions=["metric_time"],
                     )
-                error = self._probe_compile(
-                    engine,
-                    binding,
-                    metric_name,
-                    group_by,
-                    dialect=dialect,
-                    connection=connection,
+                raise SemanticValidationException(
+                    SemanticValidationError(
+                        code="no_primary_time_dimension",
+                        metrics=[metric_name],
+                        required_dimensions=["metric_time"],
+                        message=(
+                            f"metric {metric_name!r} requires a time axis, but "
+                            "no supported metric_time grain was available"
+                        ),
+                    )
                 )
-                if error is None:
-                    queryable.append((row, []))
-            return queryable
+            return supported
 
-        queryable_rows = await asyncio.to_thread(_queryable_rows)
+        grains_by_name = await asyncio.to_thread(_time_grains)
         return [
             DimensionInfo(
                 name=str(row.get("name") or ""),
                 description=row.get("description") or None,
                 type="time" if row.get("is_time") else None,
                 is_primary_time=bool(
-                    primary_time_dimension and row.get("name") == primary_time_dimension
+                    row.get("name") == "metric_time"
+                    if has_metric_time
+                    else row.get("name") == physical_time_dimension
                 ),
-                time_granularities=grains if row.get("is_time") else [],
+                time_granularities=(
+                    grains_by_name.get(str(row.get("name") or ""), [])
+                    if row.get("is_time")
+                    else []
+                ),
+                recommended=row.get("is_dimension"),
+                recommendation_source=(
+                    str(row.get("source")) if row.get("source") is not None else None
+                ),
             )
-            for row, grains in queryable_rows
+            for row in rows
             if row.get("name")
         ]
 

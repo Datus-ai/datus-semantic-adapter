@@ -104,11 +104,11 @@ through this adapter.
   structured `unsupported` result.
 - **`validate_semantic`** delegates to the engine's own validator (structure,
   references, metric compilation) — no separate ossie integration.
-- **`get_dimensions(metric)`** checks model dimensions against that metric with
-  native compile-only planning and returns only queryable candidates and
-  grains. Window discovery includes the planner-required time axis while
-  testing business dimensions. `list_metrics` leaves metric-level dimensions
-  empty until the engine exposes this catalog relation directly.
+- **`get_dimensions(metric)`** projects the engine's metric-scoped dimension
+  catalog unchanged: Dosi owns reachability, conformance, recommendation, and
+  ordering. Every returned row is queryable; `recommended=false` is a discovery
+  hint, not a permission check. The adapter uses compile-only planning only to
+  add the supported grains for time dimensions.
 - **Ambiguous / unknown names** surface as `SemanticValidationException` whose
   `payload` carries the engine's `candidates`; single-candidate fixes are
   turned into a concrete `suggested_retry`.

@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
-from _fakes import METRIC_ROWS, FakeEngine, QueryError
+from _fakes import DIMENSION_ROWS, METRIC_ROWS, FakeEngine, QueryError
 from datus_semantic_core.exceptions import SemanticCoreException
 from datus_semantic_core.models import AttributionRequest, AttributionWindow
 from datus_semantic_dosi.errors import SemanticValidationException
@@ -60,7 +60,7 @@ def _install_file_catalog(monkeypatch, metrics_by_stem: dict[str, list[str]]) ->
             }
         ]
 
-    def dimensions(engine):
+    def dimensions(engine, metric=None):
         stem = Path(engine.model_path).stem
         return [
             {"name": f"{stem}.status", "is_time": False},
@@ -352,12 +352,25 @@ async def test_list_metrics_exposes_derive_discriminators(make_adapter, monkeypa
         assert key not in metrics["revenue"].metadata
 
 
-async def test_get_dimensions_returns_queryable_and_flags_time(make_adapter):
+async def test_get_dimensions_uses_native_metric_catalog(make_adapter):
     adapter = make_adapter()
-    dims = {d.name: d for d in await adapter.get_dimensions("revenue")}
-    assert set(dims) == {"orders.status", "orders.order_date", "customers.region"}
+    dimensions = await adapter.get_dimensions("revenue")
+    assert [dimension.name for dimension in dimensions] == [
+        "metric_time",
+        "orders.order_date",
+        "orders.status",
+        "customers.region",
+        "orders.amount",
+        "orders.order_id",
+    ]
+    dims = {d.name: d for d in dimensions}
+    assert FakeEngine.instances[-1].dimension_calls[-1] == "revenue"
+    assert dims["metric_time"].type == "time"
+    assert dims["metric_time"].is_primary_time is True
+    assert dims["metric_time"].recommended is True
+    assert dims["metric_time"].recommendation_source == "inferred:time"
     assert dims["orders.order_date"].type == "time"
-    assert dims["orders.order_date"].is_primary_time is True
+    assert dims["orders.order_date"].is_primary_time is False
     assert dims["orders.order_date"].time_granularities == [
         "day",
         "week",
@@ -367,6 +380,19 @@ async def test_get_dimensions_returns_queryable_and_flags_time(make_adapter):
     ]
     assert dims["orders.status"].type is None
     assert dims["orders.status"].is_primary_time is False
+    assert dims["orders.amount"].recommended is False
+    assert dims["orders.amount"].recommendation_source == "inferred:measure"
+    assert dims["orders.order_id"].recommended is False
+    assert dims["orders.order_id"].recommendation_source == "inferred:primary_key"
+
+    # Native Dosi owns non-time membership and recommendation. Runtime probes
+    # only enrich time rows with supported grains.
+    probed = {
+        item["field"]
+        for call in FakeEngine.instances[-1].compile_calls
+        for item in call["query"].get("group_by") or []
+    }
+    assert probed <= {"metric_time", "orders.order_date"}
 
 
 async def test_get_dimensions_keeps_grains_for_other_time_dimensions(
@@ -374,11 +400,13 @@ async def test_get_dimensions_keeps_grains_for_other_time_dimensions(
 ):
     original_dimensions = FakeEngine.dimensions
 
-    def dimensions(self):
-        return original_dimensions(self) + [
+    def dimensions(self, metric=None):
+        return original_dimensions(self, metric) + [
             {
                 "name": "customers.signup_date",
                 "is_time": True,
+                "is_dimension": True,
+                "source": "inferred:time",
                 "time_granularity": "month",
                 "description": "Signup month",
             }
@@ -400,8 +428,8 @@ async def test_unknown_native_grain_is_left_to_planner_probing(
 ):
     original_dimensions = FakeEngine.dimensions
 
-    def dimensions(self):
-        rows = original_dimensions(self)
+    def dimensions(self, metric=None):
+        rows = original_dimensions(self, metric)
         for row in rows:
             if row["name"] == "orders.order_date":
                 row["time_granularity"] = "hour"
@@ -432,128 +460,51 @@ async def test_missing_axis_grains_returns_structured_error(make_adapter, monkey
     assert exc.value.payload.metrics == ["running_revenue"]
 
 
-async def test_get_dimensions_returns_only_native_queryable_dimensions(
+async def test_get_dimensions_trusts_native_membership_without_non_time_probes(
     make_adapter, monkeypatch
 ):
-    original_compile = FakeEngine.compile
-
-    def compile_query(self, query, dialect=None, connection=None, pretty=False):
-        if query["group_by"] == [{"field": "customers.region"}]:
-            raise QueryError(
-                "multiple relationship paths",
-                code="ambiguous_join_path",
-            )
-        return original_compile(
-            self,
-            query,
-            dialect=dialect,
-            connection=connection,
-            pretty=pretty,
-        )
-
-    monkeypatch.setattr(FakeEngine, "compile", compile_query)
-
-    dimensions = await make_adapter().get_dimensions("revenue")
-
-    assert [dimension.name for dimension in dimensions] == [
-        "orders.status",
-        "orders.order_date",
+    native_rows = [
+        {
+            "name": "orders.status",
+            "is_time": False,
+            "is_dimension": True,
+            "source": "declared",
+        },
+        {
+            "name": "orders.amount",
+            "is_time": False,
+            "is_dimension": False,
+            "source": "inferred:measure",
+        },
     ]
 
+    def dimensions(self, metric=None):
+        self.dimension_calls.append(metric)
+        return [dict(row) for row in native_rows]
 
-def _rows_with_conformed(conformed) -> list[dict]:
-    rows = [dict(row) for row in METRIC_ROWS]
-    for row in rows:
-        if row["name"] == "revenue":
-            row["derive_family"] = "compose"
-            row["conformed_dimensions"] = conformed
-    return rows
+    monkeypatch.setattr(FakeEngine, "dimensions", dimensions)
 
+    result = await make_adapter().get_dimensions("revenue")
 
-async def test_get_dimensions_skips_probes_outside_conformed_set(
-    make_adapter, monkeypatch
-):
-    rows = _rows_with_conformed(["orders.status"])
-    monkeypatch.setattr(FakeEngine, "metrics", lambda self: [dict(r) for r in rows])
-
-    dimensions = await make_adapter().get_dimensions("revenue")
-
-    assert [dimension.name for dimension in dimensions] == ["orders.status"]
-    engine = FakeEngine.instances[-1]
-    probed = {
-        item["field"]
-        for call in engine.compile_calls
-        for item in call["query"].get("group_by") or []
-    }
-    # The doomed probes never ran; the conformed member was still verified.
-    assert "customers.region" not in probed
-    assert "orders.order_date" not in probed
-    assert "orders.status" in probed
-
-
-async def test_get_dimensions_still_probes_conformed_members(make_adapter, monkeypatch):
-    rows = _rows_with_conformed(["orders.status", "customers.region"])
-    monkeypatch.setattr(FakeEngine, "metrics", lambda self: [dict(r) for r in rows])
-    original_compile = FakeEngine.compile
-
-    def compile_query(self, query, dialect=None, connection=None, pretty=False):
-        if query["group_by"] == [{"field": "customers.region"}]:
-            raise QueryError("multiple relationship paths", code="ambiguous_join_path")
-        return original_compile(
-            self, query, dialect=dialect, connection=connection, pretty=pretty
-        )
-
-    monkeypatch.setattr(FakeEngine, "compile", compile_query)
-
-    dimensions = await make_adapter().get_dimensions("revenue")
-
-    assert [dimension.name for dimension in dimensions] == ["orders.status"]
-
-
-async def test_get_dimensions_empty_conformed_set_returns_nothing(
-    make_adapter, monkeypatch
-):
-    rows = _rows_with_conformed([])
-    monkeypatch.setattr(FakeEngine, "metrics", lambda self: [dict(r) for r in rows])
-
-    dimensions = await make_adapter().get_dimensions("revenue")
-
-    assert dimensions == []
-    engine = FakeEngine.instances[-1]
-    dim_probes = [
-        call
-        for call in engine.compile_calls
-        if any(
-            item.get("field") != "metric_time"
-            for item in call["query"].get("group_by") or []
-        )
+    assert [(d.name, d.recommended, d.recommendation_source) for d in result] == [
+        ("orders.status", True, "declared"),
+        ("orders.amount", False, "inferred:measure"),
     ]
-    assert dim_probes == []
+    engine = FakeEngine.instances[-1]
+    assert engine.dimension_calls[-1] == "revenue"
+    assert [call["query"].get("group_by") for call in engine.compile_calls] == [[]]
 
 
-async def test_get_dimensions_conformed_filter_exempts_primary_time_axis(
+async def test_get_dimensions_preserves_native_empty_conformed_set(
     make_adapter, monkeypatch
 ):
-    # requires_time_axis=True + a conformed set omitting the primary time
-    # dimension's spelling: the axis row must survive the filter, because its
-    # grains were planner-verified through the reserved metric_time key.
-    # Unreachable under DATUS 1.4 (derive and window never co-occur); guards
-    # the planned window.base milestone.
-    rows = [dict(row) for row in METRIC_ROWS]
-    for row in rows:
-        if row["name"] == "running_revenue":
-            row["derive_family"] = "compose"
-            row["conformed_dimensions"] = ["orders.status"]
-    monkeypatch.setattr(FakeEngine, "metrics", lambda self: [dict(r) for r in rows])
+    def dimensions(self, metric=None):
+        self.dimension_calls.append(metric)
+        return [] if metric == "revenue" else [dict(row) for row in DIMENSION_ROWS]
 
-    dimensions = {
-        dimension.name: dimension
-        for dimension in await make_adapter().get_dimensions("running_revenue")
-    }
+    monkeypatch.setattr(FakeEngine, "dimensions", dimensions)
 
-    assert set(dimensions) == {"orders.status", "orders.order_date"}
-    assert dimensions["orders.order_date"].is_primary_time is True
-    assert dimensions["orders.order_date"].time_granularities
+    assert await make_adapter().get_dimensions("revenue") == []
 
 
 async def test_window_dimension_discovery_includes_required_time_axis(make_adapter):
@@ -564,7 +515,38 @@ async def test_window_dimension_discovery_includes_required_time_axis(make_adapt
 
     assert "orders.status" in dimensions
     assert "customers.region" in dimensions
-    assert dimensions["orders.order_date"].time_granularities == [
+    assert dimensions["metric_time"].is_primary_time is True
+    assert dimensions["metric_time"].time_granularities == [
+        "day",
+        "week",
+        "month",
+        "quarter",
+        "year",
+    ]
+
+
+async def test_window_dimension_discovery_falls_back_to_physical_time_axis(
+    make_adapter, monkeypatch
+):
+    original_dimensions = FakeEngine.dimensions
+
+    def dimensions(self, metric=None):
+        return [
+            row
+            for row in original_dimensions(self, metric)
+            if row["name"] != "metric_time"
+        ]
+
+    monkeypatch.setattr(FakeEngine, "dimensions", dimensions)
+
+    result = {
+        dimension.name: dimension
+        for dimension in await make_adapter().get_dimensions("running_revenue")
+    }
+
+    assert "metric_time" not in result
+    assert result["orders.order_date"].is_primary_time is True
+    assert result["orders.order_date"].time_granularities == [
         "day",
         "week",
         "month",
@@ -605,7 +587,7 @@ async def test_window_dimension_discovery_probes_each_grain(make_adapter, monkey
         for dimension in await make_adapter().get_dimensions("running_revenue")
     }
 
-    assert dimensions["orders.order_date"].time_granularities == [
+    assert dimensions["metric_time"].time_granularities == [
         "day",
         "week",
         "month",

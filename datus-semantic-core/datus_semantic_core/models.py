@@ -30,6 +30,17 @@ class DimensionInfo(BaseModel):
             "ordered from finest to coarsest"
         ),
     )
+    recommended: Optional[bool] = Field(
+        None,
+        description=(
+            "Whether this queryable dimension is recommended for analytical "
+            "grouping; false does not prevent an explicit group-by"
+        ),
+    )
+    recommendation_source: Optional[str] = Field(
+        None,
+        description="How the grouping recommendation was declared or inferred",
+    )
 
 
 class SemanticModelInfo(BaseModel):

@@ -80,6 +80,10 @@ class BaseSemanticAdapter(ABC):
     ) -> List[DimensionInfo]:
         """Get queryable dimensions for a specific metric.
 
+        ``recommended`` is a discovery hint, not a query permission: dimensions
+        marked false remain valid explicit group-bys. Adapters that can explain
+        that decision populate ``recommendation_source``.
+
         The canonical time dimension, when present, carries its supported
         ``time_granularities`` in finest-to-coarsest order.
         """

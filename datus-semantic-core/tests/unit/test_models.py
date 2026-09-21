@@ -98,6 +98,15 @@ class TestDimensionInfo:
         assert dim.is_primary_time is True
         assert dim.time_granularities == ["month", "quarter", "year"]
 
+    def test_with_grouping_recommendation(self):
+        dim = DimensionInfo(
+            name="orders.amount",
+            recommended=False,
+            recommendation_source="inferred:measure",
+        )
+        assert dim.recommended is False
+        assert dim.recommendation_source == "inferred:measure"
+
     def test_with_type_categorical(self):
         dim = DimensionInfo(name="segment", type="categorical")
         assert dim.type == "categorical"
@@ -127,6 +136,8 @@ class TestDimensionInfo:
         assert dim.is_primary_key is None
         assert dim.is_primary_time is None
         assert dim.time_granularities == []
+        assert dim.recommended is None
+        assert dim.recommendation_source is None
 
 
 class TestSemanticModelInfo:

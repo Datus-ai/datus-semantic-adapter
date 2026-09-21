@@ -47,14 +47,56 @@ METRIC_ROWS = [
 ]
 
 DIMENSION_ROWS = [
-    {"name": "orders.status", "is_time": False, "description": "Order status"},
+    {
+        "name": "orders.status",
+        "is_time": False,
+        "is_dimension": True,
+        "source": "inferred",
+        "description": "Order status",
+    },
     {
         "name": "orders.order_date",
         "is_time": True,
+        "is_dimension": True,
+        "source": "inferred:time",
         "time_granularity": "day",
         "description": "Order date",
     },
-    {"name": "customers.region", "is_time": False, "description": None},
+    {
+        "name": "customers.region",
+        "is_time": False,
+        "is_dimension": True,
+        "source": "inferred",
+        "description": None,
+    },
+    {
+        "name": "orders.amount",
+        "is_time": False,
+        "is_dimension": False,
+        "source": "inferred:measure",
+        "description": None,
+    },
+    {
+        "name": "orders.order_id",
+        "is_time": False,
+        "is_dimension": False,
+        "source": "inferred:primary_key",
+        "description": None,
+    },
+]
+
+METRIC_DIMENSION_ROWS = [
+    {
+        "name": "metric_time",
+        "is_time": True,
+        "is_dimension": True,
+        "source": "inferred:time",
+        "time_granularity": None,
+        "description": None,
+    },
+    DIMENSION_ROWS[1],
+    DIMENSION_ROWS[0],
+    *DIMENSION_ROWS[2:],
 ]
 
 DATASET_ROWS = [
@@ -224,6 +266,7 @@ class FakeEngine:
         self.connections = connections
         self.pool_size = pool_size
         self.compile_calls: List[Dict[str, Any]] = []
+        self.dimension_calls: List[Optional[str]] = []
         self.execute_calls: List[Dict[str, Any]] = []
         self.attribute_calls: List[Dict[str, Any]] = []
         self.lineage_calls: List[Dict[str, Any]] = []
@@ -236,8 +279,10 @@ class FakeEngine:
     def metrics(self) -> List[Dict[str, Any]]:
         return [dict(r) for r in METRIC_ROWS]
 
-    def dimensions(self) -> List[Dict[str, Any]]:
-        return [dict(r) for r in DIMENSION_ROWS]
+    def dimensions(self, metric: Optional[str] = None) -> List[Dict[str, Any]]:
+        self.dimension_calls.append(metric)
+        rows = METRIC_DIMENSION_ROWS if metric is not None else DIMENSION_ROWS
+        return [dict(r) for r in rows]
 
     def lineage(self, redact_sql: bool = False) -> Dict[str, Any]:
         """Shape-faithful miniature of the dosi lineage graph contract v2."""
