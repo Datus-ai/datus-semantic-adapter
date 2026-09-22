@@ -297,6 +297,7 @@ async def test_list_metrics_exposes_derive_discriminators(make_adapter, monkeypa
             "datasets": ["orders", "refunds"],
             "measures": ["revenue", "total_refunds"],
             "derive_family": "compose",
+            "derive_expr": "revenue - total_refunds",
             "derive_members": [
                 {"metric": "revenue", "coefficient": 1.0},
                 {"metric": "total_refunds", "coefficient": -1.0},
@@ -338,6 +339,10 @@ async def test_list_metrics_exposes_derive_discriminators(make_adapter, monkeypa
     assert metrics["new_revenue"].metadata["derive_base"] == "revenue"
     assert metrics["new_revenue"].metadata["subset_of"] == "revenue"
     assert metrics["net_revenue"].metadata["derive_family"] == "compose"
+    # The authored formula: the only field that says how a composite is
+    # assembled. `derive_members` folds coefficients across inlined levels and
+    # keeps none for a non-linear member, so it cannot answer that.
+    assert metrics["net_revenue"].metadata["derive_expr"] == "revenue - total_refunds"
     assert metrics["falsy_derive_scalar"].metadata["subset_of"] == ""
     # The structural columns stay off the catalog listing.
     for heavy in (
@@ -347,9 +352,12 @@ async def test_list_metrics_exposes_derive_discriminators(make_adapter, monkeypa
         "attribution",
     ):
         assert heavy not in metrics["net_revenue"].metadata
-    # NULL derive columns on a plain metric add no metadata keys.
-    for key in ("derive_family", "derive_base", "subset_of"):
+    # NULL derive columns on a plain metric add no metadata keys. `derive_expr`
+    # is absent for every non-compose metric, plain or derived: a filter states
+    # a predicate and a window a partition rule, neither of which is a formula.
+    for key in ("derive_family", "derive_base", "subset_of", "derive_expr"):
         assert key not in metrics["revenue"].metadata
+    assert "derive_expr" not in metrics["new_revenue"].metadata
 
 
 async def test_get_dimensions_uses_native_metric_catalog(make_adapter):
