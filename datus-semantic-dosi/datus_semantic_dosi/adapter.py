@@ -146,9 +146,14 @@ class DosiAdapter(BaseSemanticAdapter):
                     value = row.get(key)
                     if value:
                         metadata[key] = value
-                # The D-DERIVE columns stop at the three selection-sized
-                # scalars: they let a caller tell a derived metric from its
-                # base without bloating the catalog. The structural columns
+                # The D-DERIVE columns stop at the selection-sized scalars:
+                # they let a caller tell a derived metric from its base, and
+                # `derive_expr` — the authored formula — says how it is
+                # assembled, which is what makes a composite decomposable.
+                # `derive_members` cannot answer that: it folds coefficients
+                # across inlined levels and keeps none for a non-linear
+                # member, so a ratio reads as two bare metric names with
+                # nothing saying they are divided. The structural columns
                 # (derive_members, leaf_measures, conformed_dimensions,
                 # attribution) stay off this listing; get_dimensions consumes
                 # conformed_dimensions natively.
@@ -158,6 +163,7 @@ class DosiAdapter(BaseSemanticAdapter):
                 for key in (
                     "derive_family",
                     "derive_base",
+                    "derive_expr",
                     "subset_of",
                 ):
                     value = row.get(key)

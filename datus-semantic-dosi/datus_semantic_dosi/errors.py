@@ -16,31 +16,23 @@ from typing import Any, Dict, List, Optional
 from datus_semantic_core.exceptions import SemanticCoreException
 from datus_semantic_core.models import SemanticValidationError
 
-# Planner rejections an agent can fix by revising the query.
-_RETRYABLE_QUERY_CODES = {
-    "unknown_metric",
-    "unknown_dimension",
-    "ambiguous_dimension",
-    "grain_on_non_time_dimension",
-    "duplicate_output_name",
-    "unknown_order_key",
-    "unsupported_filter",
-    "aggregate_in_where",
-    "no_join_path",
-    "ambiguous_join_path",
-    "unknown_relationship",
-    "invalid_relationship_path",
-    "fan_out_risk",
-    "time_range_needs_dimension",
-    "no_primary_time_dimension",
-    "metric_time_conflict",
-    "grain_too_fine",
-    "window_reset_too_fine",
-    "dialect_unsupported_window_function",
-    "dimensions_required",
-    "not_implemented",
-    "param_out_of_domain",
-    "empty_query",
+# A ``QueryError`` is by construction a planner rejection: the engine raises
+# it when a *request* cannot be planned, and it carries the names, candidates
+# and retry hint an agent needs to revise it. Model loading, execution and
+# configuration failures are separate exception types. So the default is
+# retryable, and this names the exceptions — a denylist, because an allowlist
+# of codes goes stale silently as the engine grows, and did: seven codes added
+# after it was written (``window_exclude_not_grouped``,
+# ``unconformed_dimension``, ``unknown_metric_param``,
+# ``param_expansion_too_large``, ``unknown_dataset``, ``detail_fanout``,
+# ``metric_in_detail_query``) reached the caller as flat
+# ``SemanticCoreException`` text, dropping the structured payload they exist
+# to carry. Failing the other way — a structured payload for something the
+# agent cannot actually fix — costs it nothing, since either shape arrives as
+# a failed tool call.
+_NON_RETRYABLE_QUERY_CODES = {
+    # The engine failed, not the request. Revising the query cannot help.
+    "internal",
 }
 
 
@@ -142,7 +134,10 @@ def raise_mapped(exc: Any, binding: Any, **request_context: Any) -> None:
     Retryable planner rejections become ``SemanticValidationException``;
     model/execution/config failures become ``SemanticCoreException``.
     """
-    if isinstance(exc, binding.QueryError) and exc.code in _RETRYABLE_QUERY_CODES:
+    if (
+        isinstance(exc, binding.QueryError)
+        and exc.code not in _NON_RETRYABLE_QUERY_CODES
+    ):
         raise SemanticValidationException(
             validation_error_from_query_error(exc, **request_context)
         ) from exc

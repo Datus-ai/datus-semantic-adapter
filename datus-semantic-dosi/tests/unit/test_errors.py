@@ -167,6 +167,41 @@ def test_non_retryable_query_error_is_core_exception(fake_binding):
         raise_mapped(error, fake_binding)
 
 
+@pytest.mark.parametrize(
+    "code",
+    [
+        "window_exclude_not_grouped",
+        "unconformed_dimension",
+        "unknown_metric_param",
+        "param_expansion_too_large",
+        "unknown_dataset",
+        "detail_fanout",
+        "metric_in_detail_query",
+        # A code this adapter has never heard of. The engine keeps adding
+        # them, and an unrecognized rejection still says what to revise.
+        "some_future_planner_rejection",
+    ],
+)
+def test_every_planner_rejection_is_structured(fake_binding, code):
+    error = QueryError(
+        "the query names something it does not group by",
+        code=code,
+        metrics=["area_score"],
+        candidates=["metric_time"],
+        hint='add "kpi_cell.merge_area_name" to group_by',
+    )
+
+    with pytest.raises(SemanticValidationException) as exc:
+        raise_mapped(error, fake_binding, requested_metrics=["area_score"])
+
+    payload = exc.value.payload
+    assert payload.code == code
+    assert payload.metrics == ["area_score"]
+    # The engine's retry text is prose, not a machine-applicable fragment, so
+    # it rides in the message — but it has to arrive.
+    assert "kpi_cell.merge_area_name" in payload.message
+
+
 def test_dialect_window_rejection_is_structured_for_authoring_retry(fake_binding):
     error = QueryError(
         "nth_value is unavailable for this dialect",
