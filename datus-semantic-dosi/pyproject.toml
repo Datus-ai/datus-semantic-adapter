@@ -14,10 +14,10 @@ dependencies = [
     # Runtime engine: a normal dependency so one adapter install is sufficient.
     # Pinned exactly so each published adapter release selects the engine build
     # validated against its runtime API and authoring contract.
-    # 0.1.11 adds the D-DIM and D-CONFORM contracts, metric-aware dimension
-    # metadata, and ontology-backed lineage while preserving the existing
-    # adapter runtime surface.
-    "dosi-engine==0.1.11",
+    # 0.1.12 adds ranked scorecards, result filtering for window queries and
+    # HAVING, and publishes how a metric is assembled (derive_expr) while
+    # preserving the existing adapter runtime surface.
+    "dosi-engine==0.1.12",
     # Retained for the standalone SQLite companion utility.
     "duckdb>=1.0.0",
 ]
