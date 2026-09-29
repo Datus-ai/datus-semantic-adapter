@@ -4,13 +4,29 @@
 
 import os
 import sqlite3
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
 
 import duckdb
 import pytest
 from datus_semantic_core.exceptions import SemanticCoreException
 from datus_semantic_dosi.config import DosiConfig
 from datus_semantic_dosi.engine import EngineHandle
+from datus_semantic_dosi import sqlite_bridge
 from datus_semantic_dosi.sqlite_bridge import duckdb_companion_for_sqlite
+
+
+@pytest.fixture(autouse=True)
+def isolated_companion_cache(monkeypatch):
+    """Keep test companions out of the shared runtime cache and remove them."""
+    with tempfile.TemporaryDirectory(prefix="dosi-sqlite-bridge-test-") as root:
+        monkeypatch.setattr(
+            sqlite_bridge,
+            "tempfile",
+            SimpleNamespace(gettempdir=lambda: root),
+        )
+        yield Path(root)
 
 
 @pytest.fixture
@@ -26,8 +42,9 @@ def sqlite_db(tmp_path):
     return str(path)
 
 
-def test_companion_exposes_sqlite_tables_as_views(sqlite_db):
+def test_companion_exposes_sqlite_tables_as_views(sqlite_db, isolated_companion_cache):
     companion = duckdb_companion_for_sqlite(sqlite_db)
+    assert Path(companion).is_relative_to(isolated_companion_cache)
 
     conn = duckdb.connect(companion, read_only=True)
     try:
